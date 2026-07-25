@@ -1,0 +1,9 @@
+{
+  "core_tag": "vision-core-alpha-rc2",
+  "consensus_tag": "vision-core-consensus-v1.0.3",
+  "source_commit": "6a065df8206b50874029a27ee2b54dffae5e3cdd",
+  "binary_sha256": "41F61A18B48D1FB28604910D27D4AADD8368D35CEF27B4E6EB385ADA0BA02C01",
+  "consensus_version": 3,
+  "p2p_protocol_version": 4,
+  "platform": "windows-x64"
+}

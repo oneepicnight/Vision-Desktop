@@ -1,0 +1,18 @@
+﻿# Security Baseline
+
+Security rules implemented from the first milestone:
+
+- Core API must bind to loopback only. Frozen RC2 cannot currently satisfy this, so real Core launch is blocked by the Desktop supervisor.
+- Desktop frontend cannot execute arbitrary shell commands.
+- Tauri command list is explicit and narrow.
+- Backend commands validate inputs.
+- Core binary hash is verified before launch.
+- Desktop records the exact child PID it owns.
+- Desktop never kills a process solely because it occupies a port.
+- Desktop does not read or modify Core database files.
+- Logs and reports redact public endpoints and secrets by default.
+- Desktop runs as a normal user.
+- No automatic firewall or router changes are performed.
+
+Future changes must preserve these rules unless a formal security review replaces them with a stricter design.
+

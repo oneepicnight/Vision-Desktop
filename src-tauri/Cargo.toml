@@ -1,0 +1,29 @@
+﻿[package]
+name = "vision-desktop"
+version = "0.1.0-alpha.1"
+description = "Vision Desktop node manager"
+edition = "2021"
+
+[lib]
+name = "vision_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+once_cell = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+sysinfo = "0.33"
+time = { version = "0.3", features = ["formatting"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+walkdir = "2"
+opener = "0.7"
+
+[dev-dependencies]
+tempfile = "3"

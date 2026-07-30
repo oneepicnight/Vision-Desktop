@@ -13,6 +13,7 @@ import {
   stopCore,
 } from "../services/coreApi";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
+import { applyDesktopEvent } from "./desktopReducer";
 
 const emptyConfig: NodeConfig = {
   node_name: "Default Node",
@@ -26,6 +27,17 @@ const emptyConfig: NodeConfig = {
   miner_reward_address: "0000000000000000000000000000000000000000000000000000000000000000",
   data_dir: "",
   log_dir: "",
+};
+
+const initialDesktopState: DesktopState = {
+  mockMode: true,
+  snapshot: null,
+  process: null,
+  message: "Ready",
+  loading: false,
+  error: null,
+  wizardOpen: false,
+  config: emptyConfig,
 };
 
 export type DesktopState = {
@@ -59,49 +71,37 @@ export type DesktopStateController = {
 };
 
 export function useDesktopState(): DesktopStateController {
-  const [mockMode, setMockMode] = React.useState(true);
-  const [snapshot, setSnapshot] = React.useState<DashboardSnapshot | null>(null);
-  const [process, setProcess] = React.useState<ProcessState | null>(null);
-  const [message, setMessage] = React.useState("Ready");
-  const [loading, setLoading] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [wizardOpen, setWizardOpen] = React.useState(false);
-  const [config, setConfig] = React.useState<NodeConfig>(emptyConfig);
+  const [state, dispatch] = React.useReducer(applyDesktopEvent, initialDesktopState);
 
   const refresh = React.useCallback(async () => {
     try {
-      setLoading(true);
-      setError(null);
-      const data = mockMode ? await getMockDashboardSnapshot() : await getDashboardSnapshot();
-      setSnapshot(data);
-      if (!mockMode) setProcess(await getCoreProcessState());
-      setMessage(mockMode ? "Showing development mock data" : "Dashboard refreshed");
+      dispatch({ type: "DashboardRefreshStarted" });
+      const snapshot = state.mockMode ? await getMockDashboardSnapshot() : await getDashboardSnapshot();
+      dispatch({
+        type: "DashboardSnapshotUpdated",
+        snapshot,
+        message: state.mockMode ? "Showing development mock data" : "Dashboard refreshed",
+      });
+      if (!state.mockMode) {
+        dispatch({ type: "CoreProcessUpdated", process: await getCoreProcessState() });
+      }
+      dispatch({ type: "DesktopUpdateSettled" });
     } catch (err) {
-      const errorMessage = String(err);
-      setError(errorMessage);
-      setMessage(errorMessage);
-    } finally {
-      setLoading(false);
+      dispatch({ type: "DesktopActionFailed", message: String(err) });
     }
-  }, [mockMode]);
+  }, [state.mockMode]);
 
   usePollingEffect(refresh, 5000);
 
   const runAction = React.useCallback(
     async (name: string, fn: () => Promise<unknown>) => {
       try {
-        setLoading(true);
-        setError(null);
-        setMessage(`${name}...`);
+        dispatch({ type: "DesktopActionStarted", name });
         await fn();
         await refresh();
-        setMessage(`${name} complete`);
+        dispatch({ type: "DesktopActionCompleted", name });
       } catch (err) {
-        const errorMessage = String(err);
-        setError(errorMessage);
-        setMessage(errorMessage);
-      } finally {
-        setLoading(false);
+        dispatch({ type: "DesktopActionFailed", message: String(err) });
       }
     },
     [refresh],
@@ -109,9 +109,9 @@ export function useDesktopState(): DesktopStateController {
 
   const actions = React.useMemo<DesktopActions>(
     () => ({
-      setMockMode,
-      setWizardOpen,
-      setConfig,
+      setMockMode: (mockMode) => dispatch({ type: "MockModeChanged", mockMode }),
+      setWizardOpen: (open) => dispatch({ type: "WizardOpenChanged", open }),
+      setConfig: (config) => dispatch({ type: "NodeConfigChanged", config }),
       refresh,
       startCore: () => runAction("Start", startCore),
       stopCore: () => runAction("Stop", stopCore),
@@ -119,22 +119,10 @@ export function useDesktopState(): DesktopStateController {
       generateSupportPackage: () => runAction("Generate support package", generateSupportPackage),
       openLogsDirectory: () => runAction("Open logs", openLogsDirectory),
       openDataDirectory: () => runAction("Open data", openDataDirectory),
-      saveNodeConfig: () => runAction("Save node config", () => saveNodeConfigService(config)),
+      saveNodeConfig: () => runAction("Save node config", () => saveNodeConfigService(state.config)),
     }),
-    [config, refresh, runAction],
+    [refresh, runAction, state.config],
   );
 
-  return {
-    state: {
-      mockMode,
-      snapshot,
-      process,
-      message,
-      loading,
-      error,
-      wizardOpen,
-      config,
-    },
-    actions,
-  };
+  return { state, actions };
 }

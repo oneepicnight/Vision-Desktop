@@ -110,7 +110,7 @@ pub fn generate_support_package(
         if entry.file_name() == "file-manifest-sha256.txt" {
             continue;
         }
-        let hash = sha256_file(&entry.path().to_path_buf())?;
+        let hash = sha256_file(entry.path())?;
         let rel = entry
             .path()
             .strip_prefix(&report_dir)

@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppPaths {
@@ -43,7 +46,7 @@ pub fn default_paths() -> AppPaths {
     }
 }
 
-pub fn ensure_parent(path: &PathBuf) -> Result<(), String> {
+pub fn ensure_parent(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;

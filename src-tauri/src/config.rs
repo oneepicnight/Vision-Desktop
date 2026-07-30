@@ -135,17 +135,21 @@ mod tests {
 
     #[test]
     fn config_rejects_public_loopback_advertised_host() {
-        let mut cfg = NodeConfig::default();
-        cfg.mode = NodeMode::InternetNetwork;
-        cfg.advertised_host = Some("127.0.0.1".to_string());
+        let cfg = NodeConfig {
+            mode: NodeMode::InternetNetwork,
+            advertised_host: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        };
         assert!(validate_node_config(&cfg).is_err());
     }
 
     #[test]
     fn config_requires_valid_miner_address_when_mining() {
-        let mut cfg = NodeConfig::default();
-        cfg.mining_enabled = true;
-        cfg.miner_reward_address = "bad".to_string();
+        let cfg = NodeConfig {
+            mining_enabled: true,
+            miner_reward_address: "bad".to_string(),
+            ..Default::default()
+        };
         assert!(validate_node_config(&cfg).is_err());
     }
 }

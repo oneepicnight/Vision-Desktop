@@ -1,41 +1,36 @@
-﻿import React from "react";
-import { Sidebar } from "./components/Sidebar";
+﻿import { Sidebar } from "./components/Sidebar";
 import { StatusLine } from "./components/StatusLine";
 import { DashboardGrid } from "./features/dashboard/DashboardGrid";
-import { CreateNodeWizard, emptyConfig } from "./features/node-manager/CreateNodeWizard";
+import { CreateNodeWizard } from "./features/node-manager/CreateNodeWizard";
 import { NodeControls } from "./features/node-manager/NodeControls";
-import { useDashboard } from "./hooks/useDashboard";
-import type { NodeConfig } from "./types/core";
+import { useDesktopState } from "./state/desktopState";
 
 export function AppShell() {
-  const [mockMode, setMockMode] = React.useState(true);
-  const [wizardOpen, setWizardOpen] = React.useState(false);
-  const [config, setConfig] = React.useState<NodeConfig>(emptyConfig);
-  const { snapshot, process, message, refresh, action } = useDashboard(mockMode);
+  const { state, actions } = useDesktopState();
 
   return (
     <main className="app-shell">
-      <Sidebar mockMode={mockMode} onMockModeChange={setMockMode} />
+      <Sidebar mockMode={state.mockMode} onMockModeChange={actions.setMockMode} />
 
       <section className="content">
         <header className="topbar">
           <div>
             <h1>Node Manager</h1>
-            <p>{snapshot?.mock_mode ? "Development mock mode" : "Real Core mode"}</p>
+            <p>{state.snapshot?.mock_mode ? "Development mock mode" : "Real Core mode"}</p>
           </div>
-          <NodeControls mockMode={mockMode} refresh={refresh} action={action} />
+          <NodeControls state={state} actions={actions} />
         </header>
 
-        <StatusLine message={message} />
+        <StatusLine message={state.message} />
 
-        <DashboardGrid snapshot={snapshot} process={process} mockMode={mockMode} action={action} />
+        <DashboardGrid state={state} actions={actions} />
 
         <CreateNodeWizard
-          wizardOpen={wizardOpen}
-          config={config}
-          onWizardOpenChange={setWizardOpen}
-          onConfigChange={setConfig}
-          action={action}
+          wizardOpen={state.wizardOpen}
+          config={state.config}
+          onWizardOpenChange={actions.setWizardOpen}
+          onConfigChange={actions.setConfig}
+          actions={actions}
         />
       </section>
     </main>

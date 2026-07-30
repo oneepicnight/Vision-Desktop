@@ -1,26 +1,24 @@
 ﻿import { Play, RefreshCw, RotateCw, Square } from "lucide-react";
-import { restartCore, startCore, stopCore } from "../../services/coreApi";
-import type { AppAction } from "../../types/ui";
+import type { DesktopActions, DesktopState } from "../../state/desktopState";
 
 type NodeControlsProps = {
-  mockMode: boolean;
-  refresh: () => Promise<void>;
-  action: AppAction;
+  state: DesktopState;
+  actions: DesktopActions;
 };
 
-export function NodeControls({ mockMode, refresh, action }: NodeControlsProps) {
+export function NodeControls({ state, actions }: NodeControlsProps) {
   return (
     <div className="actions">
-      <button onClick={() => action("Start", startCore)} disabled={mockMode}>
+      <button onClick={actions.startCore} disabled={state.mockMode}>
         <Play size={18} />Start
       </button>
-      <button onClick={() => action("Stop", stopCore)} disabled={mockMode}>
+      <button onClick={actions.stopCore} disabled={state.mockMode}>
         <Square size={18} />Stop
       </button>
-      <button onClick={() => action("Restart", restartCore)} disabled={mockMode}>
+      <button onClick={actions.restartCore} disabled={state.mockMode}>
         <RotateCw size={18} />Restart
       </button>
-      <button onClick={refresh}>
+      <button onClick={actions.refresh}>
         <RefreshCw size={18} />Refresh
       </button>
     </div>

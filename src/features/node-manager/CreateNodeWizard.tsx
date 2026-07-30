@@ -1,27 +1,12 @@
-﻿import type { NodeConfig, NodeMode } from "../../types/core";
-import type { AppAction } from "../../types/ui";
-import { saveNodeConfig } from "../../services/coreApi";
-
-export const emptyConfig: NodeConfig = {
-  node_name: "Default Node",
-  mode: "LocalTesting",
-  api_port: 0,
-  p2p_port: 19090,
-  seed_peers: [],
-  advertised_host: null,
-  advertised_port: null,
-  mining_enabled: false,
-  miner_reward_address: "0000000000000000000000000000000000000000000000000000000000000000",
-  data_dir: "",
-  log_dir: "",
-};
+﻿import type { DesktopActions } from "../../state/desktopState";
+import type { NodeConfig, NodeMode } from "../../types/core";
 
 type CreateNodeWizardProps = {
   wizardOpen: boolean;
   config: NodeConfig;
   onWizardOpenChange: (open: boolean) => void;
   onConfigChange: (config: NodeConfig) => void;
-  action: AppAction;
+  actions: DesktopActions;
 };
 
 export function CreateNodeWizard({
@@ -29,7 +14,7 @@ export function CreateNodeWizard({
   config,
   onWizardOpenChange,
   onConfigChange,
-  action,
+  actions,
 }: CreateNodeWizardProps) {
   return (
     <section className="wizard">
@@ -102,7 +87,7 @@ export function CreateNodeWizard({
           <p className="wide note">
             Internet mode requires manual router forwarding in RC2. Vision Desktop will not open firewall or router ports automatically.
           </p>
-          <button className="wide" onClick={() => action("Save node config", () => saveNodeConfig(config))}>
+          <button className="wide" onClick={actions.saveNodeConfig}>
             Create Node
           </button>
         </div>

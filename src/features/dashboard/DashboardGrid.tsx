@@ -1,31 +1,27 @@
-import { Activity, Database, FileArchive, FolderOpen, Network, Play } from "lucide-react";
+﻿import { Activity, Database, FileArchive, FolderOpen, Network, Play } from "lucide-react";
 import { Card } from "../../components/Card";
 import { Metric } from "../../components/Metric";
-import { generateSupportPackage, openDataDirectory, openLogsDirectory } from "../../services/coreApi";
-import type { DashboardSnapshot, ProcessState } from "../../types/core";
-import type { AppAction } from "../../types/ui";
+import type { DesktopActions, DesktopState } from "../../state/desktopState";
 import { bytes, shortHash } from "../../utils/format";
 
 type DashboardGridProps = {
-  snapshot: DashboardSnapshot | null;
-  process: ProcessState | null;
-  mockMode: boolean;
-  action: AppAction;
+  state: DesktopState;
+  actions: DesktopActions;
 };
 
-export function DashboardGrid({ snapshot, process, mockMode, action }: DashboardGridProps) {
-  const status = snapshot?.status;
-  const mining = snapshot?.mining ?? status?.mining;
+export function DashboardGrid({ state, actions }: DashboardGridProps) {
+  const status = state.snapshot?.status;
+  const mining = state.snapshot?.mining ?? status?.mining;
   const recovery = status?.recovery;
-  const miningAvailable = snapshot?.mining?.enabled ?? status?.mining.available ?? false;
+  const miningAvailable = state.snapshot?.mining?.enabled ?? status?.mining.available ?? false;
 
   return (
     <div className="grid">
       <Card title="Core Process" icon={<Activity size={20} />}>
-        <Metric label="State" value={snapshot?.process_state ?? "Unknown"} />
-        <Metric label="PID" value={process?.pid ?? "Not running"} />
-        <Metric label="API port" value={process?.api_port ?? "Private loopback"} />
-        <Metric label="P2P port" value={process?.p2p_port ?? "Not listening"} />
+        <Metric label="State" value={state.snapshot?.process_state ?? "Unknown"} />
+        <Metric label="PID" value={state.process?.pid ?? "Not running"} />
+        <Metric label="API port" value={state.process?.api_port ?? "Private loopback"} />
+        <Metric label="P2P port" value={state.process?.p2p_port ?? "Not listening"} />
       </Card>
       <Card title="Chain" icon={<Database size={20} />}>
         <Metric label="Height" value={status?.canonical_tip_height ?? "Unavailable"} />
@@ -54,20 +50,20 @@ export function DashboardGrid({ snapshot, process, mockMode, action }: Dashboard
       </Card>
       <Card title="Mempool And Resources" icon={<Activity size={20} />}>
         <Metric label="Mempool" value={status?.mempool_size ?? 0} />
-        <Metric label="CPU" value={snapshot?.core_cpu == null ? "Unavailable" : `${snapshot.core_cpu.toFixed(1)}%`} />
-        <Metric label="Memory" value={bytes(snapshot?.core_memory_bytes)} />
-        <Metric label="Data" value={bytes(snapshot?.data_dir_size_bytes)} />
-        <Metric label="Logs" value={bytes(snapshot?.log_dir_size_bytes)} />
+        <Metric label="CPU" value={state.snapshot?.core_cpu == null ? "Unavailable" : `${state.snapshot.core_cpu.toFixed(1)}%`} />
+        <Metric label="Memory" value={bytes(state.snapshot?.core_memory_bytes)} />
+        <Metric label="Data" value={bytes(state.snapshot?.data_dir_size_bytes)} />
+        <Metric label="Logs" value={bytes(state.snapshot?.log_dir_size_bytes)} />
       </Card>
       <Card title="Support" icon={<FileArchive size={20} />}>
         <div className="button-stack">
-          <button onClick={() => action("Generate support package", generateSupportPackage)} disabled={mockMode}>
+          <button onClick={actions.generateSupportPackage} disabled={state.mockMode}>
             <FileArchive size={18} />Generate Support Package
           </button>
-          <button onClick={() => action("Open logs", openLogsDirectory)} disabled={mockMode}>
+          <button onClick={actions.openLogsDirectory} disabled={state.mockMode}>
             <FolderOpen size={18} />View Logs
           </button>
-          <button onClick={() => action("Open data", openDataDirectory)} disabled={mockMode}>
+          <button onClick={actions.openDataDirectory} disabled={state.mockMode}>
             <FolderOpen size={18} />Open Data Directory
           </button>
         </div>

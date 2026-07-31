@@ -1,5 +1,6 @@
 import { applyDesktopEvent } from "../desktopReducer";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/core";
+import type { ConfigurationState } from "../../types/configuration";
 import type { DiagnosticsState } from "../../types/diagnostics";
 import type { ExplorerAddressResult, ExplorerTransactionResult } from "../../types/explorer";
 import type { WalletAccountState } from "../../types/wallet";
@@ -116,6 +117,12 @@ const baseWallet: WalletAccountState = {
   error: null,
 };
 
+const baseConfiguration: ConfigurationState = {
+  snapshot: null,
+  appPaths: null,
+  error: null,
+};
+
 const baseState: DesktopState = {
   activeView: "dashboard",
   mockMode: true,
@@ -134,6 +141,7 @@ const baseState: DesktopState = {
     error: null,
   },
   diagnostics: baseDiagnostics,
+  configuration: baseConfiguration,
   wallet: baseWallet,
   lastUpdatedAt: null,
 };
@@ -188,6 +196,12 @@ export function runDesktopReducerTransitionTests() {
   {
     const next = applyDesktopEvent(baseState, { type: "ActiveViewChanged", view: "diagnostics" });
     assertEqual(next.activeView, "diagnostics");
+    expectPreserved(baseState, next, ["activeView"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, { type: "ActiveViewChanged", view: "configuration" });
+    assertEqual(next.activeView, "configuration");
     expectPreserved(baseState, next, ["activeView"]);
   }
 
@@ -337,6 +351,29 @@ export function runDesktopReducerTransitionTests() {
     const next = applyDesktopEvent(baseState, { type: "DiagnosticsUpdated", diagnostics });
     assertDeepEqual(next.diagnostics, diagnostics);
     expectPreserved(baseState, next, ["diagnostics"]);
+  }
+
+  {
+    const configuration: ConfigurationState = {
+      snapshot: {
+        config: baseConfig,
+        source_path: "C:\\Users\\operator\\AppData\\Roaming\\Vision\\Desktop\\nodes\\default.json",
+        source_kind: "persisted",
+      },
+      appPaths: {
+        desktop_config: "C:\\Users\\operator\\AppData\\Roaming\\Vision\\Desktop\\config.json",
+        node_config: "C:\\Users\\operator\\AppData\\Roaming\\Vision\\Desktop\\nodes\\default.json",
+        core_data: "data",
+        core_logs: "logs",
+        desktop_logs: "desktop-logs",
+        reports: "reports",
+        updates: "updates",
+      },
+      error: null,
+    };
+    const next = applyDesktopEvent(baseState, { type: "ConfigurationUpdated", configuration });
+    assertDeepEqual(next.configuration, configuration);
+    expectPreserved(baseState, next, ["configuration"]);
   }
 
   {

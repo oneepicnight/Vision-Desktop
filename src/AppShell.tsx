@@ -1,5 +1,6 @@
 import { Sidebar } from "./components/Sidebar";
 import { StatusLine } from "./components/StatusLine";
+import { ConfigurationPanel } from "./features/configuration/ConfigurationPanel";
 import { DashboardGrid } from "./features/dashboard/DashboardGrid";
 import { DiagnosticsPanel } from "./features/diagnostics/DiagnosticsPanel";
 import { ExplorerPanel } from "./features/explorer/ExplorerPanel";
@@ -10,21 +11,19 @@ import { PeerManagerPanel } from "./features/peers/PeerManagerPanel";
 import { WalletPanel } from "./features/wallet/WalletPanel";
 import { useDesktopState } from "./state/desktopState";
 
+const viewTitles = {
+  dashboard: "Node Manager",
+  wallet: "Wallet",
+  explorer: "Blockchain Explorer",
+  peers: "Peer Manager",
+  mining: "Mining Status",
+  diagnostics: "Diagnostics",
+  configuration: "Node Configuration",
+} as const;
+
 export function AppShell() {
   const { state, actions } = useDesktopState();
-
-  const title =
-    state.activeView === "explorer"
-      ? "Blockchain Explorer"
-      : state.activeView === "peers"
-        ? "Peer Manager"
-        : state.activeView === "mining"
-          ? "Mining Status"
-          : state.activeView === "diagnostics"
-            ? "Diagnostics"
-            : state.activeView === "wallet"
-              ? "Wallet"
-              : "Node Manager";
+  const title = viewTitles[state.activeView];
 
   return (
     <main className="app-shell">
@@ -56,6 +55,8 @@ export function AppShell() {
           <DiagnosticsPanel state={state} actions={actions} />
         ) : state.activeView === "wallet" ? (
           <WalletPanel state={state} />
+        ) : state.activeView === "configuration" ? (
+          <ConfigurationPanel state={state} />
         ) : (
           <DashboardGrid state={state} actions={actions} />
         )}

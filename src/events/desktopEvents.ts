@@ -1,4 +1,5 @@
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
+import type { ConfigurationState } from "../types/configuration";
 import type { DiagnosticsState } from "../types/diagnostics";
 import type {
   DesktopView,
@@ -26,6 +27,7 @@ export type DesktopEvent =
       receivedAt: number;
     }
   | { type: "DiagnosticsUpdated"; diagnostics: DiagnosticsState }
+  | { type: "ConfigurationUpdated"; configuration: ConfigurationState }
   | { type: "WalletAccountUpdated"; wallet: WalletAccountState }
   | { type: "CoreProcessUpdated"; process: ProcessState }
   | { type: "DesktopUpdateSettled" }

@@ -1,4 +1,5 @@
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/core";
+import type { ConfigurationState } from "../../types/configuration";
 import type { DiagnosticsState } from "../../types/diagnostics";
 import type { ExplorerAddressResult } from "../../types/explorer";
 import type { WalletAccountState } from "../../types/wallet";
@@ -107,6 +108,12 @@ const baseWallet: WalletAccountState = {
   error: null,
 };
 
+const baseConfiguration: ConfigurationState = {
+  snapshot: null,
+  appPaths: null,
+  error: null,
+};
+
 const liveAccount: ExplorerAddressResult = {
   kind: "address",
   address: baseConfig.miner_reward_address,
@@ -132,6 +139,7 @@ const baseState: DesktopState = {
     error: null,
   },
   diagnostics: baseDiagnostics,
+  configuration: baseConfiguration,
   wallet: baseWallet,
   lastUpdatedAt: 5_000,
 };

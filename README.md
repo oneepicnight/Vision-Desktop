@@ -14,7 +14,7 @@ Current desktop scope includes:
 - read-only blockchain explorer for address and transaction inspection
 - read-only peer manager for current connection and recovery visibility
 - read-only mining status from the existing Desktop snapshot
-- read-only diagnostics view for process, API, verification, and fixed log-tail visibility
+- read-only diagnostics view for process, API, verification, and fixed log-tail visibility`r`n- read-only node configuration view for Desktop-managed configuration visibility and limited runtime comparison
 - support package generation
 - mock-mode development workflows
 
@@ -44,6 +44,22 @@ The initial Mining page is read-only. It displays confirmed data already present
 - Desktop-side last refresh time
 
 Enabled mining does not necessarily mean that mining is actively producing blocks.
+
+The initial Configuration page is read-only. It displays confirmed Desktop-managed configuration data plus limited runtime observations already exposed through the existing Desktop state and backend surface:
+
+- persisted or Desktop-default node configuration source when Desktop can load it
+- Desktop-managed node name, mode, ports, paths, seed peers, mining status, and reward address
+- runtime-observed process, API, port, and directory values only where the existing process and snapshot models expose them
+- explicit configured versus runtime-observed labeling
+- mock-mode context, configuration-source context, and last refresh time
+
+Configuration limitations and safety boundary:
+
+- this page does not edit, save, import, export, reset, or apply configuration
+- enabled or configured values do not prove they are active in the running Core process unless a matching runtime observation is exposed
+- API bind host and private-peer policy are not currently exposed by the Desktop configuration model
+- secret-bearing values are deliberately excluded from the page
+- the active persisted node-config source path is shown only through the Desktop-managed config location, not through arbitrary file browsing
 
 The initial Diagnostics page is read-only. It displays confirmed information already available through the existing Desktop snapshot, process supervisor, and current Tauri command surface:
 

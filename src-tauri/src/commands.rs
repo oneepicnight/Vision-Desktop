@@ -6,7 +6,10 @@ use crate::{
         fetch_dashboard, fetch_explorer_address, fetch_explorer_transaction, mock_dashboard,
         DashboardSnapshot, ExplorerAddressResult, ExplorerTransactionResult,
     },
-    config::{load_or_create_default_config, save_node_config as persist_node_config, NodeConfig},
+    config::{
+        load_node_config_snapshot, load_or_create_default_config,
+        save_node_config as persist_node_config, NodeConfig, NodeConfigSnapshot,
+    },
     core_manifest::{
         load_core_manifest, verify_bundled_core_binary, CoreManifest, CoreVerification,
     },
@@ -173,6 +176,11 @@ pub fn lookup_explorer_transaction(
 pub fn save_node_config(request: SaveNodeConfigRequest) -> Result<NodeConfig, String> {
     persist_node_config(&request.config)?;
     Ok(request.config)
+}
+
+#[tauri::command]
+pub fn get_node_config_snapshot() -> Result<NodeConfigSnapshot, String> {
+    load_node_config_snapshot()
 }
 
 #[tauri::command]

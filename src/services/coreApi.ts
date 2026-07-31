@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
+import type { AppPaths, NodeConfigSnapshot } from "../types/configuration";
 import type { CoreManifest, CoreVerification } from "../types/diagnostics";
 import type {
   ExplorerAddressResult,
@@ -62,6 +63,14 @@ export function openDataDirectory() {
 
 export function saveNodeConfig(config: NodeConfig) {
   return invoke("save_node_config", { request: { config } });
+}
+
+export function getNodeConfigSnapshot() {
+  return invoke<NodeConfigSnapshot>("get_node_config_snapshot");
+}
+
+export function getDefaultPaths() {
+  return invoke<AppPaths>("get_default_paths");
 }
 
 export function lookupExplorerAddress(query: string) {

@@ -38,6 +38,15 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .mining-grid { align-items: start; }
 .diagnostics-grid { align-items: start; }
 .wallet-grid { align-items: start; }
+.configuration-grid { align-items: start; }
+.config-entry { padding: 10px 0; border-bottom: 1px solid #eef2ef; }
+.config-entry:last-child { border-bottom: 0; }
+.config-entry-header { margin-bottom: 8px; color: #294334; }
+.config-entry-grid { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 12px; align-items: start; }
+.config-entry-grid span { color: #66746c; }
+.config-entry-grid strong { overflow-wrap: anywhere; }
+.config-entry-grid em { color: #66746c; font-style: normal; text-align: right; }
+.config-limitations { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .explorer-form { display: flex; flex-direction: column; gap: 12px; }
 .explorer-form label { display: flex; flex-direction: column; gap: 6px; color: #4c5c52; }
 .empty-state { margin: 0; color: #4c5c52; line-height: 1.5; }

@@ -7,7 +7,9 @@ import {
   getCoreStderrTail,
   getCoreStdoutTail,
   getDashboardSnapshot,
+  getDefaultPaths,
   getMockDashboardSnapshot,
+  getNodeConfigSnapshot,
   lookupExplorerAddress,
   lookupExplorerTransaction,
   openDataDirectory,
@@ -20,6 +22,7 @@ import {
   verifyCoreBinary,
 } from "../services/coreApi";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
+import type { ConfigurationState } from "../types/configuration";
 import type { DiagnosticsState } from "../types/diagnostics";
 import type {
   DesktopView,
@@ -74,6 +77,12 @@ const initialWalletState: WalletAccountState = {
   error: null,
 };
 
+const initialConfigurationState: ConfigurationState = {
+  snapshot: null,
+  appPaths: null,
+  error: null,
+};
+
 const initialDesktopState: DesktopState = {
   activeView: "dashboard",
   mockMode: true,
@@ -86,6 +95,7 @@ const initialDesktopState: DesktopState = {
   config: emptyConfig,
   explorer: initialExplorerState,
   diagnostics: initialDiagnosticsState,
+  configuration: initialConfigurationState,
   wallet: initialWalletState,
   lastUpdatedAt: null,
 };
@@ -102,6 +112,7 @@ export type DesktopState = {
   config: NodeConfig;
   explorer: ExplorerState;
   diagnostics: DiagnosticsState;
+  configuration: ConfigurationState;
   wallet: WalletAccountState;
   lastUpdatedAt: number | null;
 };
@@ -164,6 +175,33 @@ export function useDesktopState(): DesktopStateController {
             : "Dashboard refreshed",
           receivedAt: Date.now(),
         });
+
+        if (state.activeView === "configuration") {
+          const configurationResults = await Promise.allSettled([
+            getNodeConfigSnapshot(),
+            getDefaultPaths(),
+          ]);
+          if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+            return;
+          }
+          const configurationErrors = configurationResults
+            .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+            .map((result) => String(result.reason));
+          dispatch({
+            type: "ConfigurationUpdated",
+            configuration: {
+              snapshot:
+                configurationResults[0].status === "fulfilled"
+                  ? configurationResults[0].value
+                  : null,
+              appPaths:
+                configurationResults[1].status === "fulfilled"
+                  ? configurationResults[1].value
+                  : null,
+              error: configurationErrors.length > 0 ? configurationErrors.join(" | ") : null,
+            },
+          });
+        }
 
         if (state.activeView === "wallet" && mockMode) {
           if (configuredRewardAddress.length === 0) {

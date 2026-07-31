@@ -29,6 +29,20 @@ pub struct NodeConfig {
     pub log_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeConfigSourceKind {
+    Persisted,
+    DesktopDefaultCreated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeConfigSnapshot {
+    pub config: NodeConfig,
+    pub source_path: PathBuf,
+    pub source_kind: NodeConfigSourceKind,
+}
+
 impl Default for NodeConfig {
     fn default() -> Self {
         let paths = default_paths();
@@ -50,15 +64,29 @@ impl Default for NodeConfig {
 }
 
 pub fn load_or_create_default_config() -> Result<NodeConfig, String> {
+    Ok(load_node_config_snapshot()?.config)
+}
+
+pub fn load_node_config_snapshot() -> Result<NodeConfigSnapshot, String> {
     let paths = default_paths();
     if paths.node_config.exists() {
         let bytes =
             fs::read(&paths.node_config).map_err(|e| format!("failed to read node config: {e}"))?;
-        serde_json::from_slice(&bytes).map_err(|e| format!("invalid node config: {e}"))
+        let config =
+            serde_json::from_slice(&bytes).map_err(|e| format!("invalid node config: {e}"))?;
+        Ok(NodeConfigSnapshot {
+            config,
+            source_path: paths.node_config,
+            source_kind: NodeConfigSourceKind::Persisted,
+        })
     } else {
         let cfg = NodeConfig::default();
         save_node_config(&cfg)?;
-        Ok(cfg)
+        Ok(NodeConfigSnapshot {
+            config: cfg,
+            source_path: paths.node_config,
+            source_kind: NodeConfigSourceKind::DesktopDefaultCreated,
+        })
     }
 }
 

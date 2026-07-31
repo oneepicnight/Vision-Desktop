@@ -27,9 +27,11 @@ pub fn run() {
             commands::lookup_explorer_address,
             commands::lookup_explorer_transaction,
             commands::save_node_config,
+            commands::get_node_config_snapshot,
             commands::generate_support_package,
             commands::run_network_diagnostics,
             commands::get_mock_dashboard_snapshot,
+            commands::get_default_paths,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Vision Desktop");

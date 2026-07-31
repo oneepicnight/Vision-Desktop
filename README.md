@@ -31,6 +31,8 @@ The Mining page uses a Vision World operations presentation adapted from the leg
 
 The Diagnostics page uses a Vision World systems-observatory presentation adapted from the legacy command-center and log-console motifs. Its radar artwork is decorative, while process, API, recovery, peer, manifest, verification, operator-message, and log-tail values come only from the existing typed Desktop state and fixed backend commands. Legacy live-stream connections, client-side log export, invented log classification, direct network calls, and unrestricted file access are not included.
 
+The Configuration page uses a Vision World node-blueprint presentation adapted from the legacy settings and command-center hierarchy. Its blueprint artwork is decorative, while every configured/default/runtime comparison comes from the existing filtered configuration view model. Legacy endpoint editing, connectivity tests, browser storage, wallet backup export, mnemonic or private-key display, key downloads, and wallet-wipe behavior are not included.
+
 Desktop lifecycle controls currently include Start, Stop, Restart, and Refresh from the top application bar.
 
 Lifecycle behavior and safety boundary:
@@ -90,6 +92,7 @@ Configuration limitations and safety boundary:
 - API bind host and private-peer policy are not currently exposed by the Desktop configuration model
 - secret-bearing values are deliberately excluded from the page
 - the active persisted node-config source path is shown only through the Desktop-managed config location, not through arbitrary file browsing
+- no endpoint editor, save/test action, browser storage, key export, mnemonic display, private-key display, or destructive wallet action is imported from the legacy settings page
 
 The initial Diagnostics page is read-only. It displays confirmed information already available through the existing Desktop snapshot, process supervisor, and current Tauri command surface:
 

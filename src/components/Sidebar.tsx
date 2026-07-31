@@ -1,4 +1,4 @@
-import { Activity, Flame, Network, Search, Settings, ShieldCheck, Terminal, Wifi } from "lucide-react";
+import { Activity, Flame, Landmark, Network, Search, Settings, ShieldCheck, Terminal, Wifi } from "lucide-react";
 import type { DesktopView } from "../types/explorer";
 
 type SidebarProps = {
@@ -28,6 +28,12 @@ export function Sidebar({
         onClick={() => onViewChange("dashboard")}
       >
         <Activity size={18} />Dashboard
+      </button>
+      <button
+        className={`nav ${activeView === "wallet" ? "active" : ""}`}
+        onClick={() => onViewChange("wallet")}
+      >
+        <Landmark size={18} />Wallet
       </button>
       <button
         className={`nav ${activeView === "explorer" ? "active" : ""}`}

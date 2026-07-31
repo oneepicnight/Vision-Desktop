@@ -2,6 +2,7 @@ import { applyDesktopEvent } from "../desktopReducer";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/core";
 import type { DiagnosticsState } from "../../types/diagnostics";
 import type { ExplorerAddressResult, ExplorerTransactionResult } from "../../types/explorer";
+import type { WalletAccountState } from "../../types/wallet";
 import type { DesktopState } from "../desktopState";
 
 function assertEqual<T>(actual: T, expected: T, message?: string) {
@@ -109,6 +110,12 @@ const baseDiagnostics: DiagnosticsState = {
   error: null,
 };
 
+const baseWallet: WalletAccountState = {
+  queriedAddress: null,
+  account: null,
+  error: null,
+};
+
 const baseState: DesktopState = {
   activeView: "dashboard",
   mockMode: true,
@@ -127,6 +134,7 @@ const baseState: DesktopState = {
     error: null,
   },
   diagnostics: baseDiagnostics,
+  wallet: baseWallet,
   lastUpdatedAt: null,
 };
 
@@ -156,6 +164,12 @@ export function runDesktopReducerTransitionTests() {
   {
     const next = applyDesktopEvent(baseState, { type: "ActiveViewChanged", view: "explorer" });
     assertEqual(next.activeView, "explorer");
+    expectPreserved(baseState, next, ["activeView"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, { type: "ActiveViewChanged", view: "wallet" });
+    assertEqual(next.activeView, "wallet");
     expectPreserved(baseState, next, ["activeView"]);
   }
 
@@ -323,6 +337,17 @@ export function runDesktopReducerTransitionTests() {
     const next = applyDesktopEvent(baseState, { type: "DiagnosticsUpdated", diagnostics });
     assertDeepEqual(next.diagnostics, diagnostics);
     expectPreserved(baseState, next, ["diagnostics"]);
+  }
+
+  {
+    const wallet: WalletAccountState = {
+      queriedAddress: "abcd",
+      account: addressResult,
+      error: null,
+    };
+    const next = applyDesktopEvent(baseState, { type: "WalletAccountUpdated", wallet });
+    assertDeepEqual(next.wallet, wallet);
+    expectPreserved(baseState, next, ["wallet"]);
   }
 
   {

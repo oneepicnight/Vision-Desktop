@@ -1,8 +1,9 @@
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/core";
 import type { DiagnosticsState } from "../../types/diagnostics";
+import type { ExplorerAddressResult } from "../../types/explorer";
 import type { WalletAccountState } from "../../types/wallet";
 import type { DesktopState } from "../../state/desktopState";
-import { deriveDiagnosticsViewModel } from "./diagnosticsStatus";
+import { deriveWalletViewModel } from "./walletStatus";
 
 function assertEqual<T>(actual: T, expected: T, message?: string) {
   if (actual !== expected) {
@@ -24,9 +25,8 @@ const baseConfig: NodeConfig = {
   seed_peers: [],
   advertised_host: null,
   advertised_port: null,
-  mining_enabled: false,
-  miner_reward_address:
-    "0000000000000000000000000000000000000000000000000000000000000000",
+  mining_enabled: true,
+  miner_reward_address: "abcd".padEnd(64, "0"),
   data_dir: "data",
   log_dir: "logs",
 };
@@ -66,7 +66,7 @@ const baseSnapshot: DashboardSnapshot = {
     },
   },
   mining: {
-    enabled: false,
+    enabled: true,
     height: 12,
     difficulty: 2,
     epoch: 0,
@@ -75,22 +75,7 @@ const baseSnapshot: DashboardSnapshot = {
     paused_reason: null,
     hash_rate_estimate: null,
   },
-  peers: [
-    {
-      addr: "seed.example:19090",
-      state: "connected",
-      height: 12,
-      outbound: true,
-      height_age_secs: 2,
-    },
-    {
-      addr: "peer.example:19091",
-      state: "connected",
-      height: 12,
-      outbound: false,
-      height_age_secs: 5,
-    },
-  ],
+  peers: [],
   api_error: null,
   core_cpu: 5,
   core_memory_bytes: 2048,
@@ -109,34 +94,28 @@ const baseProcess: ProcessState = {
 };
 
 const baseDiagnostics: DiagnosticsState = {
-  manifest: {
-    core_tag: "vision-core-alpha-rc2",
-    consensus_tag: "vision-core-consensus-v1.0.3",
-    source_commit: "6a065df8206b50874029a27ee2b54dffae5e3cdd",
-    binary_sha256: "hash",
-    consensus_version: 3,
-    p2p_protocol_version: 4,
-    platform: "windows-x64",
-  },
-  verification: {
-    binary_path: "C:\\Vision\\vision-core.exe",
-    expected_sha256: "hash",
-    actual_sha256: "hash",
-    matches: true,
-  },
-  stdoutTail: "stdout",
-  stderrTail: "",
+  manifest: null,
+  verification: null,
+  stdoutTail: null,
+  stderrTail: null,
   error: null,
 };
 
 const baseWallet: WalletAccountState = {
-  queriedAddress: null,
+  queriedAddress: baseConfig.miner_reward_address,
   account: null,
   error: null,
 };
 
+const liveAccount: ExplorerAddressResult = {
+  kind: "address",
+  address: baseConfig.miner_reward_address,
+  balance: "300003",
+  nonce: "3",
+};
+
 const baseState: DesktopState = {
-  activeView: "diagnostics",
+  activeView: "wallet",
   mockMode: false,
   snapshot: baseSnapshot,
   process: baseProcess,
@@ -158,29 +137,46 @@ const baseState: DesktopState = {
 };
 
 {
-  const viewModel = deriveDiagnosticsViewModel(baseState, 10_000);
-  assertEqual(viewModel.overallStatus, "Healthy");
-  assertEqual(viewModel.apiStatus, "Connected");
-  assertEqual(viewModel.binaryVerification, "Verified");
-  assertEqual(viewModel.peerSummary, "2 reported peers");
-  assertMatch(viewModel.lastRefresh, /\(5s ago\)$/);
-}
-
-{
-  const viewModel = deriveDiagnosticsViewModel(
+  const viewModel = deriveWalletViewModel(
     {
       ...baseState,
-      snapshot: { ...baseSnapshot, process_state: "stopped", status: null, mining: null, peers: [] },
-      process: { ...baseProcess, state: "stopped" },
+      config: { ...baseConfig, miner_reward_address: "" },
+      wallet: { queriedAddress: null, account: null, error: null },
     },
     10_000,
   );
-  assertEqual(viewModel.overallStatus, "Unavailable");
-  assertEqual(viewModel.processStatus, "stopped");
+  assertEqual(viewModel.overallStatus, "No address configured");
+  assertEqual(viewModel.configuredAddress, "Unavailable");
 }
 
 {
-  const viewModel = deriveDiagnosticsViewModel(
+  const viewModel = deriveWalletViewModel(baseState, 10_000);
+  assertEqual(viewModel.overallStatus, "Address configured but ownership unverified");
+  assertEqual(viewModel.ownershipStatus, "Unverified ownership; no custody proven");
+}
+
+{
+  const viewModel = deriveWalletViewModel(
+    { ...baseState, snapshot: { ...baseSnapshot, process_state: "stopped" }, process: { ...baseProcess, state: "stopped" } },
+    10_000,
+  );
+  assertEqual(viewModel.overallStatus, "Core unavailable");
+}
+
+{
+  const viewModel = deriveWalletViewModel(
+    {
+      ...baseState,
+      snapshot: { ...baseSnapshot, api_error: "connection refused" },
+    },
+    10_000,
+  );
+  assertEqual(viewModel.overallStatus, "Balance unavailable");
+  assertEqual(viewModel.lookupStatus, "connection refused");
+}
+
+{
+  const viewModel = deriveWalletViewModel(
     {
       ...baseState,
       snapshot: {
@@ -194,46 +190,50 @@ const baseState: DesktopState = {
     10_000,
   );
   assertEqual(viewModel.overallStatus, "Recovery mode");
-  assertEqual(viewModel.recoveryStatus, "recovering");
 }
 
 {
-  const viewModel = deriveDiagnosticsViewModel(
-    {
-      ...baseState,
-      mockMode: true,
-      snapshot: { ...baseSnapshot, mock_mode: true },
-    },
+  const viewModel = deriveWalletViewModel(
+    { ...baseState, mockMode: true, snapshot: { ...baseSnapshot, mock_mode: true } },
     10_000,
   );
-  assertEqual(viewModel.overallStatus, "Mock mode");
+  assertEqual(viewModel.overallStatus, "Mock account data");
 }
 
 {
-  const viewModel = deriveDiagnosticsViewModel(
-    {
-      ...baseState,
-      snapshot: { ...baseSnapshot, api_error: "connection refused" },
-    },
+  const viewModel = deriveWalletViewModel(
+    { ...baseState, wallet: { queriedAddress: baseConfig.miner_reward_address, account: liveAccount, error: null } },
     10_000,
   );
-  assertEqual(viewModel.overallStatus, "Degraded");
-  assertEqual(viewModel.apiError, "connection refused");
+  assertEqual(viewModel.overallStatus, "Balance available");
+  assertEqual(viewModel.balanceValue, "300003");
+  assertEqual(viewModel.nonceValue, "3");
+  assertEqual(viewModel.balanceAvailability, "Available");
 }
 
 {
-  const viewModel = deriveDiagnosticsViewModel(
-    {
-      ...baseState,
-      snapshot: null,
-      process: null,
-      diagnostics: { ...baseDiagnostics, manifest: null, verification: null },
-      lastUpdatedAt: null,
-    },
+  const viewModel = deriveWalletViewModel(
+    { ...baseState, wallet: { queriedAddress: baseConfig.miner_reward_address, account: null, error: "lookup failed" } },
     10_000,
   );
-  assertEqual(viewModel.overallStatus, "Unknown");
-  assertEqual(viewModel.lastRefresh, "Unavailable");
+  assertEqual(viewModel.overallStatus, "Balance unavailable");
+  assertEqual(viewModel.lookupStatus, "lookup failed");
 }
 
-console.log("Diagnostics status helper tests passed");
+{
+  const viewModel = deriveWalletViewModel(
+    { ...baseState, wallet: { queriedAddress: baseConfig.miner_reward_address, account: liveAccount, error: null } },
+    10_000,
+  );
+  assertEqual(viewModel.denominationStatus, "Unknown denomination / precision");
+}
+
+{
+  const viewModel = deriveWalletViewModel(
+    { ...baseState, wallet: { queriedAddress: baseConfig.miner_reward_address, account: liveAccount, error: null } },
+    10_000,
+  );
+  assertMatch(viewModel.lastRefresh, /\(5s ago\)$/);
+}
+
+console.log("Wallet status helper tests passed");

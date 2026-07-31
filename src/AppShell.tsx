@@ -7,6 +7,7 @@ import { MiningPanel } from "./features/mining/MiningPanel";
 import { CreateNodeWizard } from "./features/node-manager/CreateNodeWizard";
 import { NodeControls } from "./features/node-manager/NodeControls";
 import { PeerManagerPanel } from "./features/peers/PeerManagerPanel";
+import { WalletPanel } from "./features/wallet/WalletPanel";
 import { useDesktopState } from "./state/desktopState";
 
 export function AppShell() {
@@ -21,7 +22,9 @@ export function AppShell() {
           ? "Mining Status"
           : state.activeView === "diagnostics"
             ? "Diagnostics"
-            : "Node Manager";
+            : state.activeView === "wallet"
+              ? "Wallet"
+              : "Node Manager";
 
   return (
     <main className="app-shell">
@@ -51,6 +54,8 @@ export function AppShell() {
           <MiningPanel state={state} />
         ) : state.activeView === "diagnostics" ? (
           <DiagnosticsPanel state={state} actions={actions} />
+        ) : state.activeView === "wallet" ? (
+          <WalletPanel state={state} />
         ) : (
           <DashboardGrid state={state} actions={actions} />
         )}

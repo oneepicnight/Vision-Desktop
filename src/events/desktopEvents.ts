@@ -5,6 +5,7 @@ import type {
   ExplorerLookupMode,
   ExplorerResult,
 } from "../types/explorer";
+import type { WalletAccountState } from "../types/wallet";
 
 export type DesktopEvent =
   | { type: "ActiveViewChanged"; view: DesktopView }
@@ -25,6 +26,7 @@ export type DesktopEvent =
       receivedAt: number;
     }
   | { type: "DiagnosticsUpdated"; diagnostics: DiagnosticsState }
+  | { type: "WalletAccountUpdated"; wallet: WalletAccountState }
   | { type: "CoreProcessUpdated"; process: ProcessState }
   | { type: "DesktopUpdateSettled" }
   | { type: "DesktopActionStarted"; name: string }

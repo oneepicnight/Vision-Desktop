@@ -37,6 +37,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .peer-grid { align-items: start; }
 .mining-grid { align-items: start; }
 .diagnostics-grid { align-items: start; }
+.wallet-grid { align-items: start; }
 .explorer-form { display: flex; flex-direction: column; gap: 12px; }
 .explorer-form label { display: flex; flex-direction: column; gap: 6px; color: #4c5c52; }
 .empty-state { margin: 0; color: #4c5c52; line-height: 1.5; }

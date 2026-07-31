@@ -10,12 +10,28 @@ Current desktop scope includes:
 
 - node-manager dashboard
 - desktop-managed process controls
+- read-only wallet account view for configured reward-address visibility and confirmed account lookup data
 - read-only blockchain explorer for address and transaction inspection
 - read-only peer manager for current connection and recovery visibility
 - read-only mining status from the existing Desktop snapshot
 - read-only diagnostics view for process, API, verification, and fixed log-tail visibility
 - support package generation
 - mock-mode development workflows
+
+The initial Wallet page is read-only. It displays only confirmed non-secret data already available through the existing Desktop configuration and read-only backend surface:
+
+- configured mining reward address from the Desktop-managed node configuration
+- live address, balance, and nonce only when the existing read-only address lookup path returns them
+- explicit address source labels
+- Core, recovery, mock-mode, and freshness context
+- exact balance strings as returned by the backend
+
+Wallet limitations and security boundary:
+
+- a configured reward address does not prove Desktop custody or ownership
+- no private keys, seed phrases, mnemonics, keystores, signing, imports, exports, or transaction submission are implemented
+- balance denomination and precision metadata are not currently exposed, so values are displayed exactly as returned
+- transaction or receipt history is not currently exposed by the Desktop service boundary
 
 The initial Mining page is read-only. It displays confirmed data already present in the Desktop snapshot and Desktop-managed node configuration:
 

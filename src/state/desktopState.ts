@@ -23,10 +23,12 @@ import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core"
 import type { DiagnosticsState } from "../types/diagnostics";
 import type {
   DesktopView,
+  ExplorerAddressResult,
   ExplorerLookupMode,
   ExplorerResult,
   ExplorerState,
 } from "../types/explorer";
+import type { WalletAccountState } from "../types/wallet";
 import { applyDesktopEvent } from "./desktopReducer";
 import {
   beginDesktopRequest,
@@ -66,6 +68,12 @@ const initialDiagnosticsState: DiagnosticsState = {
   error: null,
 };
 
+const initialWalletState: WalletAccountState = {
+  queriedAddress: null,
+  account: null,
+  error: null,
+};
+
 const initialDesktopState: DesktopState = {
   activeView: "dashboard",
   mockMode: true,
@@ -78,6 +86,7 @@ const initialDesktopState: DesktopState = {
   config: emptyConfig,
   explorer: initialExplorerState,
   diagnostics: initialDiagnosticsState,
+  wallet: initialWalletState,
   lastUpdatedAt: null,
 };
 
@@ -93,6 +102,7 @@ export type DesktopState = {
   config: NodeConfig;
   explorer: ExplorerState;
   diagnostics: DiagnosticsState;
+  wallet: WalletAccountState;
   lastUpdatedAt: number | null;
 };
 
@@ -120,6 +130,13 @@ export type DesktopStateController = {
   actions: DesktopActions;
 };
 
+function ensureAddressResult(result: ExplorerResult): ExplorerAddressResult {
+  if (result.kind !== "address") {
+    throw new Error("expected address lookup result");
+  }
+  return result;
+}
+
 export function useDesktopState(): DesktopStateController {
   const [state, dispatch] = React.useReducer(applyDesktopEvent, initialDesktopState);
   const requestTrackerRef = React.useRef(createDesktopRequestTracker());
@@ -129,6 +146,7 @@ export function useDesktopState(): DesktopStateController {
     async (existingToken?: DesktopRequestToken) => {
       const token = existingToken ?? beginDesktopRequest(requestTrackerRef.current);
       const mockMode = state.mockMode;
+      const configuredRewardAddress = state.config.miner_reward_address.trim();
 
       try {
         dispatch({ type: "DashboardRefreshStarted" });
@@ -146,12 +164,38 @@ export function useDesktopState(): DesktopStateController {
             : "Dashboard refreshed",
           receivedAt: Date.now(),
         });
+
+        if (state.activeView === "wallet" && mockMode) {
+          if (configuredRewardAddress.length === 0) {
+            dispatch({
+              type: "WalletAccountUpdated",
+              wallet: { queriedAddress: null, account: null, error: null },
+            });
+          } else {
+            const mockWalletResult = ensureAddressResult(
+              await searchMockExplorer("address", configuredRewardAddress),
+            );
+            if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+              return;
+            }
+            dispatch({
+              type: "WalletAccountUpdated",
+              wallet: {
+                queriedAddress: configuredRewardAddress,
+                account: mockWalletResult,
+                error: null,
+              },
+            });
+          }
+        }
+
         if (!mockMode) {
           const process = await getCoreProcessState();
           if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
             return;
           }
           dispatch({ type: "CoreProcessUpdated", process });
+
           if (state.activeView === "diagnostics") {
             const diagnosticsResults = await Promise.allSettled([
               getCoreManifest(),
@@ -190,7 +234,53 @@ export function useDesktopState(): DesktopStateController {
               },
             });
           }
+
+          if (state.activeView === "wallet") {
+            if (configuredRewardAddress.length === 0) {
+              dispatch({
+                type: "WalletAccountUpdated",
+                wallet: { queriedAddress: null, account: null, error: null },
+              });
+            } else if (process.state !== "running" || snapshot.api_error) {
+              dispatch({
+                type: "WalletAccountUpdated",
+                wallet: {
+                  queriedAddress: configuredRewardAddress,
+                  account: null,
+                  error: null,
+                },
+              });
+            } else {
+              try {
+                const walletAccount = await lookupExplorerAddress(configuredRewardAddress);
+                if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+                  return;
+                }
+                dispatch({
+                  type: "WalletAccountUpdated",
+                  wallet: {
+                    queriedAddress: configuredRewardAddress,
+                    account: walletAccount,
+                    error: null,
+                  },
+                });
+              } catch (walletErr) {
+                if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+                  return;
+                }
+                dispatch({
+                  type: "WalletAccountUpdated",
+                  wallet: {
+                    queriedAddress: configuredRewardAddress,
+                    account: null,
+                    error: String(walletErr),
+                  },
+                });
+              }
+            }
+          }
         }
+
         if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
           return;
         }
@@ -202,7 +292,7 @@ export function useDesktopState(): DesktopStateController {
         dispatch({ type: "DesktopActionFailed", message: String(err) });
       }
     },
-    [state.activeView, state.mockMode],
+    [state.activeView, state.config.miner_reward_address, state.mockMode],
   );
 
   usePollingEffect(refresh, 5000);

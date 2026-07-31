@@ -2,6 +2,7 @@ import { Sidebar } from "./components/Sidebar";
 import { StatusLine } from "./components/StatusLine";
 import { DashboardGrid } from "./features/dashboard/DashboardGrid";
 import { ExplorerPanel } from "./features/explorer/ExplorerPanel";
+import { MiningPanel } from "./features/mining/MiningPanel";
 import { CreateNodeWizard } from "./features/node-manager/CreateNodeWizard";
 import { NodeControls } from "./features/node-manager/NodeControls";
 import { PeerManagerPanel } from "./features/peers/PeerManagerPanel";
@@ -15,7 +16,9 @@ export function AppShell() {
       ? "Blockchain Explorer"
       : state.activeView === "peers"
         ? "Peer Manager"
-        : "Node Manager";
+        : state.activeView === "mining"
+          ? "Mining Status"
+          : "Node Manager";
 
   return (
     <main className="app-shell">
@@ -41,6 +44,8 @@ export function AppShell() {
           <ExplorerPanel state={state} actions={actions} />
         ) : state.activeView === "peers" ? (
           <PeerManagerPanel state={state} actions={actions} />
+        ) : state.activeView === "mining" ? (
+          <MiningPanel state={state} />
         ) : (
           <DashboardGrid state={state} actions={actions} />
         )}

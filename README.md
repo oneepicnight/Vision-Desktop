@@ -12,8 +12,21 @@ Current desktop scope includes:
 - desktop-managed process controls
 - read-only blockchain explorer for address and transaction inspection
 - read-only peer manager for current connection and recovery visibility
+- read-only mining status from the existing Desktop snapshot
 - support package generation
 - mock-mode development workflows
+
+The initial Mining page is read-only. It displays confirmed data already present in the Desktop snapshot and Desktop-managed node configuration:
+
+- runtime mining enabled status when reported by Core
+- runtime active or inactive state when reported by Core
+- mining availability from the existing status snapshot
+- paused reason and recovery state when reported by Core
+- current height context
+- Desktop-managed mining configuration and reward address
+- Desktop-side last refresh time
+
+Enabled mining does not necessarily mean that mining is actively producing blocks.
 
 Bundled Core baseline for local development:
 

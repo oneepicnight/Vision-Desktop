@@ -117,6 +117,7 @@ const baseState: DesktopState = {
     loading: false,
     error: null,
   },
+  lastUpdatedAt: null,
 };
 
 const addressResult: ExplorerAddressResult = {
@@ -151,6 +152,12 @@ export function runDesktopReducerTransitionTests() {
   {
     const next = applyDesktopEvent(baseState, { type: "ActiveViewChanged", view: "peers" });
     assertEqual(next.activeView, "peers");
+    expectPreserved(baseState, next, ["activeView"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, { type: "ActiveViewChanged", view: "mining" });
+    assertEqual(next.activeView, "mining");
     expectPreserved(baseState, next, ["activeView"]);
   }
 
@@ -270,10 +277,12 @@ export function runDesktopReducerTransitionTests() {
       type: "DashboardSnapshotUpdated",
       snapshot: baseSnapshot,
       message: "Dashboard refreshed",
+      receivedAt: 1234,
     });
     assertDeepEqual(next.snapshot, baseSnapshot);
     assertEqual(next.message, "Dashboard refreshed");
-    expectPreserved(baseState, next, ["snapshot", "message"]);
+    assertEqual(next.lastUpdatedAt, 1234);
+    expectPreserved(baseState, next, ["snapshot", "message", "lastUpdatedAt"]);
   }
 
   {
@@ -331,6 +340,7 @@ export function runDesktopReducerTransitionTests() {
       type: "DashboardSnapshotUpdated",
       snapshot: baseSnapshot,
       message: "Dashboard refreshed",
+      receivedAt: 1234,
     });
     const settledState = applyDesktopEvent(updatedState, { type: "DesktopUpdateSettled" });
     assertEqual(settledState.loading, false);
@@ -349,6 +359,7 @@ export function runDesktopReducerTransitionTests() {
       type: "DashboardSnapshotUpdated",
       snapshot: baseSnapshot,
       message: "Dashboard refreshed",
+      receivedAt: 1234,
     });
     assertDeepEqual(dashboardState.explorer.result, addressResult);
     assertDeepEqual(dashboardState.snapshot, baseSnapshot);

@@ -67,7 +67,12 @@ export function applyDesktopEvent(state: DesktopState, event: DesktopEvent): Des
     case "DashboardRefreshStarted":
       return { ...state, loading: true, error: null };
     case "DashboardSnapshotUpdated":
-      return { ...state, snapshot: event.snapshot, message: event.message };
+      return {
+        ...state,
+        snapshot: event.snapshot,
+        message: event.message,
+        lastUpdatedAt: event.receivedAt,
+      };
     case "CoreProcessUpdated":
       return { ...state, process: event.process };
     case "DesktopUpdateSettled":

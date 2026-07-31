@@ -17,7 +17,12 @@ export type DesktopEvent =
   | { type: "ExplorerLookupCleared" }
   | { type: "ExplorerLookupFailed"; message: string }
   | { type: "DashboardRefreshStarted" }
-  | { type: "DashboardSnapshotUpdated"; snapshot: DashboardSnapshot; message: string }
+  | {
+      type: "DashboardSnapshotUpdated";
+      snapshot: DashboardSnapshot;
+      message: string;
+      receivedAt: number;
+    }
   | { type: "CoreProcessUpdated"; process: ProcessState }
   | { type: "DesktopUpdateSettled" }
   | { type: "DesktopActionStarted"; name: string }

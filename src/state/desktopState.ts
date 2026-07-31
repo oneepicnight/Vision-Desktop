@@ -64,6 +64,7 @@ const initialDesktopState: DesktopState = {
   wizardOpen: false,
   config: emptyConfig,
   explorer: initialExplorerState,
+  lastUpdatedAt: null,
 };
 
 export type DesktopState = {
@@ -77,6 +78,7 @@ export type DesktopState = {
   wizardOpen: boolean;
   config: NodeConfig;
   explorer: ExplorerState;
+  lastUpdatedAt: number | null;
 };
 
 export type DesktopActions = {
@@ -127,6 +129,7 @@ export function useDesktopState(): DesktopStateController {
           message: mockMode
             ? "Showing development mock data"
             : "Dashboard refreshed",
+          receivedAt: Date.now(),
         });
         if (!mockMode) {
           const process = await getCoreProcessState();

@@ -1,4 +1,4 @@
-﻿import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,6 +12,8 @@ const files = [
   ["src/state/desktopRequestTracker.ts", "src/state/desktopRequestTracker.js"],
   ["src/state/__tests__/desktopReducer.test.ts", "src/state/__tests__/desktopReducer.test.js"],
   ["src/state/__tests__/desktopRequestTracker.test.ts", "src/state/__tests__/desktopRequestTracker.test.js"],
+  ["src/features/mining/miningStatus.ts", "src/features/mining/miningStatus.js"],
+  ["src/features/mining/miningStatus.test.ts", "src/features/mining/miningStatus.test.js"],
 ];
 
 try {
@@ -34,6 +36,7 @@ try {
 
   await import(pathToFileURL(path.join(outRoot, "src/state/__tests__/desktopReducer.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/state/__tests__/desktopRequestTracker.test.js")));
+  await import(pathToFileURL(path.join(outRoot, "src/features/mining/miningStatus.test.js")));
   console.log("Desktop state transition tests passed");
 } finally {
   await rm(outRoot, { recursive: true, force: true });

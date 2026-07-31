@@ -29,6 +29,8 @@ The Peer Manager uses a Vision World constellation presentation around the exist
 
 The Mining page uses a Vision World operations presentation adapted from the legacy mining command-center motif. Its reactor artwork and status lighting are decorative; all displayed state comes from the existing Desktop snapshot and Desktop-managed configuration. Legacy localhost calls, miner controls, pools, farms, performance tuning, wallet linking, reward calculations, and unsupported telemetry are not included.
 
+The Diagnostics page uses a Vision World systems-observatory presentation adapted from the legacy command-center and log-console motifs. Its radar artwork is decorative, while process, API, recovery, peer, manifest, verification, operator-message, and log-tail values come only from the existing typed Desktop state and fixed backend commands. Legacy live-stream connections, client-side log export, invented log classification, direct network calls, and unrestricted file access are not included.
+
 Desktop lifecycle controls currently include Start, Stop, Restart, and Refresh from the top application bar.
 
 Lifecycle behavior and safety boundary:
@@ -105,6 +107,9 @@ Known Diagnostics limitations:
 - no arbitrary log browsing or file-system traversal is exposed in the UI
 - active config path is not currently exposed by the Desktop service boundary
 - raw log tails are capped and may omit older lines
+- stdout and stderr are fixed snapshot tails, not a live streaming console
+- Desktop does not infer severity, category, or node health from arbitrary log text
+- support-package generation and directory opening remain the only support actions; they use existing Desktop-managed paths
 - the page does not add write controls for mining or Core runtime behavior
 
 Bundled Core baseline for local development:

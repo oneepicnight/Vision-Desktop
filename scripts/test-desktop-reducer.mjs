@@ -5,11 +5,13 @@ import { pathToFileURL } from "node:url";
 import ts from "typescript";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
-const outRoot = await mkdtemp(path.join(tmpdir(), "vision-desktop-reducer-test-"));
+const outRoot = await mkdtemp(path.join(tmpdir(), "vision-desktop-state-test-"));
 
 const files = [
   ["src/state/desktopReducer.ts", "src/state/desktopReducer.js"],
+  ["src/state/desktopRequestTracker.ts", "src/state/desktopRequestTracker.js"],
   ["src/state/__tests__/desktopReducer.test.ts", "src/state/__tests__/desktopReducer.test.js"],
+  ["src/state/__tests__/desktopRequestTracker.test.ts", "src/state/__tests__/desktopRequestTracker.test.js"],
 ];
 
 try {
@@ -31,7 +33,8 @@ try {
   }
 
   await import(pathToFileURL(path.join(outRoot, "src/state/__tests__/desktopReducer.test.js")));
-  console.log("Desktop reducer transition tests passed");
+  await import(pathToFileURL(path.join(outRoot, "src/state/__tests__/desktopRequestTracker.test.js")));
+  console.log("Desktop state transition tests passed");
 } finally {
   await rm(outRoot, { recursive: true, force: true });
 }

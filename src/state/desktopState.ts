@@ -14,6 +14,13 @@ import {
 } from "../services/coreApi";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
 import { applyDesktopEvent } from "./desktopReducer";
+import {
+  beginDesktopRequest,
+  createDesktopRequestTracker,
+  invalidateDesktopRequestsForModeChange,
+  isDesktopRequestCurrent,
+  type DesktopRequestToken,
+} from "./desktopRequestTracker";
 
 const emptyConfig: NodeConfig = {
   node_name: "Default Node",
@@ -72,35 +79,70 @@ export type DesktopStateController = {
 
 export function useDesktopState(): DesktopStateController {
   const [state, dispatch] = React.useReducer(applyDesktopEvent, initialDesktopState);
+  const requestTrackerRef = React.useRef(createDesktopRequestTracker());
 
-  const refresh = React.useCallback(async () => {
-    try {
-      dispatch({ type: "DashboardRefreshStarted" });
-      const snapshot = state.mockMode ? await getMockDashboardSnapshot() : await getDashboardSnapshot();
-      dispatch({
-        type: "DashboardSnapshotUpdated",
-        snapshot,
-        message: state.mockMode ? "Showing development mock data" : "Dashboard refreshed",
-      });
-      if (!state.mockMode) {
-        dispatch({ type: "CoreProcessUpdated", process: await getCoreProcessState() });
+  const refresh = React.useCallback(
+    async (existingToken?: DesktopRequestToken) => {
+      const token = existingToken ?? beginDesktopRequest(requestTrackerRef.current);
+      const mockMode = state.mockMode;
+
+      try {
+        dispatch({ type: "DashboardRefreshStarted" });
+        const snapshot = mockMode
+          ? await getMockDashboardSnapshot()
+          : await getDashboardSnapshot();
+        if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+          return;
+        }
+        dispatch({
+          type: "DashboardSnapshotUpdated",
+          snapshot,
+          message: mockMode
+            ? "Showing development mock data"
+            : "Dashboard refreshed",
+        });
+        if (!mockMode) {
+          const process = await getCoreProcessState();
+          if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+            return;
+          }
+          dispatch({ type: "CoreProcessUpdated", process });
+        }
+        if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+          return;
+        }
+        dispatch({ type: "DesktopUpdateSettled" });
+      } catch (err) {
+        if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+          return;
+        }
+        dispatch({ type: "DesktopActionFailed", message: String(err) });
       }
-      dispatch({ type: "DesktopUpdateSettled" });
-    } catch (err) {
-      dispatch({ type: "DesktopActionFailed", message: String(err) });
-    }
-  }, [state.mockMode]);
+    },
+    [state.mockMode],
+  );
 
   usePollingEffect(refresh, 5000);
 
   const runAction = React.useCallback(
     async (name: string, fn: () => Promise<unknown>) => {
+      const token = beginDesktopRequest(requestTrackerRef.current);
+
       try {
         dispatch({ type: "DesktopActionStarted", name });
         await fn();
-        await refresh();
+        if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+          return;
+        }
+        await refresh(token);
+        if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+          return;
+        }
         dispatch({ type: "DesktopActionCompleted", name });
       } catch (err) {
+        if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+          return;
+        }
         dispatch({ type: "DesktopActionFailed", message: String(err) });
       }
     },
@@ -109,17 +151,22 @@ export function useDesktopState(): DesktopStateController {
 
   const actions = React.useMemo<DesktopActions>(
     () => ({
-      setMockMode: (mockMode) => dispatch({ type: "MockModeChanged", mockMode }),
+      setMockMode: (mockMode) => {
+        invalidateDesktopRequestsForModeChange(requestTrackerRef.current);
+        dispatch({ type: "MockModeChanged", mockMode });
+      },
       setWizardOpen: (open) => dispatch({ type: "WizardOpenChanged", open }),
       setConfig: (config) => dispatch({ type: "NodeConfigChanged", config }),
-      refresh,
+      refresh: () => refresh(),
       startCore: () => runAction("Start", startCore),
       stopCore: () => runAction("Stop", stopCore),
       restartCore: () => runAction("Restart", restartCore),
-      generateSupportPackage: () => runAction("Generate support package", generateSupportPackage),
+      generateSupportPackage: () =>
+        runAction("Generate support package", generateSupportPackage),
       openLogsDirectory: () => runAction("Open logs", openLogsDirectory),
       openDataDirectory: () => runAction("Open data", openDataDirectory),
-      saveNodeConfig: () => runAction("Save node config", () => saveNodeConfigService(state.config)),
+      saveNodeConfig: () =>
+        runAction("Save node config", () => saveNodeConfigService(state.config)),
     }),
     [refresh, runAction, state.config],
   );

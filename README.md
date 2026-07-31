@@ -21,6 +21,8 @@ Current desktop scope includes:
 
 The Desktop shell uses a local Vision World-inspired dark-space theme with namespaced design tokens, glass operator panels, and glowing navigation. The theme is implemented entirely within Vision Desktop: it does not import the legacy wallet runtime, external CDN scripts, wallet custody code, direct browser API calls, or additional frontend dependencies.
 
+The Dashboard includes a dependency-free Vision World network overview adapted from the legacy globe motif. Its globe and orbit artwork are decorative CSS, while the displayed Core state, chain height, peer count, and recovery state come only from the existing Desktop snapshot. It does not claim or infer geographic peer locations.
+
 Desktop lifecycle controls currently include Start, Stop, Restart, and Refresh from the top application bar.
 
 Lifecycle behavior and safety boundary:

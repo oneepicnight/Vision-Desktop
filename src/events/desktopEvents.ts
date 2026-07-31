@@ -1,4 +1,5 @@
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
+import type { DiagnosticsState } from "../types/diagnostics";
 import type {
   DesktopView,
   ExplorerLookupMode,
@@ -23,6 +24,7 @@ export type DesktopEvent =
       message: string;
       receivedAt: number;
     }
+  | { type: "DiagnosticsUpdated"; diagnostics: DiagnosticsState }
   | { type: "CoreProcessUpdated"; process: ProcessState }
   | { type: "DesktopUpdateSettled" }
   | { type: "DesktopActionStarted"; name: string }

@@ -73,6 +73,8 @@ export function applyDesktopEvent(state: DesktopState, event: DesktopEvent): Des
         message: event.message,
         lastUpdatedAt: event.receivedAt,
       };
+    case "DiagnosticsUpdated":
+      return { ...state, diagnostics: event.diagnostics };
     case "CoreProcessUpdated":
       return { ...state, process: event.process };
     case "DesktopUpdateSettled":

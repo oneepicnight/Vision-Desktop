@@ -2,7 +2,10 @@ import React from "react";
 import { usePollingEffect } from "../hooks/usePollingEffect";
 import {
   generateSupportPackage,
+  getCoreManifest,
   getCoreProcessState,
+  getCoreStderrTail,
+  getCoreStdoutTail,
   getDashboardSnapshot,
   getMockDashboardSnapshot,
   lookupExplorerAddress,
@@ -14,8 +17,10 @@ import {
   searchMockExplorer,
   startCore,
   stopCore,
+  verifyCoreBinary,
 } from "../services/coreApi";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
+import type { DiagnosticsState } from "../types/diagnostics";
 import type {
   DesktopView,
   ExplorerLookupMode,
@@ -53,6 +58,14 @@ const initialExplorerState: ExplorerState = {
   error: null,
 };
 
+const initialDiagnosticsState: DiagnosticsState = {
+  manifest: null,
+  verification: null,
+  stdoutTail: null,
+  stderrTail: null,
+  error: null,
+};
+
 const initialDesktopState: DesktopState = {
   activeView: "dashboard",
   mockMode: true,
@@ -64,6 +77,7 @@ const initialDesktopState: DesktopState = {
   wizardOpen: false,
   config: emptyConfig,
   explorer: initialExplorerState,
+  diagnostics: initialDiagnosticsState,
   lastUpdatedAt: null,
 };
 
@@ -78,6 +92,7 @@ export type DesktopState = {
   wizardOpen: boolean;
   config: NodeConfig;
   explorer: ExplorerState;
+  diagnostics: DiagnosticsState;
   lastUpdatedAt: number | null;
 };
 
@@ -137,6 +152,44 @@ export function useDesktopState(): DesktopStateController {
             return;
           }
           dispatch({ type: "CoreProcessUpdated", process });
+          if (state.activeView === "diagnostics") {
+            const diagnosticsResults = await Promise.allSettled([
+              getCoreManifest(),
+              verifyCoreBinary(),
+              getCoreStdoutTail(),
+              getCoreStderrTail(),
+            ]);
+            if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+              return;
+            }
+
+            const diagnosticsError = diagnosticsResults.find(
+              (result): result is PromiseRejectedResult => result.status === "rejected",
+            );
+
+            dispatch({
+              type: "DiagnosticsUpdated",
+              diagnostics: {
+                manifest:
+                  diagnosticsResults[0].status === "fulfilled"
+                    ? diagnosticsResults[0].value
+                    : null,
+                verification:
+                  diagnosticsResults[1].status === "fulfilled"
+                    ? diagnosticsResults[1].value
+                    : null,
+                stdoutTail:
+                  diagnosticsResults[2].status === "fulfilled"
+                    ? diagnosticsResults[2].value
+                    : null,
+                stderrTail:
+                  diagnosticsResults[3].status === "fulfilled"
+                    ? diagnosticsResults[3].value
+                    : null,
+                error: diagnosticsError ? String(diagnosticsError.reason) : null,
+              },
+            });
+          }
         }
         if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
           return;
@@ -149,7 +202,7 @@ export function useDesktopState(): DesktopStateController {
         dispatch({ type: "DesktopActionFailed", message: String(err) });
       }
     },
-    [state.mockMode],
+    [state.activeView, state.mockMode],
   );
 
   usePollingEffect(refresh, 5000);

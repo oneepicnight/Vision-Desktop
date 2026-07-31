@@ -13,6 +13,7 @@ Current desktop scope includes:
 - read-only blockchain explorer for address and transaction inspection
 - read-only peer manager for current connection and recovery visibility
 - read-only mining status from the existing Desktop snapshot
+- read-only diagnostics view for process, API, verification, and fixed log-tail visibility
 - support package generation
 - mock-mode development workflows
 
@@ -27,6 +28,24 @@ The initial Mining page is read-only. It displays confirmed data already present
 - Desktop-side last refresh time
 
 Enabled mining does not necessarily mean that mining is actively producing blocks.
+
+The initial Diagnostics page is read-only. It displays confirmed information already available through the existing Desktop snapshot, process supervisor, and current Tauri command surface:
+
+- Core process state and private API connectivity
+- API error details when the dashboard snapshot cannot refresh cleanly
+- recovery state and peer summary from the existing snapshot
+- bundled Core manifest and binary verification status
+- bundled Core executable path plus Desktop-managed data and log directories
+- recent stdout and stderr tails from the fixed Desktop-managed log files
+- support package availability and Desktop operator message
+- mock mode indication and Desktop-side last refresh time
+
+Known Diagnostics limitations:
+
+- no arbitrary log browsing or file-system traversal is exposed in the UI
+- active config path is not currently exposed by the Desktop service boundary
+- raw log tails are capped and may omit older lines
+- the page does not add write controls for mining or Core runtime behavior
 
 Bundled Core baseline for local development:
 

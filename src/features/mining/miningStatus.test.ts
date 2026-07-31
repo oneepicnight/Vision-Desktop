@@ -1,5 +1,6 @@
 import { deriveMiningViewModel } from "./miningStatus";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/core";
+import type { DiagnosticsState } from "../../types/diagnostics";
 import type { DesktopState } from "../../state/desktopState";
 
 function assertEqual<T>(actual: T, expected: T, message?: string) {
@@ -90,6 +91,14 @@ const baseProcess: ProcessState = {
   log_dir: "logs",
 };
 
+const baseDiagnostics: DiagnosticsState = {
+  manifest: null,
+  verification: null,
+  stdoutTail: null,
+  stderrTail: null,
+  error: null,
+};
+
 const baseState: DesktopState = {
   activeView: "dashboard",
   mockMode: false,
@@ -107,6 +116,7 @@ const baseState: DesktopState = {
     loading: false,
     error: null,
   },
+  diagnostics: baseDiagnostics,
   lastUpdatedAt: Date.UTC(2026, 6, 31, 12, 0, 0),
 };
 

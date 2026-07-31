@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
+import type { CoreManifest, CoreVerification } from "../types/diagnostics";
 import type {
   ExplorerAddressResult,
   ExplorerLookupMode,
@@ -17,6 +18,22 @@ export function getDashboardSnapshot() {
 
 export function getCoreProcessState() {
   return invoke<ProcessState>("get_core_process_state");
+}
+
+export function verifyCoreBinary() {
+  return invoke<CoreVerification>("verify_core_binary");
+}
+
+export function getCoreManifest() {
+  return invoke<CoreManifest>("get_core_manifest");
+}
+
+export function getCoreStdoutTail() {
+  return invoke<string>("get_core_stdout_tail");
+}
+
+export function getCoreStderrTail() {
+  return invoke<string>("get_core_stderr_tail");
 }
 
 export function startCore() {

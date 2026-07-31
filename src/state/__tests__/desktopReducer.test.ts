@@ -1,5 +1,6 @@
 import { applyDesktopEvent } from "../desktopReducer";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/core";
+import type { DiagnosticsState } from "../../types/diagnostics";
 import type { ExplorerAddressResult, ExplorerTransactionResult } from "../../types/explorer";
 import type { DesktopState } from "../desktopState";
 
@@ -100,6 +101,14 @@ const baseProcess: ProcessState = {
   log_dir: "logs",
 };
 
+const baseDiagnostics: DiagnosticsState = {
+  manifest: null,
+  verification: null,
+  stdoutTail: null,
+  stderrTail: null,
+  error: null,
+};
+
 const baseState: DesktopState = {
   activeView: "dashboard",
   mockMode: true,
@@ -117,6 +126,7 @@ const baseState: DesktopState = {
     loading: false,
     error: null,
   },
+  diagnostics: baseDiagnostics,
   lastUpdatedAt: null,
 };
 
@@ -158,6 +168,12 @@ export function runDesktopReducerTransitionTests() {
   {
     const next = applyDesktopEvent(baseState, { type: "ActiveViewChanged", view: "mining" });
     assertEqual(next.activeView, "mining");
+    expectPreserved(baseState, next, ["activeView"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, { type: "ActiveViewChanged", view: "diagnostics" });
+    assertEqual(next.activeView, "diagnostics");
     expectPreserved(baseState, next, ["activeView"]);
   }
 
@@ -292,6 +308,24 @@ export function runDesktopReducerTransitionTests() {
   }
 
   {
+    const diagnostics: DiagnosticsState = {
+      manifest: null,
+      verification: {
+        binary_path: "C:\\Vision\\vision-core.exe",
+        expected_sha256: "abc",
+        actual_sha256: "abc",
+        matches: true,
+      },
+      stdoutTail: "stdout",
+      stderrTail: "stderr",
+      error: null,
+    };
+    const next = applyDesktopEvent(baseState, { type: "DiagnosticsUpdated", diagnostics });
+    assertDeepEqual(next.diagnostics, diagnostics);
+    expectPreserved(baseState, next, ["diagnostics"]);
+  }
+
+  {
     const loadingState = { ...baseState, loading: true };
     const next = applyDesktopEvent(loadingState, { type: "DesktopUpdateSettled" });
     assertEqual(next.loading, false);
@@ -311,6 +345,17 @@ export function runDesktopReducerTransitionTests() {
     const next = applyDesktopEvent(loadingState, { type: "DesktopActionCompleted", name: "Start" });
     assertEqual(next.loading, false);
     assertEqual(next.message, "Start complete");
+    expectPreserved(loadingState, next, ["loading", "message"]);
+  }
+
+  {
+    const loadingState = { ...baseState, loading: true, message: "Generate support package..." };
+    const next = applyDesktopEvent(loadingState, {
+      type: "DesktopActionCompleted",
+      name: "Generate support package",
+    });
+    assertEqual(next.loading, false);
+    assertEqual(next.message, "Generate support package complete");
     expectPreserved(loadingState, next, ["loading", "message"]);
   }
 

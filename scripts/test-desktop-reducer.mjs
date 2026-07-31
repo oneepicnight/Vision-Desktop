@@ -12,6 +12,8 @@ const files = [
   ["src/state/desktopRequestTracker.ts", "src/state/desktopRequestTracker.js"],
   ["src/state/__tests__/desktopReducer.test.ts", "src/state/__tests__/desktopReducer.test.js"],
   ["src/state/__tests__/desktopRequestTracker.test.ts", "src/state/__tests__/desktopRequestTracker.test.js"],
+  ["src/features/diagnostics/diagnosticsStatus.ts", "src/features/diagnostics/diagnosticsStatus.js"],
+  ["src/features/diagnostics/diagnosticsStatus.test.ts", "src/features/diagnostics/diagnosticsStatus.test.js"],
   ["src/features/mining/miningStatus.ts", "src/features/mining/miningStatus.js"],
   ["src/features/mining/miningStatus.test.ts", "src/features/mining/miningStatus.test.js"],
 ];
@@ -36,6 +38,7 @@ try {
 
   await import(pathToFileURL(path.join(outRoot, "src/state/__tests__/desktopReducer.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/state/__tests__/desktopRequestTracker.test.js")));
+  await import(pathToFileURL(path.join(outRoot, "src/features/diagnostics/diagnosticsStatus.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/mining/miningStatus.test.js")));
   console.log("Desktop state transition tests passed");
 } finally {

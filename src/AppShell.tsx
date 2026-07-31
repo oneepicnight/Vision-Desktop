@@ -1,6 +1,7 @@
 import { Sidebar } from "./components/Sidebar";
 import { StatusLine } from "./components/StatusLine";
 import { DashboardGrid } from "./features/dashboard/DashboardGrid";
+import { DiagnosticsPanel } from "./features/diagnostics/DiagnosticsPanel";
 import { ExplorerPanel } from "./features/explorer/ExplorerPanel";
 import { MiningPanel } from "./features/mining/MiningPanel";
 import { CreateNodeWizard } from "./features/node-manager/CreateNodeWizard";
@@ -18,7 +19,9 @@ export function AppShell() {
         ? "Peer Manager"
         : state.activeView === "mining"
           ? "Mining Status"
-          : "Node Manager";
+          : state.activeView === "diagnostics"
+            ? "Diagnostics"
+            : "Node Manager";
 
   return (
     <main className="app-shell">
@@ -46,6 +49,8 @@ export function AppShell() {
           <PeerManagerPanel state={state} actions={actions} />
         ) : state.activeView === "mining" ? (
           <MiningPanel state={state} />
+        ) : state.activeView === "diagnostics" ? (
+          <DiagnosticsPanel state={state} actions={actions} />
         ) : (
           <DashboardGrid state={state} actions={actions} />
         )}

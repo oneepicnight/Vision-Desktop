@@ -36,6 +36,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .explorer-grid { align-items: start; }
 .peer-grid { align-items: start; }
 .mining-grid { align-items: start; }
+.diagnostics-grid { align-items: start; }
 .explorer-form { display: flex; flex-direction: column; gap: 12px; }
 .explorer-form label { display: flex; flex-direction: column; gap: 6px; color: #4c5c52; }
 .empty-state { margin: 0; color: #4c5c52; line-height: 1.5; }
@@ -57,4 +58,5 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 input, select { border: 1px solid #c5d0c9; border-radius: 6px; min-height: 36px; padding: 0 10px; background: #fff; color: #17201c; }
 .wide { grid-column: 1 / -1; }
 .note { margin: 0; padding: 10px; background: #f6f1df; border: 1px solid #dfd2a0; border-radius: 6px; color: #5e5225; }
+.log-tail { margin: 0; padding: 12px; border: 1px solid #d7e0da; border-radius: 6px; background: #f8faf9; color: #17201c; overflow: auto; max-height: 320px; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 1060px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

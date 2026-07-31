@@ -28,6 +28,9 @@ export function AppShell() {
 
   return (
     <main className="app-shell vision-theme">
+      <a className="skip-link" href="#main-content">
+        Skip to main content
+      </a>
       <div className="ambient-glow ambient-glow-primary" aria-hidden="true" />
       <div className="ambient-glow ambient-glow-secondary" aria-hidden="true" />
       <Sidebar
@@ -37,11 +40,11 @@ export function AppShell() {
         onMockModeChange={actions.setMockMode}
       />
 
-      <section className="content">
+      <section className="content" id="main-content" aria-labelledby="view-title" tabIndex={-1}>
         <header className="topbar">
           <div className="topbar-copy">
             <span className="eyebrow">Vision Network Console</span>
-            <h1>{title}</h1>
+            <h1 id="view-title">{title}</h1>
             <p>
               <span
                 className={`mode-indicator ${state.mockMode ? "is-mock" : "is-live"}`}

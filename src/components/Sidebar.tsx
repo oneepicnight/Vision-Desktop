@@ -42,7 +42,7 @@ export function Sidebar({
           <span>V</span>
         </div>
         <div className="brand-copy">
-          <h1>Vision</h1>
+          <span className="brand-name">Vision</span>
           <p>Network Desktop</p>
         </div>
       </div>
@@ -65,14 +65,14 @@ export function Sidebar({
         ))}
 
         <span className="nav-section-label nav-section-secondary">Utilities</span>
-        <button type="button" className="nav nav-muted" aria-disabled="true">
+        <button type="button" className="nav nav-muted" disabled>
           <span className="nav-icon" aria-hidden="true">
             <Wifi size={18} />
           </span>
           <span>Networking</span>
           <span className="nav-badge">Soon</span>
         </button>
-        <button type="button" className="nav nav-muted" aria-disabled="true">
+        <button type="button" className="nav nav-muted" disabled>
           <span className="nav-icon" aria-hidden="true">
             <Terminal size={18} />
           </span>

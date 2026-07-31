@@ -16,6 +16,31 @@ body {
   background: #02040c;
 }
 
+.skip-link {
+  position: fixed;
+  z-index: 1000;
+  top: 12px;
+  left: 284px;
+  padding: 9px 13px;
+  border: 1px solid var(--vision-border-bright, rgba(105, 190, 255, 0.48));
+  border-radius: 8px;
+  color: var(--vision-text, #f3f7ff);
+  background: #071228;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.42);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-160%);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.skip-link:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--vision-blue, #41c8ff);
+  outline-offset: 2px;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
 button,
 input,
 select {
@@ -145,9 +170,11 @@ button:disabled {
   transform: rotate(-5deg);
 }
 
-.brand-copy h1 {
+.brand-name {
+  display: block;
   margin: 0;
   font-size: 21px;
+  font-weight: 700;
   letter-spacing: 0.02em;
 }
 

@@ -10,7 +10,7 @@ export function Card({ title, icon, children }: CardProps) {
   return (
     <section className="panel">
       <div className="panel-title">
-        {icon}
+        <span className="panel-title-icon">{icon}</span>
         <h2>{title}</h2>
       </div>
       {children}

@@ -1,0 +1,35 @@
+:root {
+  font-family: Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  color-scheme: dark;
+  background: #02040c;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+.vision-theme {
+  --vision-space-black: #02040c;
+  --vision-deep-space: #071022;
+  --vision-panel: rgba(10, 20, 44, 0.78);
+  --vision-panel-strong: rgba(9, 18, 40, 0.94);
+  --vision-panel-soft: rgba(18, 30, 60, 0.62);
+  --vision-border: rgba(115, 166, 255, 0.2);
+  --vision-border-bright: rgba(105, 190, 255, 0.48);
+  --vision-blue: #41c8ff;
+  --vision-blue-strong: #5f84ff;
+  --vision-purple: #8b5cf6;
+  --vision-cyan: #54e6d4;
+  --vision-green: #50e6a8;
+  --vision-amber: #f6c85f;
+  --vision-red: #ff758f;
+  --vision-text: #f3f7ff;
+  --vision-text-soft: #c3d3f5;
+  --vision-text-muted: #8291b4;
+  --vision-shadow: 0 22px 70px rgba(0, 0, 0, 0.42);
+  --vision-glow: 0 0 38px rgba(65, 153, 255, 0.14);
+
+  color: var(--vision-text);
+  background:
+    radial-gradient(circle at 76% 8%, rgba(79, 93, 255, 0.17), transparent 31rem),
+    radial-gradient(circle at 26% 92%, rgba(24, 199, 225, 0.1), transparent 34rem),
+    linear-gradient(145deg, var(--vision-space-black) 0%, var(--vision-deep-space) 55%, #050918 100%);
+}

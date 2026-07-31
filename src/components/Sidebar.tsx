@@ -8,6 +8,7 @@ import {
   ShieldCheck,
   Terminal,
   Wifi,
+  type LucideIcon,
 } from "lucide-react";
 import type { DesktopView } from "../types/explorer";
 
@@ -18,6 +19,16 @@ type SidebarProps = {
   onMockModeChange: (mockMode: boolean) => void;
 };
 
+const primaryNavigation = [
+  { view: "dashboard", label: "Dashboard", icon: Activity },
+  { view: "wallet", label: "Wallet", icon: Landmark },
+  { view: "explorer", label: "Explorer", icon: Search },
+  { view: "peers", label: "Peers", icon: Network },
+  { view: "mining", label: "Mining", icon: Flame },
+  { view: "diagnostics", label: "Diagnostics", icon: ShieldCheck },
+  { view: "configuration", label: "Configuration", icon: Settings },
+] satisfies ReadonlyArray<{ view: DesktopView; label: string; icon: LucideIcon }>;
+
 export function Sidebar({
   activeView,
   onViewChange,
@@ -27,68 +38,66 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="mark">V</div>
-        <div>
+        <div className="mark" aria-hidden="true">
+          <span>V</span>
+        </div>
+        <div className="brand-copy">
           <h1>Vision</h1>
-          <p>Desktop 0.1.0 alpha</p>
+          <p>Network Desktop</p>
         </div>
       </div>
-      <button
-        className={`nav ${activeView === "dashboard" ? "active" : ""}`}
-        onClick={() => onViewChange("dashboard")}
-      >
-        <Activity size={18} />Dashboard
-      </button>
-      <button
-        className={`nav ${activeView === "wallet" ? "active" : ""}`}
-        onClick={() => onViewChange("wallet")}
-      >
-        <Landmark size={18} />Wallet
-      </button>
-      <button
-        className={`nav ${activeView === "explorer" ? "active" : ""}`}
-        onClick={() => onViewChange("explorer")}
-      >
-        <Search size={18} />Explorer
-      </button>
-      <button
-        className={`nav ${activeView === "peers" ? "active" : ""}`}
-        onClick={() => onViewChange("peers")}
-      >
-        <Network size={18} />Peers
-      </button>
-      <button
-        className={`nav ${activeView === "mining" ? "active" : ""}`}
-        onClick={() => onViewChange("mining")}
-      >
-        <Flame size={18} />Mining
-      </button>
-      <button
-        className={`nav ${activeView === "diagnostics" ? "active" : ""}`}
-        onClick={() => onViewChange("diagnostics")}
-      >
-        <ShieldCheck size={18} />Diagnostics
-      </button>
-      <button
-        className={`nav ${activeView === "configuration" ? "active" : ""}`}
-        onClick={() => onViewChange("configuration")}
-      >
-        <Settings size={18} />Configuration
-      </button>
-      <button className="nav">
-        <Wifi size={18} />Networking
-      </button>
-      <button className="nav">
-        <Terminal size={18} />Logs
-      </button>
-      <label className="toggle">
-        <input
-          type="checkbox"
-          checked={mockMode}
-          onChange={(event) => onMockModeChange(event.target.checked)}
-        />
-        Mock mode
-      </label>
+
+      <nav className="sidebar-navigation" aria-label="Vision Desktop">
+        <span className="nav-section-label">Operate</span>
+        {primaryNavigation.map(({ view, label, icon: Icon }) => (
+          <button
+            type="button"
+            key={view}
+            className={`nav ${activeView === view ? "active" : ""}`}
+            onClick={() => onViewChange(view)}
+            aria-current={activeView === view ? "page" : undefined}
+          >
+            <span className="nav-icon" aria-hidden="true">
+              <Icon size={18} />
+            </span>
+            <span>{label}</span>
+          </button>
+        ))}
+
+        <span className="nav-section-label nav-section-secondary">Utilities</span>
+        <button type="button" className="nav nav-muted" aria-disabled="true">
+          <span className="nav-icon" aria-hidden="true">
+            <Wifi size={18} />
+          </span>
+          <span>Networking</span>
+          <span className="nav-badge">Soon</span>
+        </button>
+        <button type="button" className="nav nav-muted" aria-disabled="true">
+          <span className="nav-icon" aria-hidden="true">
+            <Terminal size={18} />
+          </span>
+          <span>Logs</span>
+          <span className="nav-badge">Soon</span>
+        </button>
+      </nav>
+
+      <div className="sidebar-footer">
+        <label className="toggle">
+          <span>
+            <strong>Mock network</strong>
+            <small>Local development data</small>
+          </span>
+          <span className="toggle-control">
+            <input
+              type="checkbox"
+              checked={mockMode}
+              onChange={(event) => onMockModeChange(event.target.checked)}
+            />
+            <span className="toggle-track" aria-hidden="true" />
+          </span>
+        </label>
+        <span className="build-label">Desktop 0.1.0 alpha</span>
+      </div>
     </aside>
   );
 }

@@ -19,6 +19,8 @@ Current desktop scope includes:
 - support package generation
 - mock-mode development workflows
 
+The Desktop shell uses a local Vision World-inspired dark-space theme with namespaced design tokens, glass operator panels, and glowing navigation. The theme is implemented entirely within Vision Desktop: it does not import the legacy wallet runtime, external CDN scripts, wallet custody code, direct browser API calls, or additional frontend dependencies.
+
 Desktop lifecycle controls currently include Start, Stop, Restart, and Refresh from the top application bar.
 
 Lifecycle behavior and safety boundary:

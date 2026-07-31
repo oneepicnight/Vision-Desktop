@@ -24,9 +24,12 @@ const viewTitles = {
 export function AppShell() {
   const { state, actions } = useDesktopState();
   const title = viewTitles[state.activeView];
+  const modeLabel = state.mockMode ? "Development mock network" : "Live Core network";
 
   return (
-    <main className="app-shell">
+    <main className="app-shell vision-theme">
+      <div className="ambient-glow ambient-glow-primary" aria-hidden="true" />
+      <div className="ambient-glow ambient-glow-secondary" aria-hidden="true" />
       <Sidebar
         activeView={state.activeView}
         onViewChange={actions.setActiveView}
@@ -36,9 +39,16 @@ export function AppShell() {
 
       <section className="content">
         <header className="topbar">
-          <div>
+          <div className="topbar-copy">
+            <span className="eyebrow">Vision Network Console</span>
             <h1>{title}</h1>
-            <p>{state.snapshot?.mock_mode ? "Development mock mode" : "Real Core mode"}</p>
+            <p>
+              <span
+                className={`mode-indicator ${state.mockMode ? "is-mock" : "is-live"}`}
+                aria-hidden="true"
+              />
+              {modeLabel}
+            </p>
           </div>
           <NodeControls state={state} actions={actions} />
         </header>

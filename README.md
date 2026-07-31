@@ -36,6 +36,8 @@ Lifecycle behavior and safety boundary:
 - while a lifecycle action is in progress, conflicting lifecycle actions and manual refresh are disabled
 - recovery state is shown for operator context but does not independently disable lifecycle actions
 
+The Wallet uses a Vision World command-center presentation adapted from the legacy wallet's visual hierarchy. Its account hero, context strip, address provenance, account observation, and security-boundary cards use only the existing read-only Desktop view model; legacy wallet runtime behavior is not included.
+
 The initial Wallet page is read-only. It displays only confirmed non-secret data already available through the existing Desktop configuration and read-only backend surface:
 
 - configured mining reward address from the Desktop-managed node configuration

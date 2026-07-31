@@ -163,6 +163,8 @@ const baseState: DesktopState = {
   configuration: baseConfiguration,
   wallet: baseWallet,
   lastUpdatedAt: 5_000,
+  activeLifecycleAction: null,
+  pendingLifecycleConfirmation: null,
 };
 
 {
@@ -237,6 +239,8 @@ const baseState: DesktopState = {
       process: null,
       diagnostics: { ...baseDiagnostics, manifest: null, verification: null },
       lastUpdatedAt: null,
+  activeLifecycleAction: null,
+  pendingLifecycleConfirmation: null,
     },
     10_000,
   );

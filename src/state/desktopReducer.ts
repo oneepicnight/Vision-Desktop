@@ -6,7 +6,11 @@ export function applyDesktopEvent(state: DesktopState, event: DesktopEvent): Des
     case "ActiveViewChanged":
       return { ...state, activeView: event.view };
     case "MockModeChanged":
-      return { ...state, mockMode: event.mockMode };
+      return {
+        ...state,
+        mockMode: event.mockMode,
+        pendingLifecycleConfirmation: null,
+      };
     case "WizardOpenChanged":
       return { ...state, wizardOpen: event.open };
     case "NodeConfigChanged":
@@ -81,6 +85,36 @@ export function applyDesktopEvent(state: DesktopState, event: DesktopEvent): Des
       return { ...state, wallet: event.wallet };
     case "CoreProcessUpdated":
       return { ...state, process: event.process };
+    case "LifecycleConfirmationRequested":
+      return { ...state, pendingLifecycleConfirmation: event.action };
+    case "LifecycleConfirmationDismissed":
+      return { ...state, pendingLifecycleConfirmation: null };
+    case "LifecycleActionStarted":
+      return {
+        ...state,
+        loading: true,
+        error: null,
+        message: event.message,
+        activeLifecycleAction: event.action,
+        pendingLifecycleConfirmation: null,
+      };
+    case "LifecycleActionCompleted":
+      return {
+        ...state,
+        loading: false,
+        message: event.message,
+        activeLifecycleAction: null,
+        pendingLifecycleConfirmation: null,
+      };
+    case "LifecycleActionFailed":
+      return {
+        ...state,
+        loading: false,
+        error: event.message,
+        message: event.message,
+        activeLifecycleAction: null,
+        pendingLifecycleConfirmation: null,
+      };
     case "DesktopUpdateSettled":
       return { ...state, loading: false };
     case "DesktopActionStarted":

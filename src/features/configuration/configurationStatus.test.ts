@@ -155,6 +155,8 @@ const baseState: DesktopState = {
   configuration: baseConfiguration,
   wallet: baseWallet,
   lastUpdatedAt: 5_000,
+  activeLifecycleAction: null,
+  pendingLifecycleConfirmation: null,
 };
 
 {

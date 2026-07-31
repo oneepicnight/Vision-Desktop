@@ -14,9 +14,23 @@ Current desktop scope includes:
 - read-only blockchain explorer for address and transaction inspection
 - read-only peer manager for current connection and recovery visibility
 - read-only mining status from the existing Desktop snapshot
-- read-only diagnostics view for process, API, verification, and fixed log-tail visibility`r`n- read-only node configuration view for Desktop-managed configuration visibility and limited runtime comparison
+- read-only diagnostics view for process, API, verification, and fixed log-tail visibility
+- read-only node configuration view for Desktop-managed configuration visibility and limited runtime comparison
 - support package generation
 - mock-mode development workflows
+
+Desktop lifecycle controls currently include Start, Stop, Restart, and Refresh from the top application bar.
+
+Lifecycle behavior and safety boundary:
+
+- Start is available only when the observed Core process state is stopped or crashed
+- Stop is available only when the observed Core process state is running or crashed
+- Restart is available only when the observed Core process state is running or crashed
+- lifecycle controls are disabled in mock mode
+- restart requires an explicit confirmation step before the command is sent
+- command completion and observed process state are treated as separate facts
+- while a lifecycle action is in progress, conflicting lifecycle actions and manual refresh are disabled
+- recovery state is shown for operator context but does not independently disable lifecycle actions
 
 The initial Wallet page is read-only. It displays only confirmed non-secret data already available through the existing Desktop configuration and read-only backend surface:
 

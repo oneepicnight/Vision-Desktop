@@ -144,6 +144,8 @@ const baseState: DesktopState = {
   configuration: baseConfiguration,
   wallet: baseWallet,
   lastUpdatedAt: null,
+  activeLifecycleAction: null,
+  pendingLifecycleConfirmation: null,
 };
 
 const addressResult: ExplorerAddressResult = {
@@ -333,6 +335,71 @@ export function runDesktopReducerTransitionTests() {
     const next = applyDesktopEvent(baseState, { type: "CoreProcessUpdated", process: baseProcess });
     assertDeepEqual(next.process, baseProcess);
     expectPreserved(baseState, next, ["process"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, {
+      type: "LifecycleConfirmationRequested",
+      action: "restart",
+    });
+    assertEqual(next.pendingLifecycleConfirmation, "restart");
+    expectPreserved(baseState, next, ["pendingLifecycleConfirmation"]);
+  }
+
+  {
+    const confirmState = applyDesktopEvent(baseState, {
+      type: "LifecycleConfirmationRequested",
+      action: "restart",
+    });
+    const next = applyDesktopEvent(confirmState, { type: "LifecycleConfirmationDismissed" });
+    assertEqual(next.pendingLifecycleConfirmation, null);
+    expectPreserved(confirmState, next, ["pendingLifecycleConfirmation"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, {
+      type: "LifecycleActionStarted",
+      action: "start",
+      message: "Start command requested...",
+    });
+    assertEqual(next.activeLifecycleAction, "start");
+    assertEqual(next.loading, true);
+    assertEqual(next.error, null);
+    assertEqual(next.message, "Start command requested...");
+    expectPreserved(baseState, next, ["activeLifecycleAction", "loading", "error", "message", "pendingLifecycleConfirmation"]);
+  }
+
+  {
+    const started = applyDesktopEvent(baseState, {
+      type: "LifecycleActionStarted",
+      action: "restart",
+      message: "Restart command requested...",
+    });
+    const next = applyDesktopEvent(started, {
+      type: "LifecycleActionCompleted",
+      action: "restart",
+      message: "Restart command completed; confirm the observed process state below.",
+    });
+    assertEqual(next.activeLifecycleAction, null);
+    assertEqual(next.loading, false);
+    assertEqual(next.message, "Restart command completed; confirm the observed process state below.");
+  }
+
+  {
+    const started = applyDesktopEvent(baseState, {
+      type: "LifecycleActionStarted",
+      action: "stop",
+      message: "Stop command requested...",
+    });
+    const next = applyDesktopEvent(started, {
+      type: "LifecycleActionFailed",
+      action: "stop",
+      message: "stop failed",
+    });
+    assertEqual(next.activeLifecycleAction, null);
+    assertEqual(next.loading, false);
+    assertEqual(next.error, "stop failed");
+    assertEqual(next.message, "stop failed");
   }
 
   {

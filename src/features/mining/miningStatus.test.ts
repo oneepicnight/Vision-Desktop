@@ -134,6 +134,8 @@ const baseState: DesktopState = {
   configuration: baseConfiguration,
   wallet: baseWallet,
   lastUpdatedAt: Date.UTC(2026, 6, 31, 12, 0, 0),
+  activeLifecycleAction: null,
+  pendingLifecycleConfirmation: null,
 };
 
 {

@@ -1,4 +1,5 @@
 import React from "react";
+import { deriveLifecycleControls } from "../features/node-manager/lifecycleControls";
 import { usePollingEffect } from "../hooks/usePollingEffect";
 import {
   generateSupportPackage,
@@ -40,6 +41,7 @@ import {
   isDesktopRequestCurrent,
   type DesktopRequestToken,
 } from "./desktopRequestTracker";
+import type { LifecycleActionKind } from "../features/node-manager/lifecycleControls";
 
 const emptyConfig: NodeConfig = {
   node_name: "Default Node",
@@ -98,6 +100,8 @@ const initialDesktopState: DesktopState = {
   configuration: initialConfigurationState,
   wallet: initialWalletState,
   lastUpdatedAt: null,
+  activeLifecycleAction: null,
+  pendingLifecycleConfirmation: null,
 };
 
 export type DesktopState = {
@@ -115,6 +119,8 @@ export type DesktopState = {
   configuration: ConfigurationState;
   wallet: WalletAccountState;
   lastUpdatedAt: number | null;
+  activeLifecycleAction: LifecycleActionKind | null;
+  pendingLifecycleConfirmation: LifecycleActionKind | null;
 };
 
 export type DesktopActions = {
@@ -130,6 +136,8 @@ export type DesktopActions = {
   startCore: () => Promise<void>;
   stopCore: () => Promise<void>;
   restartCore: () => Promise<void>;
+  confirmRestartCore: () => Promise<void>;
+  cancelLifecycleConfirmation: () => void;
   generateSupportPackage: () => Promise<void>;
   openLogsDirectory: () => Promise<void>;
   openDataDirectory: () => Promise<void>;
@@ -148,13 +156,40 @@ function ensureAddressResult(result: ExplorerResult): ExplorerAddressResult {
   return result;
 }
 
+function lifecycleStartMessage(action: LifecycleActionKind) {
+  if (action === "start") {
+    return "Start command requested...";
+  }
+  if (action === "stop") {
+    return "Stop command requested...";
+  }
+  return "Restart command requested...";
+}
+
+function lifecycleCompletedMessage(action: LifecycleActionKind) {
+  if (action === "start") {
+    return "Start command completed; confirm the observed process state below.";
+  }
+  if (action === "stop") {
+    return "Stop command completed; confirm the observed process state below.";
+  }
+  return "Restart command completed; confirm the observed process state below.";
+}
+
 export function useDesktopState(): DesktopStateController {
   const [state, dispatch] = React.useReducer(applyDesktopEvent, initialDesktopState);
   const requestTrackerRef = React.useRef(createDesktopRequestTracker());
   const explorerRequestTrackerRef = React.useRef(createDesktopRequestTracker());
 
   const refresh = React.useCallback(
-    async (existingToken?: DesktopRequestToken) => {
+    async (
+      source: "manual" | "polling" | "action" = "manual",
+      existingToken?: DesktopRequestToken,
+    ) => {
+      if (source === "polling" && state.activeLifecycleAction != null) {
+        return;
+      }
+
       const token = existingToken ?? beginDesktopRequest(requestTrackerRef.current);
       const mockMode = state.mockMode;
       const configuredRewardAddress = state.config.miner_reward_address.trim();
@@ -330,10 +365,10 @@ export function useDesktopState(): DesktopStateController {
         dispatch({ type: "DesktopActionFailed", message: String(err) });
       }
     },
-    [state.activeView, state.config.miner_reward_address, state.mockMode],
+    [state.activeLifecycleAction, state.activeView, state.config.miner_reward_address, state.mockMode],
   );
 
-  usePollingEffect(refresh, 5000);
+  usePollingEffect(() => refresh("polling"), 5000);
 
   const runAction = React.useCallback(
     async (name: string, fn: () => Promise<unknown>) => {
@@ -345,7 +380,7 @@ export function useDesktopState(): DesktopStateController {
         if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
           return;
         }
-        await refresh(token);
+        await refresh("action", token);
         if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
           return;
         }
@@ -358,6 +393,62 @@ export function useDesktopState(): DesktopStateController {
       }
     },
     [refresh],
+  );
+
+  const runLifecycleAction = React.useCallback(
+    async (action: LifecycleActionKind, fn: () => Promise<unknown>) => {
+      const derived = deriveLifecycleControls(state);
+      const allowed =
+        action === "start"
+          ? derived.start.enabled
+          : action === "stop"
+            ? derived.stop.enabled
+            : derived.restart.enabled;
+      const reason =
+        action === "start"
+          ? derived.start.reason
+          : action === "stop"
+            ? derived.stop.reason
+            : derived.restart.reason;
+
+      if (!allowed) {
+        dispatch({ type: "DesktopActionFailed", message: reason });
+        return;
+      }
+
+      const token = beginDesktopRequest(requestTrackerRef.current);
+
+      try {
+        dispatch({
+          type: "LifecycleActionStarted",
+          action,
+          message: lifecycleStartMessage(action),
+        });
+        await fn();
+        if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+          return;
+        }
+        await refresh("action", token);
+        if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+          return;
+        }
+        dispatch({
+          type: "LifecycleActionCompleted",
+          action,
+          message: lifecycleCompletedMessage(action),
+        });
+      } catch (err) {
+        if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+          return;
+        }
+        dispatch({
+          type: "LifecycleActionFailed",
+          action,
+          message: String(err),
+        });
+      }
+    },
+    [refresh, state],
   );
 
   const searchExplorer = React.useCallback(async () => {
@@ -429,10 +520,30 @@ export function useDesktopState(): DesktopStateController {
       setExplorerQuery: (query) => dispatch({ type: "ExplorerQueryChanged", query }),
       searchExplorer,
       clearExplorerResult: () => dispatch({ type: "ExplorerLookupCleared" }),
-      refresh: () => refresh(),
-      startCore: () => runAction("Start", startCore),
-      stopCore: () => runAction("Stop", stopCore),
-      restartCore: () => runAction("Restart", restartCore),
+      refresh: () => {
+        if (state.activeLifecycleAction != null) {
+          return Promise.resolve();
+        }
+        return refresh("manual");
+      },
+      startCore: () => runLifecycleAction("start", startCore),
+      stopCore: () => runLifecycleAction("stop", stopCore),
+      restartCore: async () => {
+        const controls = deriveLifecycleControls(state);
+        if (!controls.restart.enabled) {
+          dispatch({ type: "DesktopActionFailed", message: controls.restart.reason });
+          return;
+        }
+        dispatch({ type: "LifecycleConfirmationRequested", action: "restart" });
+      },
+      confirmRestartCore: () => {
+        if (state.pendingLifecycleConfirmation !== "restart") {
+          return Promise.resolve();
+        }
+        return runLifecycleAction("restart", restartCore);
+      },
+      cancelLifecycleConfirmation: () =>
+        dispatch({ type: "LifecycleConfirmationDismissed" }),
       generateSupportPackage: () =>
         runAction("Generate support package", generateSupportPackage),
       openLogsDirectory: () => runAction("Open logs", openLogsDirectory),
@@ -440,7 +551,7 @@ export function useDesktopState(): DesktopStateController {
       saveNodeConfig: () =>
         runAction("Save node config", () => saveNodeConfigService(state.config)),
     }),
-    [refresh, runAction, searchExplorer, state.config],
+    [refresh, runAction, runLifecycleAction, searchExplorer, state],
   );
 
   return { state, actions };

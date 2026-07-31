@@ -13,6 +13,8 @@ const files = [
   ["src/state/__tests__/desktopReducer.test.ts", "src/state/__tests__/desktopReducer.test.js"],
   ["src/state/__tests__/desktopRequestTracker.test.ts", "src/state/__tests__/desktopRequestTracker.test.js"],
   ["src/features/configuration/configurationStatus.ts", "src/features/configuration/configurationStatus.js"],
+  ["src/features/node-manager/lifecycleControls.ts", "src/features/node-manager/lifecycleControls.js"],
+  ["src/features/node-manager/lifecycleControls.test.ts", "src/features/node-manager/lifecycleControls.test.js"],
   ["src/features/configuration/configurationStatus.test.ts", "src/features/configuration/configurationStatus.test.js"],
   ["src/features/diagnostics/diagnosticsStatus.ts", "src/features/diagnostics/diagnosticsStatus.js"],
   ["src/features/diagnostics/diagnosticsStatus.test.ts", "src/features/diagnostics/diagnosticsStatus.test.js"],
@@ -43,6 +45,7 @@ try {
   await import(pathToFileURL(path.join(outRoot, "src/state/__tests__/desktopReducer.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/state/__tests__/desktopRequestTracker.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/configuration/configurationStatus.test.js")));
+  await import(pathToFileURL(path.join(outRoot, "src/features/node-manager/lifecycleControls.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/diagnostics/diagnosticsStatus.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/mining/miningStatus.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/wallet/walletStatus.test.js")));

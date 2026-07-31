@@ -1,3 +1,4 @@
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -75,16 +76,93 @@ pub struct DashboardSnapshot {
     pub mock_mode: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExplorerAddressResult {
+    pub kind: String,
+    pub address: String,
+    pub balance: String,
+    pub nonce: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExplorerTransactionResult {
+    pub kind: String,
+    pub txid: String,
+    pub payload: String,
+}
+
+fn create_api_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("failed to create API client: {e}"))
+}
+
+fn endpoint_url(api_port: u16, prefix: &str, value: &str) -> Result<Url, String> {
+    let mut url = Url::parse(&format!("http://127.0.0.1:{api_port}/{prefix}/"))
+        .map_err(|e| format!("failed to build {prefix} URL: {e}"))?;
+    url.path_segments_mut()
+        .map_err(|_| format!("failed to build {prefix} path"))?
+        .push(value);
+    Ok(url)
+}
+
+fn normalize_response_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+fn fetch_text(client: &reqwest::blocking::Client, url: Url) -> Result<String, String> {
+    client
+        .get(url)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|e| e.to_string())?
+        .text()
+        .map_err(|e| e.to_string())
+}
+
+pub fn fetch_explorer_address(
+    api_port: u16,
+    address: &str,
+) -> Result<ExplorerAddressResult, String> {
+    let client = create_api_client()?;
+    let balance = fetch_text(&client, endpoint_url(api_port, "balance", address)?)?;
+    let nonce = fetch_text(&client, endpoint_url(api_port, "nonce", address)?)?;
+    Ok(ExplorerAddressResult {
+        kind: "address".to_string(),
+        address: address.to_string(),
+        balance: normalize_response_text(&balance),
+        nonce: normalize_response_text(&nonce),
+    })
+}
+
+pub fn fetch_explorer_transaction(
+    api_port: u16,
+    txid: &str,
+) -> Result<ExplorerTransactionResult, String> {
+    let client = create_api_client()?;
+    let payload = fetch_text(&client, endpoint_url(api_port, "transaction", txid)?)?;
+    Ok(ExplorerTransactionResult {
+        kind: "transaction".to_string(),
+        txid: txid.to_string(),
+        payload: normalize_response_text(&payload),
+    })
+}
+
 pub fn fetch_dashboard(
     api_port: u16,
     process_state: String,
     data_dir_size_bytes: u64,
     log_dir_size_bytes: u64,
 ) -> DashboardSnapshot {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build();
-    let Ok(client) = client else {
+    let Ok(client) = create_api_client() else {
         return DashboardSnapshot {
             process_state,
             status: None,
@@ -218,5 +296,20 @@ mod tests {
         let parsed: NodeStatusSnapshot = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.canonical_tip_height, 1);
         assert_eq!(parsed.recovery.state, "normal");
+    }
+
+    #[test]
+    fn normalizes_json_payload_for_explorer_display() {
+        let normalized = normalize_response_text(r#"{"balance":123,"confirmed":true}"#);
+        assert_eq!(
+            normalized,
+            "{\n  \"balance\": 123,\n  \"confirmed\": true\n}"
+        );
+    }
+
+    #[test]
+    fn preserves_plain_text_payload_for_explorer_display() {
+        let normalized = normalize_response_text("42");
+        assert_eq!(normalized, "42");
     }
 }

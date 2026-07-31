@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   font-family: Inter, Segoe UI, system-ui, sans-serif;
   color: #17201c;
   background: #edf1ee;
@@ -33,6 +33,12 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .metric span { color: #66746c; }
 .metric strong { text-align: right; max-width: 58%; overflow-wrap: anywhere; }
 .button-stack { display: flex; flex-direction: column; gap: 10px; }
+.explorer-grid { align-items: start; }
+.explorer-form { display: flex; flex-direction: column; gap: 12px; }
+.explorer-form label { display: flex; flex-direction: column; gap: 6px; color: #4c5c52; }
+.empty-state { margin: 0; color: #4c5c52; line-height: 1.5; }
+.json-block { display: flex; flex-direction: column; gap: 12px; }
+.json-block pre { margin: 0; padding: 12px; border: 1px solid #d7e0da; border-radius: 6px; background: #f8faf9; color: #17201c; overflow: auto; max-height: 360px; }
 .wizard { margin-top: 16px; background: #ffffff; border: 1px solid #d7e0da; border-radius: 8px; padding: 16px; }
 .wizard-header { display: flex; justify-content: space-between; align-items: center; }
 .wizard-header h2 { margin: 0; font-size: 18px; }

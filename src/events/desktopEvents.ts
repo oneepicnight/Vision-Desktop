@@ -1,9 +1,21 @@
-﻿import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
+import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
+import type {
+  DesktopView,
+  ExplorerLookupMode,
+  ExplorerResult,
+} from "../types/explorer";
 
 export type DesktopEvent =
+  | { type: "ActiveViewChanged"; view: DesktopView }
   | { type: "MockModeChanged"; mockMode: boolean }
   | { type: "WizardOpenChanged"; open: boolean }
   | { type: "NodeConfigChanged"; config: NodeConfig }
+  | { type: "ExplorerModeChanged"; mode: ExplorerLookupMode }
+  | { type: "ExplorerQueryChanged"; query: string }
+  | { type: "ExplorerLookupStarted"; message: string }
+  | { type: "ExplorerResultUpdated"; result: ExplorerResult; message: string }
+  | { type: "ExplorerLookupCleared" }
+  | { type: "ExplorerLookupFailed"; message: string }
   | { type: "DashboardRefreshStarted" }
   | { type: "DashboardSnapshotUpdated"; snapshot: DashboardSnapshot; message: string }
   | { type: "CoreProcessUpdated"; process: ProcessState }

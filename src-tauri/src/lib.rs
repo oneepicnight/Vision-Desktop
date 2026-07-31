@@ -24,6 +24,8 @@ pub fn run() {
             commands::open_logs_directory,
             commands::open_data_directory,
             commands::get_dashboard_snapshot,
+            commands::lookup_explorer_address,
+            commands::lookup_explorer_transaction,
             commands::save_node_config,
             commands::generate_support_package,
             commands::run_network_diagnostics,

@@ -1,5 +1,6 @@
 import { applyDesktopEvent } from "../desktopReducer";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/core";
+import type { ExplorerAddressResult, ExplorerTransactionResult } from "../../types/explorer";
 import type { DesktopState } from "../desktopState";
 
 function assertEqual<T>(actual: T, expected: T, message?: string) {
@@ -100,6 +101,7 @@ const baseProcess: ProcessState = {
 };
 
 const baseState: DesktopState = {
+  activeView: "dashboard",
   mockMode: true,
   snapshot: null,
   process: null,
@@ -108,6 +110,26 @@ const baseState: DesktopState = {
   error: "previous error",
   wizardOpen: false,
   config: baseConfig,
+  explorer: {
+    mode: "address",
+    query: "",
+    result: null,
+    loading: false,
+    error: null,
+  },
+};
+
+const addressResult: ExplorerAddressResult = {
+  kind: "address",
+  address: "addr-1",
+  balance: "100",
+  nonce: "2",
+};
+
+const transactionResult: ExplorerTransactionResult = {
+  kind: "transaction",
+  txid: "tx-1",
+  payload: "{\n  \"txid\": \"tx-1\"\n}",
 };
 
 function expectPreserved(previous: DesktopState, next: DesktopState, changedKeys: Array<keyof DesktopState>) {
@@ -120,6 +142,12 @@ function expectPreserved(previous: DesktopState, next: DesktopState, changedKeys
 }
 
 export function runDesktopReducerTransitionTests() {
+  {
+    const next = applyDesktopEvent(baseState, { type: "ActiveViewChanged", view: "explorer" });
+    assertEqual(next.activeView, "explorer");
+    expectPreserved(baseState, next, ["activeView"]);
+  }
+
   {
     const next = applyDesktopEvent(baseState, { type: "MockModeChanged", mockMode: false });
     assertEqual(next.mockMode, false);
@@ -136,6 +164,92 @@ export function runDesktopReducerTransitionTests() {
     const next = applyDesktopEvent(baseState, { type: "NodeConfigChanged", config: alternateConfig });
     assertDeepEqual(next.config, alternateConfig);
     expectPreserved(baseState, next, ["config"]);
+  }
+
+  {
+    const stateWithExplorer = {
+      ...baseState,
+      explorer: { ...baseState.explorer, query: "addr-1", result: addressResult },
+    };
+    const next = applyDesktopEvent(stateWithExplorer, { type: "ExplorerModeChanged", mode: "transaction" });
+    assertEqual(next.explorer.mode, "transaction");
+    assertEqual(next.explorer.query, "");
+    assertEqual(next.explorer.result, null);
+    expectPreserved(stateWithExplorer, next, ["explorer"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, { type: "ExplorerQueryChanged", query: "addr-1" });
+    assertEqual(next.explorer.query, "addr-1");
+    expectPreserved(baseState, next, ["explorer"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, {
+      type: "ExplorerLookupStarted",
+      message: "Looking up address...",
+    });
+    assertEqual(next.explorer.loading, true);
+    assertEqual(next.explorer.error, null);
+    assertEqual(next.message, "Looking up address...");
+    expectPreserved(baseState, next, ["explorer", "message"]);
+  }
+
+  {
+    const loadingState = applyDesktopEvent(baseState, {
+      type: "ExplorerLookupStarted",
+      message: "Looking up address...",
+    });
+    const next = applyDesktopEvent(loadingState, {
+      type: "ExplorerResultUpdated",
+      result: addressResult,
+      message: "Address lookup complete",
+    });
+    assertDeepEqual(next.explorer.result, addressResult);
+    assertEqual(next.explorer.loading, false);
+    assertEqual(next.explorer.error, null);
+    assertEqual(next.message, "Address lookup complete");
+  }
+
+  {
+    const loadingState = applyDesktopEvent(baseState, {
+      type: "ExplorerLookupStarted",
+      message: "Looking up transaction...",
+    });
+    const next = applyDesktopEvent(loadingState, {
+      type: "ExplorerResultUpdated",
+      result: transactionResult,
+      message: "Transaction lookup complete",
+    });
+    assertDeepEqual(next.explorer.result, transactionResult);
+    assertEqual(next.explorer.loading, false);
+    assertEqual(next.message, "Transaction lookup complete");
+  }
+
+  {
+    const loadingState = applyDesktopEvent(baseState, {
+      type: "ExplorerLookupStarted",
+      message: "Looking up address...",
+    });
+    const next = applyDesktopEvent(loadingState, {
+      type: "ExplorerLookupFailed",
+      message: "lookup failed",
+    });
+    assertEqual(next.explorer.loading, false);
+    assertEqual(next.explorer.error, "lookup failed");
+    assertEqual(next.message, "lookup failed");
+  }
+
+  {
+    const stateWithExplorer = {
+      ...baseState,
+      explorer: { ...baseState.explorer, query: "addr-1", result: addressResult, error: "old" },
+    };
+    const next = applyDesktopEvent(stateWithExplorer, { type: "ExplorerLookupCleared" });
+    assertEqual(next.explorer.result, null);
+    assertEqual(next.explorer.error, null);
+    assertEqual(next.explorer.loading, false);
+    assertEqual(next.explorer.query, "addr-1");
   }
 
   {
@@ -217,6 +331,21 @@ export function runDesktopReducerTransitionTests() {
     assertEqual(settledState.error, null);
     assertDeepEqual(settledState.snapshot, baseSnapshot);
     assertEqual(settledState.message, "Dashboard refreshed");
+  }
+
+  {
+    const explorerState = applyDesktopEvent(baseState, {
+      type: "ExplorerResultUpdated",
+      result: addressResult,
+      message: "Address lookup complete",
+    });
+    const dashboardState = applyDesktopEvent(explorerState, {
+      type: "DashboardSnapshotUpdated",
+      snapshot: baseSnapshot,
+      message: "Dashboard refreshed",
+    });
+    assertDeepEqual(dashboardState.explorer.result, addressResult);
+    assertDeepEqual(dashboardState.snapshot, baseSnapshot);
   }
 }
 

@@ -1,10 +1,18 @@
-﻿# Vision Desktop
+# Vision Desktop
 
 Vision Desktop is the user-facing node manager for Vision Core. It launches and controls a bundled Vision Core executable internally so users do not need Rust, Cargo, Node.js, localhost URLs, TOML editing, manual hash checks, or manual process management.
 
 This repository is intentionally separate from Vision Core. It does not contain Vision Core source code and must not implement or duplicate consensus logic.
 
 Initial version: `0.1.0-alpha.1-dev`
+
+Current desktop scope includes:
+
+- node-manager dashboard
+- desktop-managed process controls
+- read-only blockchain explorer for address and transaction inspection
+- support package generation
+- mock-mode development workflows
 
 Bundled Core baseline for local development:
 

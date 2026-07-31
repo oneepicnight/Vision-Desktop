@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::{
-    api::{fetch_dashboard, mock_dashboard, DashboardSnapshot},
+    api::{
+        fetch_dashboard, fetch_explorer_address, fetch_explorer_transaction, mock_dashboard,
+        DashboardSnapshot, ExplorerAddressResult, ExplorerTransactionResult,
+    },
     config::{load_or_create_default_config, save_node_config as persist_node_config, NodeConfig},
     core_manifest::{
         load_core_manifest, verify_bundled_core_binary, CoreManifest, CoreVerification,
@@ -24,6 +27,11 @@ pub struct SaveNodeConfigRequest {
 pub struct NetworkDiagnosticsRequest {
     pub seed: Option<String>,
     pub api_bind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplorerQueryRequest {
+    pub query: String,
 }
 
 #[tauri::command]
@@ -127,6 +135,38 @@ pub fn get_dashboard_snapshot(state: State<SupervisorState>) -> Result<Dashboard
 #[tauri::command]
 pub fn get_mock_dashboard_snapshot() -> DashboardSnapshot {
     mock_dashboard()
+}
+
+#[tauri::command]
+pub fn lookup_explorer_address(
+    state: State<SupervisorState>,
+    request: ExplorerQueryRequest,
+) -> Result<ExplorerAddressResult, String> {
+    let process = state.current_state()?;
+    let Some(api_port) = process.api_port else {
+        return Err("Core is not running".to_string());
+    };
+    let query = request.query.trim();
+    if query.is_empty() {
+        return Err("address lookup requires a non-empty query".to_string());
+    }
+    fetch_explorer_address(api_port, query)
+}
+
+#[tauri::command]
+pub fn lookup_explorer_transaction(
+    state: State<SupervisorState>,
+    request: ExplorerQueryRequest,
+) -> Result<ExplorerTransactionResult, String> {
+    let process = state.current_state()?;
+    let Some(api_port) = process.api_port else {
+        return Err("Core is not running".to_string());
+    };
+    let query = request.query.trim();
+    if query.is_empty() {
+        return Err("transaction lookup requires a non-empty query".to_string());
+    }
+    fetch_explorer_transaction(api_port, query)
 }
 
 #[tauri::command]

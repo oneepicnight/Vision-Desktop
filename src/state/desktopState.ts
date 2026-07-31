@@ -1,18 +1,27 @@
-﻿import React from "react";
+import React from "react";
 import { usePollingEffect } from "../hooks/usePollingEffect";
 import {
   generateSupportPackage,
   getCoreProcessState,
   getDashboardSnapshot,
   getMockDashboardSnapshot,
+  lookupExplorerAddress,
+  lookupExplorerTransaction,
   openDataDirectory,
   openLogsDirectory,
   restartCore,
   saveNodeConfig as saveNodeConfigService,
+  searchMockExplorer,
   startCore,
   stopCore,
 } from "../services/coreApi";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
+import type {
+  DesktopView,
+  ExplorerLookupMode,
+  ExplorerResult,
+  ExplorerState,
+} from "../types/explorer";
 import { applyDesktopEvent } from "./desktopReducer";
 import {
   beginDesktopRequest,
@@ -36,7 +45,16 @@ const emptyConfig: NodeConfig = {
   log_dir: "",
 };
 
+const initialExplorerState: ExplorerState = {
+  mode: "address",
+  query: "",
+  result: null,
+  loading: false,
+  error: null,
+};
+
 const initialDesktopState: DesktopState = {
+  activeView: "dashboard",
   mockMode: true,
   snapshot: null,
   process: null,
@@ -45,9 +63,11 @@ const initialDesktopState: DesktopState = {
   error: null,
   wizardOpen: false,
   config: emptyConfig,
+  explorer: initialExplorerState,
 };
 
 export type DesktopState = {
+  activeView: DesktopView;
   mockMode: boolean;
   snapshot: DashboardSnapshot | null;
   process: ProcessState | null;
@@ -56,12 +76,18 @@ export type DesktopState = {
   error: string | null;
   wizardOpen: boolean;
   config: NodeConfig;
+  explorer: ExplorerState;
 };
 
 export type DesktopActions = {
+  setActiveView: (view: DesktopView) => void;
   setMockMode: (mockMode: boolean) => void;
   setWizardOpen: (open: boolean) => void;
   setConfig: (config: NodeConfig) => void;
+  setExplorerMode: (mode: ExplorerLookupMode) => void;
+  setExplorerQuery: (query: string) => void;
+  searchExplorer: () => Promise<void>;
+  clearExplorerResult: () => void;
   refresh: () => Promise<void>;
   startCore: () => Promise<void>;
   stopCore: () => Promise<void>;
@@ -80,6 +106,7 @@ export type DesktopStateController = {
 export function useDesktopState(): DesktopStateController {
   const [state, dispatch] = React.useReducer(applyDesktopEvent, initialDesktopState);
   const requestTrackerRef = React.useRef(createDesktopRequestTracker());
+  const explorerRequestTrackerRef = React.useRef(createDesktopRequestTracker());
 
   const refresh = React.useCallback(
     async (existingToken?: DesktopRequestToken) => {
@@ -149,14 +176,75 @@ export function useDesktopState(): DesktopStateController {
     [refresh],
   );
 
+  const searchExplorer = React.useCallback(async () => {
+    const query = state.explorer.query.trim();
+    if (query.length === 0) {
+      dispatch({
+        type: "ExplorerLookupFailed",
+        message:
+          state.explorer.mode === "address"
+            ? "Enter an address before running the explorer lookup"
+            : "Enter a transaction ID before running the explorer lookup",
+      });
+      return;
+    }
+
+    const token = beginDesktopRequest(explorerRequestTrackerRef.current);
+    const mode = state.explorer.mode;
+    const mockMode = state.mockMode;
+    dispatch({
+      type: "ExplorerLookupStarted",
+      message:
+        mode === "address" ? "Looking up address..." : "Looking up transaction...",
+    });
+
+    try {
+      const result: ExplorerResult =
+        mode === "address"
+          ? mockMode
+            ? await searchMockExplorer("address", query)
+            : await lookupExplorerAddress(query)
+          : mockMode
+            ? await searchMockExplorer("transaction", query)
+            : await lookupExplorerTransaction(query);
+
+      if (!isDesktopRequestCurrent(explorerRequestTrackerRef.current, token)) {
+        return;
+      }
+
+      dispatch({
+        type: "ExplorerResultUpdated",
+        result,
+        message:
+          mode === "address"
+            ? "Address lookup complete"
+            : "Transaction lookup complete",
+      });
+    } catch (err) {
+      if (!isDesktopRequestCurrent(explorerRequestTrackerRef.current, token)) {
+        return;
+      }
+      dispatch({ type: "ExplorerLookupFailed", message: String(err) });
+    }
+  }, [state.explorer.mode, state.explorer.query, state.mockMode]);
+
   const actions = React.useMemo<DesktopActions>(
     () => ({
+      setActiveView: (view) => dispatch({ type: "ActiveViewChanged", view }),
       setMockMode: (mockMode) => {
         invalidateDesktopRequestsForModeChange(requestTrackerRef.current);
+        invalidateDesktopRequestsForModeChange(explorerRequestTrackerRef.current);
         dispatch({ type: "MockModeChanged", mockMode });
       },
       setWizardOpen: (open) => dispatch({ type: "WizardOpenChanged", open }),
       setConfig: (config) => dispatch({ type: "NodeConfigChanged", config }),
+      setExplorerMode: (mode) => {
+        invalidateDesktopRequestsForModeChange(explorerRequestTrackerRef.current);
+        dispatch({ type: "ExplorerModeChanged", mode });
+      },
+      setExplorerQuery: (query) => dispatch({ type: "ExplorerQueryChanged", query }),
+      searchExplorer,
+      clearExplorerResult: () => dispatch({ type: "ExplorerLookupCleared" }),
       refresh: () => refresh(),
       startCore: () => runAction("Start", startCore),
       stopCore: () => runAction("Stop", stopCore),
@@ -168,7 +256,7 @@ export function useDesktopState(): DesktopStateController {
       saveNodeConfig: () =>
         runAction("Save node config", () => saveNodeConfigService(state.config)),
     }),
-    [refresh, runAction, state.config],
+    [refresh, runAction, searchExplorer, state.config],
   );
 
   return { state, actions };

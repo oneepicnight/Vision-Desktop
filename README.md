@@ -27,6 +27,8 @@ The Explorer uses a Vision World chain-intelligence presentation around the exis
 
 The Peer Manager uses a Vision World constellation presentation around the existing read-only peer snapshot. Constellation markers reflect only the number of reported directory entries and do not represent geography; Desktop does not invent peer locations, latency, trust, reputation, routing scores, or connectivity probes.
 
+The Mining page uses a Vision World operations presentation adapted from the legacy mining command-center motif. Its reactor artwork and status lighting are decorative; all displayed state comes from the existing Desktop snapshot and Desktop-managed configuration. Legacy localhost calls, miner controls, pools, farms, performance tuning, wallet linking, reward calculations, and unsupported telemetry are not included.
+
 Desktop lifecycle controls currently include Start, Stop, Restart, and Refresh from the top application bar.
 
 Lifecycle behavior and safety boundary:
@@ -68,6 +70,8 @@ The initial Mining page is read-only. It displays confirmed data already present
 - Desktop-side last refresh time
 
 Enabled mining does not necessarily mean that mining is actively producing blocks.
+
+The Mining command center deliberately does not display or derive hashrate, rewards, profitability, worker counts, or block-production claims when those facts are not available through the current Desktop boundary. It also contains no start, stop, pause, resume, pool, farm, or performance controls.
 
 The initial Configuration page is read-only. It displays confirmed Desktop-managed configuration data plus limited runtime observations already exposed through the existing Desktop state and backend surface:
 

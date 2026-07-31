@@ -1,0 +1,223 @@
+import { applyDesktopEvent } from "../desktopReducer";
+import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/core";
+import type { DesktopState } from "../desktopState";
+
+function assertEqual<T>(actual: T, expected: T, message?: string) {
+  if (actual !== expected) {
+    throw new Error(message ?? `Expected ${String(expected)}, got ${String(actual)}`);
+  }
+}
+
+function assertDeepEqual(actual: unknown, expected: unknown, message?: string) {
+  const actualJson = JSON.stringify(actual);
+  const expectedJson = JSON.stringify(expected);
+  if (actualJson !== expectedJson) {
+    throw new Error(message ?? `Expected ${expectedJson}, got ${actualJson}`);
+  }
+}
+const baseConfig: NodeConfig = {
+  node_name: "Default Node",
+  mode: "LocalTesting",
+  api_port: 0,
+  p2p_port: 19090,
+  seed_peers: [],
+  advertised_host: null,
+  advertised_port: null,
+  mining_enabled: false,
+  miner_reward_address: "0000000000000000000000000000000000000000000000000000000000000000",
+  data_dir: "",
+  log_dir: "",
+};
+
+const alternateConfig: NodeConfig = {
+  ...baseConfig,
+  node_name: "Peer Node",
+  mode: "PrivateNetwork",
+  p2p_port: 19091,
+  seed_peers: ["seed.example:19090"],
+};
+
+const baseSnapshot: DashboardSnapshot = {
+  process_state: "running",
+  status: {
+    version: "3",
+    canonical_tip_height: 10,
+    canonical_tip_hash: "tip-a",
+    cached_state_root_height: 10,
+    cached_state_root: "root-a",
+    mempool_size: 1,
+    peer_count: 2,
+    durable_peer_count: 1,
+    active_inbound_sessions: 1,
+    active_outbound_sessions: 1,
+    transient_peer_count: 0,
+    dialable_peer_count: 2,
+    mining: {
+      available: true,
+      active: false,
+      blocks_found: 3,
+      recovery_state: "normal",
+      paused_reason: null,
+    },
+    recovery: {
+      state: "normal",
+      peer_addr: null,
+      local_height: 10,
+      local_work: 100,
+      local_tip_hash: "tip-a",
+      remote_height: null,
+      remote_work: null,
+      remote_tip_hash: null,
+      reason: null,
+    },
+  },
+  mining: {
+    enabled: true,
+    height: 10,
+    difficulty: 3,
+    epoch: 0,
+    active: false,
+    recovery_state: "normal",
+    paused_reason: null,
+    hash_rate_estimate: null,
+  },
+  peers: [{ addr: "seed.example:19090", state: "connected", height: 10, outbound: true, height_age_secs: 1 }],
+  api_error: null,
+  core_cpu: 1.5,
+  core_memory_bytes: 1024,
+  data_dir_size_bytes: 2048,
+  log_dir_size_bytes: 4096,
+  mock_mode: false,
+};
+
+const baseProcess: ProcessState = {
+  state: "running",
+  pid: 1234,
+  api_port: 18080,
+  p2p_port: 19090,
+  data_dir: "data",
+  log_dir: "logs",
+};
+
+const baseState: DesktopState = {
+  mockMode: true,
+  snapshot: null,
+  process: null,
+  message: "Ready",
+  loading: false,
+  error: "previous error",
+  wizardOpen: false,
+  config: baseConfig,
+};
+
+function expectPreserved(previous: DesktopState, next: DesktopState, changedKeys: Array<keyof DesktopState>) {
+  const changed = new Set<keyof DesktopState>(changedKeys);
+  for (const key of Object.keys(previous) as Array<keyof DesktopState>) {
+    if (!changed.has(key)) {
+      assertDeepEqual(next[key], previous[key], `${key} should be preserved`);
+    }
+  }
+}
+
+export function runDesktopReducerTransitionTests() {
+  {
+    const next = applyDesktopEvent(baseState, { type: "MockModeChanged", mockMode: false });
+    assertEqual(next.mockMode, false);
+    expectPreserved(baseState, next, ["mockMode"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, { type: "WizardOpenChanged", open: true });
+    assertEqual(next.wizardOpen, true);
+    expectPreserved(baseState, next, ["wizardOpen"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, { type: "NodeConfigChanged", config: alternateConfig });
+    assertDeepEqual(next.config, alternateConfig);
+    expectPreserved(baseState, next, ["config"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, { type: "DashboardRefreshStarted" });
+    assertEqual(next.loading, true);
+    assertEqual(next.error, null);
+    expectPreserved(baseState, next, ["loading", "error"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, {
+      type: "DashboardSnapshotUpdated",
+      snapshot: baseSnapshot,
+      message: "Dashboard refreshed",
+    });
+    assertDeepEqual(next.snapshot, baseSnapshot);
+    assertEqual(next.message, "Dashboard refreshed");
+    expectPreserved(baseState, next, ["snapshot", "message"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, { type: "CoreProcessUpdated", process: baseProcess });
+    assertDeepEqual(next.process, baseProcess);
+    expectPreserved(baseState, next, ["process"]);
+  }
+
+  {
+    const loadingState = { ...baseState, loading: true };
+    const next = applyDesktopEvent(loadingState, { type: "DesktopUpdateSettled" });
+    assertEqual(next.loading, false);
+    expectPreserved(loadingState, next, ["loading"]);
+  }
+
+  {
+    const next = applyDesktopEvent(baseState, { type: "DesktopActionStarted", name: "Start" });
+    assertEqual(next.loading, true);
+    assertEqual(next.error, null);
+    assertEqual(next.message, "Start...");
+    expectPreserved(baseState, next, ["loading", "error", "message"]);
+  }
+
+  {
+    const loadingState = { ...baseState, loading: true, message: "Start..." };
+    const next = applyDesktopEvent(loadingState, { type: "DesktopActionCompleted", name: "Start" });
+    assertEqual(next.loading, false);
+    assertEqual(next.message, "Start complete");
+    expectPreserved(loadingState, next, ["loading", "message"]);
+  }
+
+  {
+    const loadingState = { ...baseState, loading: true, message: "Start..." };
+    const next = applyDesktopEvent(loadingState, { type: "DesktopActionFailed", message: "Core unavailable" });
+    assertEqual(next.loading, false);
+    assertEqual(next.error, "Core unavailable");
+    assertEqual(next.message, "Core unavailable");
+    expectPreserved(loadingState, next, ["loading", "error", "message"]);
+  }
+
+  {
+    const refreshingState = applyDesktopEvent(baseState, { type: "DashboardRefreshStarted" });
+    const actionState = applyDesktopEvent(refreshingState, { type: "DesktopActionStarted", name: "Restart" });
+    const failedState = applyDesktopEvent(actionState, { type: "DesktopActionFailed", message: "restart failed" });
+    assertEqual(failedState.loading, false);
+    assertEqual(failedState.error, "restart failed");
+    assertEqual(failedState.message, "restart failed");
+    assertEqual(failedState.mockMode, baseState.mockMode);
+    assertDeepEqual(failedState.config, baseState.config);
+  }
+
+  {
+    const actionState = applyDesktopEvent(baseState, { type: "DesktopActionStarted", name: "Refresh" });
+    const updatedState = applyDesktopEvent(actionState, {
+      type: "DashboardSnapshotUpdated",
+      snapshot: baseSnapshot,
+      message: "Dashboard refreshed",
+    });
+    const settledState = applyDesktopEvent(updatedState, { type: "DesktopUpdateSettled" });
+    assertEqual(settledState.loading, false);
+    assertEqual(settledState.error, null);
+    assertDeepEqual(settledState.snapshot, baseSnapshot);
+    assertEqual(settledState.message, "Dashboard refreshed");
+  }
+}
+
+runDesktopReducerTransitionTests();

@@ -23,6 +23,8 @@ The Desktop shell uses a local Vision World-inspired dark-space theme with names
 
 The Dashboard includes a dependency-free Vision World network overview adapted from the legacy globe motif. Its globe and orbit artwork are decorative CSS, while the displayed Core state, chain height, peer count, and recovery state come only from the existing Desktop snapshot. It does not claim or infer geographic peer locations.
 
+The Dashboard operations grid adapts the legacy mission-control card hierarchy around the existing process, chain, network, mining/recovery, resource, and support data. It does not import legacy wallet approval, reward linking, guardian status, inferred peer-health grades, hashrate, block timing, block-production claims, or hard-coded dashboard links. Support actions remain limited to the existing redacted support package and fixed Desktop-managed log/data directories.
+
 The Explorer uses a Vision World chain-intelligence presentation around the existing typed address and transaction lookup actions. Chain context is taken from the shared Desktop snapshot, returned address and amount strings are preserved exactly, and no legacy polling, hard-coded endpoint, transaction submission, or protocol interpretation is included.
 
 The Peer Manager uses a Vision World constellation presentation around the existing read-only peer snapshot. Constellation markers reflect only the number of reported directory entries and do not represent geography; Desktop does not invent peer locations, latency, trust, reputation, routing scores, or connectivity probes.

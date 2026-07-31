@@ -34,11 +34,20 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .metric strong { text-align: right; max-width: 58%; overflow-wrap: anywhere; }
 .button-stack { display: flex; flex-direction: column; gap: 10px; }
 .explorer-grid { align-items: start; }
+.peer-grid { align-items: start; }
 .explorer-form { display: flex; flex-direction: column; gap: 12px; }
 .explorer-form label { display: flex; flex-direction: column; gap: 6px; color: #4c5c52; }
 .empty-state { margin: 0; color: #4c5c52; line-height: 1.5; }
 .json-block { display: flex; flex-direction: column; gap: 12px; }
 .json-block pre { margin: 0; padding: 12px; border: 1px solid #d7e0da; border-radius: 6px; background: #f8faf9; color: #17201c; overflow: auto; max-height: 360px; }
+.peer-list { display: flex; flex-direction: column; gap: 12px; }
+.peer-row { border: 1px solid #e4ebe6; border-radius: 6px; padding: 12px; background: #fbfcfb; }
+.peer-row-header { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 10px; }
+.peer-row-header strong { overflow-wrap: anywhere; }
+.peer-badge { border: 1px solid #cdd8d1; border-radius: 999px; padding: 2px 8px; color: #45574d; font-size: 12px; background: #f3f7f4; }
+.peer-row-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; }
+.peer-row-grid span { color: #66746c; }
+.peer-row-grid strong { overflow-wrap: anywhere; }
 .wizard { margin-top: 16px; background: #ffffff; border: 1px solid #d7e0da; border-radius: 8px; padding: 16px; }
 .wizard-header { display: flex; justify-content: space-between; align-items: center; }
 .wizard-header h2 { margin: 0; font-size: 18px; }

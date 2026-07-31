@@ -149,6 +149,12 @@ export function runDesktopReducerTransitionTests() {
   }
 
   {
+    const next = applyDesktopEvent(baseState, { type: "ActiveViewChanged", view: "peers" });
+    assertEqual(next.activeView, "peers");
+    expectPreserved(baseState, next, ["activeView"]);
+  }
+
+  {
     const next = applyDesktopEvent(baseState, { type: "MockModeChanged", mockMode: false });
     assertEqual(next.mockMode, false);
     expectPreserved(baseState, next, ["mockMode"]);

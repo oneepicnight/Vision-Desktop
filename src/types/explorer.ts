@@ -1,4 +1,4 @@
-export type DesktopView = "dashboard" | "explorer";
+export type DesktopView = "dashboard" | "explorer" | "peers";
 
 export type ExplorerLookupMode = "address" | "transaction";
 

@@ -11,6 +11,7 @@ Current desktop scope includes:
 - node-manager dashboard
 - desktop-managed process controls
 - read-only blockchain explorer for address and transaction inspection
+- read-only peer manager for current connection and recovery visibility
 - support package generation
 - mock-mode development workflows
 

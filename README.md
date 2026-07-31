@@ -35,6 +35,8 @@ The Configuration page uses a Vision World node-blueprint presentation adapted f
 
 Desktop lifecycle controls currently include Start, Stop, Restart, and Refresh from the top application bar.
 
+The lifecycle surface uses a Vision World operator-console presentation around the existing tested lifecycle view model. Process state, recovery context, mock-mode locking, action progress, and restart confirmation remain derived through the existing Desktop state/event/request boundaries; no legacy direct process call, shell command, automatic retry, or invented transition state is included.
+
 Lifecycle behavior and safety boundary:
 
 - Start is available only when the observed Core process state is stopped or crashed
@@ -45,6 +47,17 @@ Lifecycle behavior and safety boundary:
 - command completion and observed process state are treated as separate facts
 - while a lifecycle action is in progress, conflicting lifecycle actions and manual refresh are disabled
 - recovery state is shown for operator context but does not independently disable lifecycle actions
+
+The Dashboard Create Node workflow uses the same Vision World operator presentation while retaining the existing typed Desktop configuration save action. It edits only the current public node configuration fields: node name, supported mode, P2P port, seed peers, advertised host, mining-enabled status, and public reward address.
+
+Create Node workflow boundaries:
+
+- saving configuration does not automatically start or restart Core
+- Desktop does not open firewall or router ports
+- no arbitrary endpoint probe or connectivity test is performed
+- no secret, private key, seed phrase, mnemonic, keystore, or signing field is accepted
+- the configured reward address remains a public identifier and does not prove custody
+- lifecycle controls continue to rely on observed process state rather than configuration intent
 
 The Wallet uses a Vision World command-center presentation adapted from the legacy wallet's visual hierarchy. Its account hero, context strip, address provenance, account observation, and security-boundary cards use only the existing read-only Desktop view model; legacy wallet runtime behavior is not included.
 

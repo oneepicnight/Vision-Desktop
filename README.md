@@ -25,6 +25,8 @@ The Dashboard includes a dependency-free Vision World network overview adapted f
 
 The Explorer uses a Vision World chain-intelligence presentation around the existing typed address and transaction lookup actions. Chain context is taken from the shared Desktop snapshot, returned address and amount strings are preserved exactly, and no legacy polling, hard-coded endpoint, transaction submission, or protocol interpretation is included.
 
+The Peer Manager uses a Vision World constellation presentation around the existing read-only peer snapshot. Constellation markers reflect only the number of reported directory entries and do not represent geography; Desktop does not invent peer locations, latency, trust, reputation, routing scores, or connectivity probes.
+
 Desktop lifecycle controls currently include Start, Stop, Restart, and Refresh from the top application bar.
 
 Lifecycle behavior and safety boundary:

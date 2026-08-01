@@ -6,6 +6,7 @@
 
 mod contract;
 mod secrets;
+mod session;
 mod vault;
 
 pub use contract::{

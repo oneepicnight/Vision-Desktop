@@ -52,14 +52,15 @@ The first encrypted vault foundation is implemented inside the Rust wallet modul
 - authenticated vault metadata so identifiers and cryptographic parameters cannot be altered silently;
 - encrypted-only, create-new file storage that never overwrites an existing vault, Unix `0600` creation permissions, bounded file sizes, and corruption detection;
 - identical non-revealing errors for an incorrect password and damaged ciphertext;
+- Rust-only unlocked sessions with explicit lock and five-minute idle auto-lock enforcement before every secret operation;
+- escalating unlock backoff after repeated incorrect-password or damaged-vault results;
 - no plaintext temporary files or crash-report inclusion.
 
 No wallet creation, recovery, unlock, signing, or send command is registered with Tauri yet. Before custody is enabled for users, the remaining vault work includes:
 
 - OS-backed protection for an additional wrapping key where available;
 - restrictive Windows ACL creation and verification;
-- explicit lock, short idle auto-lock, and process-exit lock behavior;
-- bounded interactive unlock attempts and backoff;
+- integration of the Rust-only session with future Tauri commands and process/window lifecycle events;
 - versioned migration with backup-before-upgrade behavior;
 - secure backup/recovery UX and an independent cryptographic review.
 

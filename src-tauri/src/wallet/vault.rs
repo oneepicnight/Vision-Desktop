@@ -97,6 +97,10 @@ impl fmt::Display for WalletVaultError {
 impl std::error::Error for WalletVaultError {}
 
 impl EncryptedWalletVault {
+    pub(in crate::wallet) fn wallet_id(&self) -> &str {
+        &self.wallet_id
+    }
+
     /// Encrypts a seed without exposing a creation command to the frontend.
     pub(in crate::wallet) fn encrypt(
         wallet_id: &str,

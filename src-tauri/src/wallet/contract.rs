@@ -42,8 +42,6 @@ pub fn wallet_contract_gate() -> WalletCompatibilityGate {
     WalletCompatibilityGate {
         signing_enabled: false,
         unmet_requirements: vec![
-            WalletContractRequirement::KeyDerivation,
-            WalletContractRequirement::AddressEncoding,
             WalletContractRequirement::AmountDenomination,
             WalletContractRequirement::TransactionSerialization,
             WalletContractRequirement::SignatureVector,
@@ -91,7 +89,13 @@ mod tests {
         let gate = wallet_contract_gate();
 
         assert!(!gate.signing_enabled);
-        assert_eq!(gate.unmet_requirements.len(), 9);
+        assert_eq!(gate.unmet_requirements.len(), 7);
+        assert!(!gate
+            .unmet_requirements
+            .contains(&WalletContractRequirement::KeyDerivation));
+        assert!(!gate
+            .unmet_requirements
+            .contains(&WalletContractRequirement::AddressEncoding));
         assert!(gate
             .unmet_requirements
             .contains(&WalletContractRequirement::SignatureVector));

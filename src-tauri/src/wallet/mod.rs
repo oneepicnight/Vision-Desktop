@@ -4,6 +4,7 @@
 //! secret material. Secret-bearing types must never cross a Tauri command,
 //! derive Serde traits, or enter the general Desktop event/state pipeline.
 
+mod account;
 mod contract;
 mod device_protection;
 mod recovery;
@@ -12,6 +13,7 @@ mod session;
 mod storage_security;
 mod vault;
 
+pub use account::VisionAccountIdentity;
 pub use contract::{
     wallet_contract_gate, WalletCompatibilityGate, WalletContractRequirement, WalletPublicMetadata,
 };

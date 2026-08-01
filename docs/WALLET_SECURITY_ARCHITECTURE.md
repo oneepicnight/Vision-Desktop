@@ -69,17 +69,11 @@ The internal vault schema is version 2 and is device-bound. Copying the local va
 
 ## Recovery requirements
 
-The repository contains conflicting historical recovery descriptions. No mnemonic or derivation algorithm is selected by this document. The final choice must be specified as a Vision wallet contract and backed by fixed vectors for:
+The current Desktop recovery contract is the versioned encrypted portable artifact, not a mnemonic. The exact supported RC2 source confirms that the restored 32-byte seed is used directly as an Ed25519 signing seed and that its address is the 64-character lowercase hexadecimal public key. Fixed tests now verify seed-to-public-key-to-address derivation and require portable recovery to reproduce the identical address.
 
-- phrase to seed;
-- seed to private key;
-- private key to public key;
-- public key to address;
-- restoration to the identical address across platforms.
+The repository contains conflicting historical phrase descriptions, so no mnemonic is selected or implied. If a mnemonic is added later, its word list, normalization, checksum, and phrase-to-seed algorithm require a separately approved contract and cross-platform vectors. The legacy browser wallet derivation remains unapproved.
 
-The legacy browser wallet derivation is not approved for reuse.
-
-The portable artifact foundation does not select or replace these recovery vectors. User-facing wallet creation and restore remain disabled until the restored opaque seed independently reproduces the same approved Vision public key and address across platforms.
+These identity vectors do not unlock transaction signing. User-facing wallet creation and restore remain disabled until the remaining transaction, amount, API, and independent-review gates pass.
 
 ## Review gates
 

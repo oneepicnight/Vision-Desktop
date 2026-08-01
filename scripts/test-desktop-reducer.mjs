@@ -22,6 +22,7 @@ const files = [
   ["src/features/mining/miningStatus.test.ts", "src/features/mining/miningStatus.test.js"],
   ["src/features/marketplace/marketplaceStatus.ts", "src/features/marketplace/marketplaceStatus.js"],
   ["src/features/marketplace/marketplaceStatus.test.ts", "src/features/marketplace/marketplaceStatus.test.js"],
+  ["src/state/walletConfiguration.ts", "src/state/walletConfiguration.js"],
   ["src/features/wallet/walletStatus.ts", "src/features/wallet/walletStatus.js"],
   ["src/features/wallet/walletStatus.test.ts", "src/features/wallet/walletStatus.test.js"],
 ];

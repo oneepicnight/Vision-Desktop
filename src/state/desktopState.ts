@@ -33,6 +33,7 @@ import type {
   ExplorerState,
 } from "../types/explorer";
 import type { WalletAccountState } from "../types/wallet";
+import { resolveWalletConfiguredAddress } from "./walletConfiguration";
 import { applyDesktopEvent } from "./desktopReducer";
 import {
   beginDesktopRequest,
@@ -192,7 +193,8 @@ export function useDesktopState(): DesktopStateController {
 
       const token = existingToken ?? beginDesktopRequest(requestTrackerRef.current);
       const mockMode = state.mockMode;
-      const configuredRewardAddress = state.config.miner_reward_address.trim();
+      let walletConfigurationError: string | null = null;
+      let walletConfiguredAddress = "";
 
       try {
         dispatch({ type: "DashboardRefreshStarted" });
@@ -210,6 +212,48 @@ export function useDesktopState(): DesktopStateController {
             : "Dashboard refreshed",
           receivedAt: Date.now(),
         });
+
+        if (state.activeView === "wallet") {
+          try {
+            const walletConfiguration = await getNodeConfigSnapshot();
+            if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+              return;
+            }
+            walletConfiguredAddress = resolveWalletConfiguredAddress(
+              walletConfiguration,
+            ).address;
+            dispatch({
+              type: "ConfigurationUpdated",
+              configuration: {
+                snapshot: walletConfiguration,
+                appPaths: state.configuration.appPaths,
+                error: null,
+              },
+            });
+          } catch (configurationErr) {
+            if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
+              return;
+            }
+            walletConfigurationError = String(configurationErr);
+            walletConfiguredAddress = "";
+            dispatch({
+              type: "ConfigurationUpdated",
+              configuration: {
+                snapshot: null,
+                appPaths: state.configuration.appPaths,
+                error: walletConfigurationError,
+              },
+            });
+            dispatch({
+              type: "WalletAccountUpdated",
+              wallet: {
+                queriedAddress: null,
+                account: null,
+                error: "Unable to load the Desktop node configuration",
+              },
+            });
+          }
+        }
 
         if (state.activeView === "configuration") {
           const configurationResults = await Promise.allSettled([
@@ -238,15 +282,19 @@ export function useDesktopState(): DesktopStateController {
           });
         }
 
-        if (state.activeView === "wallet" && mockMode) {
-          if (configuredRewardAddress.length === 0) {
+        if (
+          state.activeView === "wallet" &&
+          mockMode &&
+          walletConfigurationError == null
+        ) {
+          if (walletConfiguredAddress.length === 0) {
             dispatch({
               type: "WalletAccountUpdated",
               wallet: { queriedAddress: null, account: null, error: null },
             });
           } else {
             const mockWalletResult = ensureAddressResult(
-              await searchMockExplorer("address", configuredRewardAddress),
+              await searchMockExplorer("address", walletConfiguredAddress),
             );
             if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
               return;
@@ -254,7 +302,7 @@ export function useDesktopState(): DesktopStateController {
             dispatch({
               type: "WalletAccountUpdated",
               wallet: {
-                queriedAddress: configuredRewardAddress,
+                queriedAddress: walletConfiguredAddress,
                 account: mockWalletResult,
                 error: null,
               },
@@ -308,8 +356,11 @@ export function useDesktopState(): DesktopStateController {
             });
           }
 
-          if (state.activeView === "wallet") {
-            if (configuredRewardAddress.length === 0) {
+          if (
+            state.activeView === "wallet" &&
+            walletConfigurationError == null
+          ) {
+            if (walletConfiguredAddress.length === 0) {
               dispatch({
                 type: "WalletAccountUpdated",
                 wallet: { queriedAddress: null, account: null, error: null },
@@ -318,21 +369,21 @@ export function useDesktopState(): DesktopStateController {
               dispatch({
                 type: "WalletAccountUpdated",
                 wallet: {
-                  queriedAddress: configuredRewardAddress,
+                  queriedAddress: walletConfiguredAddress,
                   account: null,
                   error: null,
                 },
               });
             } else {
               try {
-                const walletAccount = await lookupExplorerAddress(configuredRewardAddress);
+                const walletAccount = await lookupExplorerAddress(walletConfiguredAddress);
                 if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
                   return;
                 }
                 dispatch({
                   type: "WalletAccountUpdated",
                   wallet: {
-                    queriedAddress: configuredRewardAddress,
+                    queriedAddress: walletConfiguredAddress,
                     account: walletAccount,
                     error: null,
                   },
@@ -344,7 +395,7 @@ export function useDesktopState(): DesktopStateController {
                 dispatch({
                   type: "WalletAccountUpdated",
                   wallet: {
-                    queriedAddress: configuredRewardAddress,
+                    queriedAddress: walletConfiguredAddress,
                     account: null,
                     error: String(walletErr),
                   },
@@ -365,7 +416,12 @@ export function useDesktopState(): DesktopStateController {
         dispatch({ type: "DesktopActionFailed", message: String(err) });
       }
     },
-    [state.activeLifecycleAction, state.activeView, state.config.miner_reward_address, state.mockMode],
+    [
+      state.activeLifecycleAction,
+      state.activeView,
+      state.configuration.appPaths,
+      state.mockMode,
+    ],
   );
 
   const poll = React.useCallback(() => refresh("polling"), [refresh]);

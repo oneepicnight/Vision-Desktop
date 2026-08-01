@@ -1,4 +1,5 @@
 import type { DesktopState } from "../../state/desktopState";
+import { resolveWalletConfiguredAddress } from "../../state/walletConfiguration";
 
 export type WalletViewModel = {
   overallStatus: string;
@@ -34,7 +35,8 @@ export function deriveWalletViewModel(
   state: DesktopState,
   now = Date.now(),
 ): WalletViewModel {
-  const configuredAddress = state.config.miner_reward_address.trim();
+  const configured = resolveWalletConfiguredAddress(state.configuration.snapshot);
+  const configuredAddress = configured.address;
   const hasConfiguredAddress = configuredAddress.length > 0;
   const snapshot = state.snapshot;
   const wallet = state.wallet;
@@ -47,7 +49,11 @@ export function deriveWalletViewModel(
   let summary =
     "Vision Desktop does not yet have enough confirmed account information to describe this address.";
 
-  if (isMock) {
+  if (!configured.configurationAvailable) {
+    overallStatus = "Configuration unavailable";
+    summary =
+      "Desktop could not load the persisted node configuration, so it will not guess which public account address to query.";
+  } else if (isMock) {
     overallStatus = "Mock account data";
     summary =
       "Wallet information is coming from the Desktop mock lookup path rather than from a live Vision Core node.";
@@ -84,10 +90,8 @@ export function deriveWalletViewModel(
   return {
     overallStatus,
     summary,
-    configuredAddress: hasConfiguredAddress ? configuredAddress : "Unavailable",
-    configuredAddressSource: hasConfiguredAddress
-      ? "Desktop node configuration mining reward address"
-      : "No configured reward address",
+    configuredAddress: configured.displayAddress,
+    configuredAddressSource: configured.source,
     liveAddress: wallet.account?.address ?? "Unavailable",
     liveAddressSource: wallet.account
       ? isMock
@@ -100,8 +104,10 @@ export function deriveWalletViewModel(
       : "Unknown",
     balanceAvailability: wallet.account
       ? "Available"
-      : wallet.error || apiError
+      : wallet.error || apiError || state.configuration.error
         ? "Unavailable"
+        : !configured.configurationAvailable
+          ? "Unavailable"
         : hasConfiguredAddress
           ? "Unknown"
           : "Not configured",
@@ -114,7 +120,11 @@ export function deriveWalletViewModel(
     recoveryState,
     mockMode: isMock ? "Yes" : "No",
     lastRefresh: formatLastUpdated(state.lastUpdatedAt, now),
-    lookupStatus: wallet.error ?? apiError ?? (wallet.account ? "Read-only lookup complete" : "No lookup result"),
+    lookupStatus:
+      wallet.error ??
+      apiError ??
+      state.configuration.error ??
+      (wallet.account ? "Read-only lookup complete" : "No lookup result"),
     transactionHistoryStatus:
       "Not currently exposed by the Desktop service boundary",
   };

@@ -109,7 +109,11 @@ const baseWallet: WalletAccountState = {
 };
 
 const baseConfiguration: ConfigurationState = {
-  snapshot: null,
+  snapshot: {
+    config: baseConfig,
+    source_path: "node-config.json",
+    source_kind: "persisted",
+  },
   appPaths: null,
   error: null,
 };
@@ -150,13 +154,44 @@ const baseState: DesktopState = {
   const viewModel = deriveWalletViewModel(
     {
       ...baseState,
-      config: { ...baseConfig, miner_reward_address: "" },
+      configuration: {
+        ...baseConfiguration,
+        snapshot: {
+          ...baseConfiguration.snapshot!,
+          config: { ...baseConfig, miner_reward_address: "" },
+        },
+      },
       wallet: { queriedAddress: null, account: null, error: null },
     },
     10_000,
   );
   assertEqual(viewModel.overallStatus, "No address configured");
   assertEqual(viewModel.configuredAddress, "Unavailable");
+}
+
+{
+  const draftAddress = "ffff".padEnd(64, "0");
+  const viewModel = deriveWalletViewModel(
+    { ...baseState, config: { ...baseConfig, miner_reward_address: draftAddress } },
+    10_000,
+  );
+  assertEqual(viewModel.configuredAddress, baseConfig.miner_reward_address);
+  assertEqual(viewModel.configuredAddressSource, "Persisted Desktop node configuration");
+}
+
+{
+  const viewModel = deriveWalletViewModel(
+    {
+      ...baseState,
+      configuration: { ...baseConfiguration, snapshot: null, error: "config unavailable" },
+      wallet: { queriedAddress: null, account: null, error: null },
+    },
+    10_000,
+  );
+  assertEqual(viewModel.overallStatus, "Configuration unavailable");
+  assertEqual(viewModel.configuredAddress, "Unavailable");
+  assertEqual(viewModel.balanceAvailability, "Unavailable");
+  assertEqual(viewModel.lookupStatus, "config unavailable");
 }
 
 {

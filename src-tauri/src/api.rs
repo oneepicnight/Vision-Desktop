@@ -99,7 +99,7 @@ fn create_api_client() -> Result<reqwest::blocking::Client, String> {
 }
 
 fn endpoint_url(api_port: u16, prefix: &str, value: &str) -> Result<Url, String> {
-    let mut url = Url::parse(&format!("http://127.0.0.1:{api_port}/{prefix}/"))
+    let mut url = Url::parse(&format!("http://127.0.0.1:{api_port}/{prefix}"))
         .map_err(|e| format!("failed to build {prefix} URL: {e}"))?;
     url.path_segments_mut()
         .map_err(|_| format!("failed to build {prefix} path"))?
@@ -289,6 +289,11 @@ pub fn mock_dashboard() -> DashboardSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
 
     #[test]
     fn parses_status_json() {
@@ -311,5 +316,43 @@ mod tests {
     fn preserves_plain_text_payload_for_explorer_display() {
         let normalized = normalize_response_text("42");
         assert_eq!(normalized, "42");
+    }
+
+    #[test]
+    fn fetches_address_balance_and_nonce_from_loopback_api() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let api_port = listener.local_addr().unwrap().port();
+        let address = "a".repeat(64);
+        let expected_requests = [
+            (format!("/balance/{address}"), "12345678901234567890"),
+            (format!("/nonce/{address}"), "7"),
+        ];
+
+        let server = thread::spawn(move || {
+            for (expected_path, body) in expected_requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request_bytes = [0_u8; 2048];
+                let request_size = stream.read(&mut request_bytes).unwrap();
+                let request = String::from_utf8_lossy(&request_bytes[..request_size]);
+                assert!(
+                    request.starts_with(&format!("GET {expected_path} HTTP/1.1")),
+                    "unexpected request: {request}"
+                );
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let result = fetch_explorer_address(api_port, &address).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(result.kind, "address");
+        assert_eq!(result.address, address);
+        assert_eq!(result.balance, "12345678901234567890");
+        assert_eq!(result.nonce, "7");
     }
 }

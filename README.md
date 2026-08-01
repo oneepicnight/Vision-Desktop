@@ -68,7 +68,7 @@ The Wallet uses a Vision World command-center presentation adapted from the lega
 
 The initial Wallet page is read-only. It displays only confirmed non-secret data already available through the existing Desktop configuration and read-only backend surface:
 
-- configured mining reward address from the Desktop-managed node configuration
+- configured mining reward address loaded from the persisted Desktop-managed node configuration (never from an unsaved setup form)
 - live address, balance, and nonce only when the existing read-only address lookup path returns them
 - explicit address source labels
 - Core, recovery, mock-mode, and freshness context

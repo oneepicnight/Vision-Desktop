@@ -44,6 +44,11 @@
 - Extracted bundled Core hash matched the frozen manifest: passed
 - Extracted packaged application launch: passed
 - Packaged Diagnostics manifest load and bundled Core verification: passed (`Verified`)
+- Local non-elevated MSI install: correctly rejected with Windows Installer error `1925`; rollback left no product registration or install directory
+- Local elevated MSI install: passed
+- Installed-path application launch: passed
+- Installed-path Diagnostics manifest load and bundled Core verification: passed (`Verified`)
+- Local elevated MSI uninstall: passed; program files, product registration, shortcuts, and process were removed
 
 ## Core Integration Result
 
@@ -59,5 +64,8 @@ The Desktop supervisor continues to enforce this restriction. Mock mode remains 
 - The production signing identity and secure signing procedure are not established.
 - The updater is not implemented.
 - The current ICO contains only a preliminary 16 x 16 image.
-- Public installer execution, uninstall, upgrade, downgrade, and repair scenarios still require qualification on clean Windows systems.
+- The MSI lifecycle result is from the development workstation, not an isolated clean Windows system.
+- NSIS install/uninstall and clean-machine compatibility remain unqualified.
+- Upgrade and downgrade require a future package version and remain untested.
+- MSI repair is intentionally disabled (`ARPNOREPAIR=yes`, `NoRepair=1`); the release policy for repair remains to be confirmed.
 - Real Core launch remains blocked by RC2 API bind behavior.

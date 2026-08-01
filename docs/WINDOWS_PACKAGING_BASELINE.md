@@ -53,7 +53,41 @@ The MSI was administratively extracted to a fresh temporary directory. Administr
 - switching to live observation mode left Core stopped and preserved the RC2 safety restriction;
 - Diagnostics loaded the packaged manifest and reported the bundled Core binary as `Verified` from the extracted package path.
 
-The MSI and NSIS installers themselves were not executed as installations during this baseline. No registry, Start menu, uninstall, upgrade, repair, or rollback qualification is claimed.
+The NSIS installer was not executed as an installation during this baseline. Upgrade and downgrade behavior remain untested because only one package version exists. MSI repair is intentionally disabled by the package (`ARPNOREPAIR=yes`, `NoRepair=1`) and was not tested.
+
+## Local MSI Lifecycle Qualification
+
+Recorded: `2026-07-31T23:06:11-04:00` on the same ASUS Windows workstation.
+
+This was a local workstation qualification, not a clean-machine test. Windows Sandbox, Hyper-V management tools, VirtualBox, VMware, and an installed WSL environment were unavailable, so no isolated Windows environment was available locally.
+
+The MSI reported this installed-product identity:
+
+- Product name: `Vision Desktop`
+- Product version: `0.1.0.1`
+- Product code: `{662368E4-A14A-4D80-B509-C068710D197F}`
+- Upgrade code: `{59952895-6664-56C1-8EBC-F94BFE9DCA35}`
+- Manufacturer: `vision`
+- Installation scope: per-machine (`ALLUSERS=1`)
+
+The first non-elevated quiet install returned Windows Installer code `1603` with error `1925`, confirming that the per-machine package requires administrative privileges. Windows Installer rolled back cleanly and did not leave the product directory or registration behind.
+
+The elevated MSI lifecycle then passed:
+
+- elevated quiet installation returned `0`;
+- `C:\Program Files\Vision Desktop\vision-desktop.exe` and `vision_desktop_lib.dll` were installed;
+- the bundled Core executable and manifest were installed at `bundled\core\windows-x64\`;
+- the installed Core and manifest hashes matched the package baseline above;
+- the expected all-users Start menu and public Desktop shortcuts were created;
+- the expected HKLM uninstall registration was created with modification and repair disabled;
+- the installed executable launched from `C:\Program Files\Vision Desktop`;
+- mock mode rendered normally;
+- live observation mode preserved the RC2 launch safety block;
+- Diagnostics loaded the installed manifest and reported the installed Core binary as `Verified`;
+- elevated quiet uninstallation returned `0` and Windows Installer logged `Removal completed successfully`;
+- the program directory, HKLM product registration, Start menu folder, public Desktop shortcut, and running process were absent after uninstall.
+
+This proves the local MSI install, installed-path launch, and uninstall paths for this unsigned engineering build. It does not qualify clean-machine compatibility, NSIS installation, upgrade, downgrade, code signing, or public distribution.
 
 ## Confirmed Packaging Fixes
 
@@ -69,7 +103,9 @@ The MSI and NSIS installers themselves were not executed as installations during
 - Acquire and protect an appropriate Windows code-signing identity.
 - Sign and verify the executable, MSI, and NSIS setup executable in a controlled release workflow.
 - Replace the preliminary 16 x 16 ICO with a production multi-resolution Windows icon set.
-- Qualify install, uninstall, upgrade, downgrade, repair, and rollback behavior on clean supported Windows systems.
+- Repeat install and uninstall qualification on clean supported Windows systems.
+- Qualify the NSIS installer and future-version upgrade, downgrade, and rollback behavior.
+- Confirm the intentionally disabled MSI repair policy remains appropriate for release.
 - Define and implement the updater only after signed update metadata and release hosting are approved.
 - Retain the real-Core launch block until Vision-Core provides a loopback-only private API bind setting.
 

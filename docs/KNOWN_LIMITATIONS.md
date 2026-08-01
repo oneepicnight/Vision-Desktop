@@ -14,6 +14,6 @@
 - No production custody.
 - Test funds only.
 - No automatic restart loop yet.
-- Windows MSI and NSIS packaging is implemented and locally smoke-tested, but the installers have not completed signed public-release qualification.
+- Windows MSI and NSIS packaging is implemented. The unsigned MSI passed a local elevated install, installed-path launch, and uninstall cycle, but clean-machine, NSIS lifecycle, upgrade/downgrade, signing, and public-release qualification remain incomplete.
 - Real Core launch remains blocked because the frozen RC2 Core cannot bind its HTTP API to loopback only.
 - Public endpoint redaction is conservative and may require review before sharing reports.

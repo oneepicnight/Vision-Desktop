@@ -42,22 +42,36 @@ Vision Desktop now has a fixed cross-implementation vector for seed byte `0x07` 
 
 This satisfies the Desktop `KeyDerivation` and `AddressEncoding` gates. It does not authorize transaction signing, submission, or a mnemonic scheme.
 
+## Verified RC2 transaction contract
+
+The same exact supported source revision confirms the complete RC2 transaction envelope and signing algorithm:
+
+- field order is `nonce`, `sender_pubkey`, `module`, `method`, `args`, `tip`, `fee_limit`, `sig`;
+- canonical unsigned bytes are produced by clearing `sig` and serializing the complete envelope with bincode `1.3.3`;
+- the transaction identifier is lowercase hexadecimal BLAKE3 of those unsigned bytes;
+- `sig` is the lowercase hexadecimal Ed25519 signature over those same unsigned bytes;
+- a cash transfer is exactly module `cash`, method `transfer`, with JSON arguments `{ "to": <address>, "amount": <u128> }`;
+- the RC2 minimum cash-transfer fee limit is `201` raw units.
+
+Vision Desktop now enforces the exact payload and transaction-identifier sample embedded in the supported Core tests. The Core sample produces transaction ID `a7fc34bf3332fec96623ea7f5ddb638aaad51f039091d2d5bf94adb76a26f0dd`.
+
+A separate fixed signing vector was independently generated for seed byte `0x07` repeated 32 times, recipient byte `0x22` repeated 32 times, amount `42`, nonce `1`, tip `2`, and fee limit `201`. Desktop must produce public key `ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c` and signature `9e6e02196b7dd976f71fcb34c2e420a4cf1b70731e96dcffbe7223969ae760a7eee386e0490d8dbe9a0bdb3056bbfdb35b17e98b189b1288d6ce813df9c82008`. Rust tests verify the canonical bytes, transaction identifier, signature bytes, and Ed25519 verification.
+
+This satisfies the Desktop `TransactionSerialization` and `SignatureVector` gates. The implementation is Rust-only, is not registered as a Tauri command, and cannot sign or submit a user transaction.
+
 ## Required approved vectors
 
-Signing remains disabled until the supported Core release provides fixed vectors or confirmed contracts for:
+User-facing signing remains disabled until the supported release provides confirmed contracts for:
 
 1. smallest-unit denomination and display precision;
-2. every transaction field, default, ordering, and byte encoding;
-3. canonical unsigned bytes and expected Ed25519 signature;
-4. transaction identifier derivation;
-5. nonce semantics and conflict handling;
-6. fee estimation, minimum fee, and tip behavior;
-7. submission request and explicit accepted/rejected responses;
-8. pending transaction lookup, receipts, and finality states;
-9. loopback-only private API operation.
+2. nonce semantics and conflict handling;
+3. fee estimation and tip behavior beyond the confirmed minimum transfer fee limit;
+4. submission request and explicit accepted/rejected responses;
+5. pending transaction lookup, receipts, and finality states;
+6. loopback-only private API operation.
 
 The current recovery contract is the versioned encrypted portable artifact, not a recovery phrase. Any future mnemonic feature requires a separately approved phrase, normalization, checksum, and phrase-to-seed contract before it can be implemented.
 
 ## Desktop implementation rule
 
-Vision Desktop may implement the encrypted vault independently, but it must keep create, restore, sign, and send unavailable until the derivation and transaction vectors are approved. No Vision-Core behavior will be inferred or duplicated to make the UI appear complete.
+Vision Desktop may implement the encrypted vault and verified transaction primitives independently, but it must keep create, restore, user-facing sign, and send unavailable until every remaining compatibility and security gate is approved. No Vision-Core behavior will be inferred or duplicated to make the UI appear complete.

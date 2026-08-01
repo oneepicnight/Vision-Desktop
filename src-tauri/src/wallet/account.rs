@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "account creation remains internal until all transaction gates pass"
-    )
-)]
-
 use super::secrets::WalletSeed;
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};

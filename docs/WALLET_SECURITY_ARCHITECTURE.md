@@ -59,7 +59,9 @@ The first encrypted vault foundation is implemented inside the Rust wallet modul
 - an internal versioned portable recovery artifact that encrypts the same opaque seed with an independent Argon2id password key and XChaCha20-Poly1305, without DPAPI or machine binding;
 - no plaintext temporary files or crash-report inclusion.
 
-No wallet creation, recovery, unlock, signing, or send command is registered with Tauri yet. Before custody is enabled for users, the remaining vault work includes:
+The Rust wallet module now also contains an internal RC2-compatible `cash::transfer` builder, canonical bincode serializer, BLAKE3 transaction-identifier function, and Ed25519 signer backed by exact Core and independent fixed vectors. These primitives are deliberately not registered as Tauri commands, are not connected to the unlocked-session manager, and cannot be invoked by React. They accept only raw Core units and a narrowly typed transfer draft; arbitrary modules or methods are not exposed.
+
+No wallet creation, recovery, unlock, user-facing signing, or send command is registered with Tauri yet. Before custody is enabled for users, the remaining vault work includes:
 
 - integration of the Rust-only session with future Tauri commands and process/window lifecycle events;
 - versioned migration with backup-before-upgrade behavior;
@@ -73,7 +75,7 @@ The current Desktop recovery contract is the versioned encrypted portable artifa
 
 The repository contains conflicting historical phrase descriptions, so no mnemonic is selected or implied. If a mnemonic is added later, its word list, normalization, checksum, and phrase-to-seed algorithm require a separately approved contract and cross-platform vectors. The legacy browser wallet derivation remains unapproved.
 
-These identity vectors do not unlock transaction signing. User-facing wallet creation and restore remain disabled until the remaining transaction, amount, API, and independent-review gates pass.
+The identity, serialization, transaction-identifier, and signature vectors do not unlock user-facing transaction signing. Wallet creation and restore remain disabled until the remaining amount, nonce/fee, submission, receipt/finality, private-loopback, recovery-UX, and independent-review gates pass.
 
 ## Review gates
 

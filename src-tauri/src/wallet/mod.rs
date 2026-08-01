@@ -11,6 +11,7 @@ mod recovery;
 mod secrets;
 mod session;
 mod storage_security;
+mod transaction;
 mod vault;
 
 pub use account::VisionAccountIdentity;

@@ -7,6 +7,7 @@
 )]
 
 use super::{
+    device_protection::{self, DeviceKey, ProtectedDeviceKey},
     secrets::{WalletPassword, WalletSeed},
     storage_security,
 };
@@ -24,7 +25,7 @@ use std::{
 use zeroize::{Zeroize, Zeroizing};
 
 const VAULT_SCHEMA: &str = "vision-desktop-wallet-vault";
-const VAULT_VERSION: u16 = 1;
+const VAULT_VERSION: u16 = 2;
 const KDF_ALGORITHM: &str = "argon2id";
 const KDF_VERSION: u32 = 0x13;
 const KDF_MEMORY_KIB: u32 = 65_536;
@@ -38,6 +39,7 @@ const AUTH_TAG_BYTES: usize = 16;
 const MAX_VAULT_JSON_BYTES: usize = 16 * 1024;
 const MIN_PASSWORD_BYTES: usize = 12;
 const MAX_PASSWORD_BYTES: usize = 1024;
+const MAX_PROTECTED_DEVICE_KEY_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +49,7 @@ pub struct EncryptedWalletVault {
     wallet_id: String,
     created_at_unix_ms: u64,
     kdf: VaultKdf,
+    device_protection: VaultDeviceProtection,
     cipher: VaultCipher,
 }
 
@@ -69,6 +72,13 @@ struct VaultCipher {
     ciphertext_hex: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct VaultDeviceProtection {
+    algorithm: String,
+    protected_key_hex: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalletVaultError {
     InvalidWalletId,
@@ -76,6 +86,7 @@ pub enum WalletVaultError {
     InvalidOrUnsupportedFormat,
     InvalidPasswordOrCorruptVault,
     RandomSourceUnavailable,
+    DeviceProtectionUnavailable,
     StorageUnavailable,
     VaultAlreadyExists,
 }
@@ -90,6 +101,9 @@ impl fmt::Display for WalletVaultError {
                 "wallet password is incorrect or the vault is damaged"
             }
             Self::RandomSourceUnavailable => "secure operating-system randomness is unavailable",
+            Self::DeviceProtectionUnavailable => {
+                "operating-system wallet protection is unavailable"
+            }
             Self::StorageUnavailable => "secure wallet storage is unavailable",
             Self::VaultAlreadyExists => "wallet vault already exists",
         };
@@ -113,7 +127,24 @@ impl EncryptedWalletVault {
     ) -> Result<Self, WalletVaultError> {
         validate_wallet_id(wallet_id)?;
         validate_password(password)?;
+        let protected_device_key =
+            device_protection::generate_and_protect(&device_entropy(wallet_id))?;
+        Self::encrypt_with_device_key(
+            wallet_id,
+            created_at_unix_ms,
+            seed,
+            password,
+            protected_device_key,
+        )
+    }
 
+    fn encrypt_with_device_key(
+        wallet_id: &str,
+        created_at_unix_ms: u64,
+        seed: &WalletSeed,
+        password: &WalletPassword,
+        protected_device_key: ProtectedDeviceKey,
+    ) -> Result<Self, WalletVaultError> {
         let mut salt = [0_u8; SALT_BYTES];
         let mut nonce = [0_u8; NONCE_BYTES];
         getrandom::fill(&mut salt).map_err(|_| WalletVaultError::RandomSourceUnavailable)?;
@@ -133,6 +164,10 @@ impl EncryptedWalletVault {
             wallet_id: wallet_id.to_string(),
             created_at_unix_ms,
             kdf,
+            device_protection: VaultDeviceProtection {
+                algorithm: protected_device_key.algorithm.to_string(),
+                protected_key_hex: hex::encode(&protected_device_key.protected_bytes),
+            },
             cipher: VaultCipher {
                 algorithm: CIPHER_ALGORITHM.to_string(),
                 nonce_hex: hex::encode(nonce),
@@ -140,7 +175,8 @@ impl EncryptedWalletVault {
             },
         };
 
-        let key = derive_key(password, &salt)?;
+        let password_key = derive_password_key(password, &salt)?;
+        let key = combine_keys(&password_key, &protected_device_key.device_key);
         let mut cipher_key = Key::try_from(key.as_ref())
             .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
         let cipher_nonce = XNonce::try_from(nonce.as_slice())
@@ -163,6 +199,26 @@ impl EncryptedWalletVault {
         Ok(vault)
     }
 
+    #[cfg(test)]
+    pub(in crate::wallet) fn encrypt_for_test(
+        wallet_id: &str,
+        created_at_unix_ms: u64,
+        seed: &WalletSeed,
+        password: &WalletPassword,
+    ) -> Result<Self, WalletVaultError> {
+        validate_wallet_id(wallet_id)?;
+        validate_password(password)?;
+        let protected_device_key =
+            device_protection::generate_and_protect_for_test(&device_entropy(wallet_id))?;
+        Self::encrypt_with_device_key(
+            wallet_id,
+            created_at_unix_ms,
+            seed,
+            password,
+            protected_device_key,
+        )
+    }
+
     /// Unlocks a vault inside Rust. Callers receive a redacted, zeroizing seed wrapper.
     pub(in crate::wallet) fn unlock(
         &self,
@@ -175,7 +231,15 @@ impl EncryptedWalletVault {
         let nonce = decode_fixed::<NONCE_BYTES>(&self.cipher.nonce_hex)?;
         let ciphertext = hex::decode(&self.cipher.ciphertext_hex)
             .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
-        let key = derive_key(password, &salt)?;
+        let protected_device_key = hex::decode(&self.device_protection.protected_key_hex)
+            .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
+        let device_key = unprotect_device_key(
+            &self.device_protection.algorithm,
+            &protected_device_key,
+            &device_entropy(&self.wallet_id),
+        )?;
+        let password_key = derive_password_key(password, &salt)?;
+        let key = combine_keys(&password_key, &device_key);
         let mut cipher_key = Key::try_from(key.as_ref())
             .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
         let cipher_nonce = XNonce::try_from(nonce.as_slice())
@@ -224,6 +288,14 @@ impl EncryptedWalletVault {
             || self.kdf.memory_kib != KDF_MEMORY_KIB
             || self.kdf.iterations != KDF_ITERATIONS
             || self.kdf.lanes != KDF_LANES
+            || !supported_device_algorithm(&self.device_protection.algorithm)
+            || self.device_protection.protected_key_hex.is_empty()
+            || self.device_protection.protected_key_hex.len() > MAX_PROTECTED_DEVICE_KEY_BYTES * 2
+            || !self
+                .device_protection
+                .protected_key_hex
+                .len()
+                .is_multiple_of(2)
             || self.cipher.algorithm != CIPHER_ALGORITHM
             || self.kdf.salt_hex.len() != SALT_BYTES * 2
             || self.cipher.nonce_hex.len() != NONCE_BYTES * 2
@@ -234,12 +306,14 @@ impl EncryptedWalletVault {
         decode_fixed::<SALT_BYTES>(&self.kdf.salt_hex)?;
         decode_fixed::<NONCE_BYTES>(&self.cipher.nonce_hex)?;
         decode_fixed::<{ SEED_BYTES + AUTH_TAG_BYTES }>(&self.cipher.ciphertext_hex)?;
+        hex::decode(&self.device_protection.protected_key_hex)
+            .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
         Ok(())
     }
 
     fn aad(&self) -> Vec<u8> {
         format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.schema,
             self.version,
             self.wallet_id,
@@ -250,6 +324,8 @@ impl EncryptedWalletVault {
             self.kdf.iterations,
             self.kdf.lanes,
             self.kdf.salt_hex,
+            self.device_protection.algorithm,
+            self.device_protection.protected_key_hex,
             self.cipher.algorithm,
             self.cipher.nonce_hex
         )
@@ -307,7 +383,7 @@ pub(in crate::wallet) fn load_vault(path: &Path) -> Result<EncryptedWalletVault,
     EncryptedWalletVault::from_json(bytes.as_slice())
 }
 
-fn derive_key(
+fn derive_password_key(
     password: &WalletPassword,
     salt: &[u8; SALT_BYTES],
 ) -> Result<Zeroizing<[u8; 32]>, WalletVaultError> {
@@ -319,6 +395,45 @@ fn derive_key(
         .with_exposed(|bytes| argon2.hash_password_into(bytes, salt, key.as_mut()))
         .map_err(|_| WalletVaultError::InvalidPasswordOrCorruptVault)?;
     Ok(key)
+}
+
+fn combine_keys(password_key: &[u8; 32], device_key: &DeviceKey) -> Zeroizing<[u8; 32]> {
+    let mut combined = Zeroizing::new([0_u8; 32]);
+    device_key.with_exposed(|device_bytes| {
+        for (index, output) in combined.iter_mut().enumerate() {
+            *output = password_key[index] ^ device_bytes[index];
+        }
+    });
+    combined
+}
+
+fn device_entropy(wallet_id: &str) -> Vec<u8> {
+    format!("{VAULT_SCHEMA}|{VAULT_VERSION}|{wallet_id}|device-key").into_bytes()
+}
+
+fn unprotect_device_key(
+    algorithm: &str,
+    protected: &[u8],
+    entropy: &[u8],
+) -> Result<DeviceKey, WalletVaultError> {
+    #[cfg(test)]
+    if algorithm == device_protection::TEST_PROTECTOR_ALGORITHM {
+        return device_protection::unprotect_for_test(protected, entropy)
+            .map_err(|_| WalletVaultError::InvalidPasswordOrCorruptVault);
+    }
+    device_protection::unprotect(algorithm, protected, entropy)
+        .map_err(|_| WalletVaultError::InvalidPasswordOrCorruptVault)
+}
+
+fn supported_device_algorithm(algorithm: &str) -> bool {
+    if algorithm == device_protection::WINDOWS_DPAPI_ALGORITHM {
+        return true;
+    }
+    #[cfg(test)]
+    if algorithm == device_protection::TEST_PROTECTOR_ALGORITHM {
+        return true;
+    }
+    false
 }
 
 fn validate_wallet_id(wallet_id: &str) -> Result<(), WalletVaultError> {
@@ -385,7 +500,7 @@ mod tests {
     }
 
     fn test_vault() -> EncryptedWalletVault {
-        EncryptedWalletVault::encrypt(
+        EncryptedWalletVault::encrypt_for_test(
             "primary_wallet",
             1_700_000_000_000,
             &WalletSeed::from_bytes([0x5a; SEED_BYTES]),
@@ -438,6 +553,27 @@ mod tests {
     fn authenticated_metadata_cannot_be_modified() {
         let mut vault = test_vault();
         vault.created_at_unix_ms += 1;
+
+        assert_eq!(
+            vault
+                .unlock(&password("correct horse battery staple"))
+                .unwrap_err(),
+            WalletVaultError::InvalidPasswordOrCorruptVault
+        );
+    }
+
+    #[test]
+    fn protected_device_key_cannot_be_modified() {
+        let mut vault = test_vault();
+        let replacement = if vault.device_protection.protected_key_hex.starts_with("00") {
+            "ff"
+        } else {
+            "00"
+        };
+        vault
+            .device_protection
+            .protected_key_hex
+            .replace_range(0..2, replacement);
 
         assert_eq!(
             vault
@@ -524,5 +660,20 @@ mod tests {
                 WalletVaultError::InvalidWalletId
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_device_bound_vault_round_trips_through_dpapi() {
+        let seed = WalletSeed::from_bytes([0x3c; SEED_BYTES]);
+        let password = password("correct horse battery staple");
+        let vault = EncryptedWalletVault::encrypt("windows_wallet", 1, &seed, &password).unwrap();
+
+        assert_eq!(
+            vault.device_protection.algorithm,
+            device_protection::WINDOWS_DPAPI_ALGORITHM
+        );
+        let unlocked = vault.unlock(&password).unwrap();
+        assert!(unlocked.with_exposed(|bytes| bytes == &[0x3c; SEED_BYTES]));
     }
 }

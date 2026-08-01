@@ -49,6 +49,7 @@ The first encrypted vault foundation is implemented inside the Rust wallet modul
 
 - Argon2id password-based key derivation with fixed, validated cost parameters;
 - XChaCha20-Poly1305 authenticated encryption with a unique random salt and nonce for every vault;
+- a random device key protected for the current Windows user and machine by DPAPI, combined with the Argon2id password key so neither factor is sufficient alone;
 - authenticated vault metadata so identifiers and cryptographic parameters cannot be altered silently;
 - encrypted-only, create-new file storage that never overwrites an existing vault, bounded file sizes, and corruption detection;
 - fail-closed storage permissions: Unix `0700` wallet directories and `0600` vault files; protected Windows DACLs granting full control only to the owner, SYSTEM, and local Administrators;
@@ -59,10 +60,11 @@ The first encrypted vault foundation is implemented inside the Rust wallet modul
 
 No wallet creation, recovery, unlock, signing, or send command is registered with Tauri yet. Before custody is enabled for users, the remaining vault work includes:
 
-- OS-backed protection for an additional wrapping key where available;
 - integration of the Rust-only session with future Tauri commands and process/window lifecycle events;
 - versioned migration with backup-before-upgrade behavior;
 - secure backup/recovery UX and an independent cryptographic review.
+
+The internal vault schema is version 2 and is device-bound. Copying the local vault file to another Windows user or computer is intentionally insufficient for recovery. No user-facing wallet creation may be enabled until a separate portable recovery artifact can reproduce the same approved Vision address without relying on DPAPI or the original machine.
 
 ## Recovery requirements
 

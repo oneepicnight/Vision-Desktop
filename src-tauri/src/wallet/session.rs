@@ -218,6 +218,7 @@ fn map_vault_error(error: WalletVaultError) -> WalletSessionError {
         WalletVaultError::PasswordPolicy => WalletSessionError::PasswordPolicy,
         WalletVaultError::InvalidWalletId
         | WalletVaultError::InvalidOrUnsupportedFormat
+        | WalletVaultError::DeviceProtectionUnavailable
         | WalletVaultError::RandomSourceUnavailable
         | WalletVaultError::StorageUnavailable
         | WalletVaultError::VaultAlreadyExists => WalletSessionError::VaultUnavailable,
@@ -235,7 +236,7 @@ mod tests {
     }
 
     fn test_vault(wallet_id: &str, seed_byte: u8) -> EncryptedWalletVault {
-        EncryptedWalletVault::encrypt(
+        EncryptedWalletVault::encrypt_for_test(
             wallet_id,
             1_700_000_000_000,
             &WalletSeed::from_bytes([seed_byte; 32]),

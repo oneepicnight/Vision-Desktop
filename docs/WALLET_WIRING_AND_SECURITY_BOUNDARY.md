@@ -44,4 +44,4 @@ The account address is encoded as a URL path segment by the Desktop backend. Req
 - Real Core launch remains blocked by the separately documented frozen-RC2 loopback-bind limitation.
 - Balance denomination and precision metadata are not exposed.
 - Transaction and receipt history are not exposed through the current Desktop service boundary.
-- No custody model has been selected. External signer, embedded encrypted wallet, and hardware-wallet approaches require a separate explicit architecture decision.
+- The embedded Rust-managed custody model is now selected and documented in `WALLET_SECURITY_ARCHITECTURE.md`, but custody remains unimplemented and disabled until its Core compatibility and vault security gates pass.

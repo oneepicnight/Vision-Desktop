@@ -6,6 +6,7 @@ pub mod network;
 pub mod paths;
 pub mod reports;
 pub mod supervisor;
+pub mod wallet;
 
 use supervisor::SupervisorState;
 use tauri::Manager;

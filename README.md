@@ -81,6 +81,8 @@ Wallet limitations and security boundary:
 - balance denomination and precision metadata are not currently exposed, so values are displayed exactly as returned
 - transaction or receipt history is not currently exposed by the Desktop service boundary
 
+The approved target is an embedded, non-custodial wallet whose secret-bearing operations remain inside the Rust backend. The current release still has custody, creation, recovery, signing, and sends disabled. `docs/WALLET_SECURITY_ARCHITECTURE.md` and `docs/WALLET_CORE_CONTRACT_GAPS.md` define the fail-closed gates that must pass before real keys or funds are handled.
+
 The Marketplace uses the legacy wallet-marketplace market-terminal hierarchy as a visual reference only. Its read-only observatory shows Core, recovery, mock-mode, and refresh context from the existing Desktop state while making the missing marketplace service boundary explicit. It does not display fallback prices, fabricated order books, balances, listings, trades, or transaction history.
 
 Marketplace limitations and security boundary:

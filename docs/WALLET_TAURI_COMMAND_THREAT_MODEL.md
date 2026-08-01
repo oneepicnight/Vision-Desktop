@@ -2,7 +2,7 @@
 
 ## Status
 
-This document specifies a future interface. No wallet command is registered with Tauri, no wallet service wrapper exists in React, no dialog or single-instance dependency is installed, and wallet creation, restore, unlock, signing, and submission remain unavailable.
+This document specifies a future interface. No wallet command is registered with Tauri, no wallet service wrapper exists in React, the pinned dialog and single-instance Rust dependencies are not initialized, and wallet creation, restore, unlock, signing, and submission remain unavailable.
 
 The specification is fail-closed. An implementation must not register a partial subset that weakens the ordering, origin, path, lifecycle, or compatibility gates below.
 
@@ -297,7 +297,7 @@ Before activation:
 ## Implementation sequence
 
 1. Obtain independent review of this interface and the existing Rust custody modules.
-2. Add and pin the official Tauri dialog and single-instance plugins in a dependency-only commit with provenance review.
+2. Add and pin the official Tauri dialog and single-instance plugins in a dependency-only commit with provenance review. Completed; the crates remain uninitialized.
 3. Add `AppManifest`, explicit application permissions, and one main-window capability; migrate existing commands without changing behavior.
 4. Split production CSP from `devCsp` and prove no frontend direct-Core requests are required.
 5. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands.
@@ -318,10 +318,11 @@ Approved on 2026-08-01:
 - immediate frontend field clearing with no shared-state or persistence;
 - no user-facing wallet creation until private loopback operation is available;
 - no mnemonic, clipboard recovery, automatic cloud backup, arbitrary filesystem access, or send activation.
+- exact-version, Windows-only Rust dependencies for official Tauri dialog and single-instance support, with no JavaScript packages, plugin initialization, capabilities, or wallet commands.
 
 Still requiring explicit review before implementation:
 
-- adding the official dialog and single-instance dependencies;
+- initializing the official dialog and single-instance plugins and defining their lifecycle behavior;
 - the complete Tauri ACL migration for existing commands;
 - production CSP separation;
 - the exact operating-system session-lock integration;

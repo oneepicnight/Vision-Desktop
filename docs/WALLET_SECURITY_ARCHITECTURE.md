@@ -92,3 +92,5 @@ Before any release can hold real funds:
 5. The release is code-signed and built through the controlled release process.
 
 This architecture reduces risk but does not claim that unaudited software is equivalent to certified hardware. Hardware-wallet support remains a recommended future defense-in-depth option.
+
+The future WebView-to-Rust custody boundary is specified in `docs/WALLET_TAURI_COMMAND_THREAT_MODEL.md`. It defines explicit command permissions, a main-window-only capability, Rust-side native file selection, opaque path tokens, secret request handling, lifecycle locking, production CSP separation, and the conditions that keep every wallet command unregistered.

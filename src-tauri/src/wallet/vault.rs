@@ -37,7 +37,7 @@ const NONCE_BYTES: usize = 24;
 const SEED_BYTES: usize = 32;
 const AUTH_TAG_BYTES: usize = 16;
 const MAX_VAULT_JSON_BYTES: usize = 16 * 1024;
-const MIN_PASSWORD_BYTES: usize = 12;
+const MIN_PASSWORD_BYTES: usize = 16;
 const MAX_PASSWORD_BYTES: usize = 1024;
 const MAX_PROTECTED_DEVICE_KEY_BYTES: usize = 4096;
 
@@ -597,8 +597,12 @@ mod tests {
     fn password_policy_rejects_short_and_oversized_values() {
         let seed = WalletSeed::from_bytes([1; SEED_BYTES]);
         assert_eq!(
-            EncryptedWalletVault::encrypt("wallet", 1, &seed, &password("too-short")).unwrap_err(),
+            validate_password(&password(&"x".repeat(MIN_PASSWORD_BYTES - 1))).unwrap_err(),
             WalletVaultError::PasswordPolicy
+        );
+        assert_eq!(
+            validate_password(&password(&"x".repeat(MIN_PASSWORD_BYTES))),
+            Ok(())
         );
         assert_eq!(
             EncryptedWalletVault::encrypt("wallet", 1, &seed, &password(&"x".repeat(1025)))

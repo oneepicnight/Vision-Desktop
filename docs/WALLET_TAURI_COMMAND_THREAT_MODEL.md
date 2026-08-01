@@ -8,15 +8,17 @@ The specification is fail-closed. An implementation must not register a partial 
 
 ## Evidence inspected
 
-The current Desktop application:
+Before the command ACL migration, the Desktop application:
 
-- registers its existing application commands directly through `tauri::Builder::invoke_handler`;
-- has one configured main window but no explicit application capability file or `AppManifest` command list;
+- registered its existing application commands directly through `tauri::Builder::invoke_handler`;
+- had one configured main window but no explicit application capability file or `AppManifest` command list;
 - does not load remote scripts or remote application pages;
 - currently permits `ipc:` and loopback HTTP connections in its production CSP;
 - keeps all frontend Tauri calls in `src/services/coreApi.ts`;
 - has no wallet command, frontend password form, file dialog plugin, clipboard wallet path, or wallet state in the general Desktop reducer;
 - keeps vault, recovery, session, signing, submission, receipt, journal, and onboarding code inside the private Rust wallet module.
+
+The current Desktop application now also registers its exact 19-command inventory through `tauri_build::AppManifest` and grants only those generated permissions to the explicitly labelled `main` window on Windows. `docs/TAURI_COMMAND_ACCESS_CONTROL.md` records the active command inventory and its automated drift tests. No wallet permission or plugin permission was added.
 
 Tauri 2 documents that registered application commands are available to all application windows and webviews by default unless an `AppManifest` and capabilities narrow them. Capabilities merge when a window belongs to more than one capability, so wallet permissions must not be spread across overlapping broad capability files. Tauri also exposes native save/open dialogs from Rust through the official dialog plugin. These behaviors are the basis for the proposed boundary:
 
@@ -66,8 +68,8 @@ No custody command may be registered until all of these are true:
 2. An independent review approves the vault, recovery, session, onboarding, transaction, receipt, and journal boundaries.
 3. The application enforces a single running wallet-owning Desktop process or an equivalent operating-system wallet lock.
 4. The production CSP no longer permits general `http://127.0.0.1:*` frontend connections. Development-only connectivity belongs in `devCsp`; production uses IPC only unless a separately reviewed source is required.
-5. `build.rs` declares every application command through `tauri_build::AppManifest` so custom commands participate in ACL resolution.
-6. One explicit capability applies to the `main` window. It lists only required core permissions and individually approved application commands. It has no `remote.urls`, wildcard window, shell, generic filesystem, HTTP, clipboard, or broad dialog permission.
+5. `build.rs` declares every application command through `tauri_build::AppManifest` so custom commands participate in ACL resolution. Completed for the existing command surface; automated tests enforce inventory parity.
+6. One explicit capability applies to the `main` window. It lists only individually approved application commands and has no `remote.urls`, wildcard window, shell, generic filesystem, HTTP, clipboard, plugin, or wallet permission. Completed for the existing command surface.
 7. The Rust side of the official dialog plugin performs recovery save/open selection. Its JavaScript package is not installed and dialog permissions are not exposed to React.
 8. Every secret-bearing request type is non-serializable in the response direction, non-cloneable, non-debuggable, bounded before expensive work, and zeroized on drop.
 9. Wallet state is held in a dedicated Rust `WalletRuntimeState`; it never enters `DesktopState`, reducer events, browser storage, URL state, or support packages.
@@ -75,7 +77,7 @@ No custody command may be registered until all of these are true:
 
 ## Capability design
 
-The future capability must target exactly the main window label and desktop platforms. No wallet permission is part of a default or wildcard permission set.
+The active `main-desktop` capability targets exactly the `main` window label on Windows and grants the current non-wallet application commands individually. No wallet permission is part of it or any default or wildcard permission set. Future wallet permissions require an explicit reviewed extension of this same fail-closed boundary; overlapping broad capabilities are prohibited.
 
 Planned application permissions:
 
@@ -298,7 +300,7 @@ Before activation:
 
 1. Obtain independent review of this interface and the existing Rust custody modules.
 2. Add and pin the official Tauri dialog and single-instance plugins in a dependency-only commit with provenance review. Completed; the crates remain uninitialized.
-3. Add `AppManifest`, explicit application permissions, and one main-window capability; migrate existing commands without changing behavior.
+3. Add `AppManifest`, explicit application permissions, and one main-window capability; migrate existing commands without changing behavior. Completed; the 19-command inventory is protected by automated parity tests and the plugins remain inactive.
 4. Split production CSP from `devCsp` and prove no frontend direct-Core requests are required.
 5. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands.
 6. Implement and test destination/source token selection in Rust.
@@ -318,7 +320,8 @@ Approved on 2026-08-01:
 - immediate frontend field clearing with no shared-state or persistence;
 - no user-facing wallet creation until private loopback operation is available;
 - no mnemonic, clipboard recovery, automatic cloud backup, arbitrary filesystem access, or send activation.
-- exact-version, Windows-only Rust dependencies for official Tauri dialog and single-instance support, with no JavaScript packages, plugin initialization, capabilities, or wallet commands.
+- exact-version, Windows-only Rust dependencies for official Tauri dialog and single-instance support, with no JavaScript packages, plugin initialization, plugin permissions, or wallet commands;
+- explicit AppManifest registration and a single main-window-only Windows capability for the existing non-wallet application commands before either plugin is initialized.
 
 Still requiring explicit review before implementation:
 

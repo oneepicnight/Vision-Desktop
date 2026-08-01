@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-run-network-diagnostics"
+description = "Enables the run_network_diagnostics command without any pre-configured scope."
+commands.allow = ["run_network_diagnostics"]
+
+[[permission]]
+identifier = "deny-run-network-diagnostics"
+description = "Denies the run_network_diagnostics command without any pre-configured scope."
+commands.deny = ["run_network_diagnostics"]

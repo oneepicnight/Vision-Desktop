@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-verify-core-binary"
+description = "Enables the verify_core_binary command without any pre-configured scope."
+commands.allow = ["verify_core_binary"]
+
+[[permission]]
+identifier = "deny-verify-core-binary"
+description = "Denies the verify_core_binary command without any pre-configured scope."
+commands.deny = ["verify_core_binary"]

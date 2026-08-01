@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-core-process-state"
+description = "Enables the get_core_process_state command without any pre-configured scope."
+commands.allow = ["get_core_process_state"]
+
+[[permission]]
+identifier = "deny-get-core-process-state"
+description = "Denies the get_core_process_state command without any pre-configured scope."
+commands.deny = ["get_core_process_state"]

@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Vision Desktop",
         "width": 1180,
         "height": 760,
@@ -20,6 +21,7 @@
       }
     ],
     "security": {
+      "capabilities": ["main-desktop"],
       "csp": "default-src 'self'; connect-src ipc: http://127.0.0.1:*; img-src 'self' asset:; style-src 'self' 'unsafe-inline'"
     }
   },

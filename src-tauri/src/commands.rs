@@ -183,8 +183,7 @@ pub fn get_node_config_snapshot() -> Result<NodeConfigSnapshot, String> {
     load_node_config_snapshot()
 }
 
-#[tauri::command]
-pub fn generate_support_package_command(
+fn generate_support_package_command(
     state: State<SupervisorState>,
 ) -> Result<SupportPackageResult, String> {
     let process = state.current_state()?;

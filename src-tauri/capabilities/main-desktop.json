@@ -1,0 +1,28 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-desktop",
+  "description": "Allows the bundled Vision Desktop main window to invoke the currently registered application commands.",
+  "windows": ["main"],
+  "platforms": ["windows"],
+  "permissions": [
+    "allow-verify-core-binary",
+    "allow-get-core-manifest",
+    "allow-start-core",
+    "allow-stop-core",
+    "allow-restart-core",
+    "allow-get-core-process-state",
+    "allow-get-core-stdout-tail",
+    "allow-get-core-stderr-tail",
+    "allow-open-logs-directory",
+    "allow-open-data-directory",
+    "allow-get-dashboard-snapshot",
+    "allow-lookup-explorer-address",
+    "allow-lookup-explorer-transaction",
+    "allow-save-node-config",
+    "allow-get-node-config-snapshot",
+    "allow-generate-support-package",
+    "allow-run-network-diagnostics",
+    "allow-get-mock-dashboard-snapshot",
+    "allow-get-default-paths"
+  ]
+}

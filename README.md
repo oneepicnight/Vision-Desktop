@@ -168,6 +168,14 @@ npm run typecheck
 npm run build
 ```
 
+Build the Windows desktop bundles:
+
+```powershell
+npm run tauri:build
+```
+
+The Windows build produces both an x64 MSI and an x64 NSIS setup executable under `src-tauri/target/release/bundle/`. The current alpha packages are unsigned local engineering artifacts and are not suitable for public distribution until the code-signing and release process is established. The MSI uses the stable upgrade code documented in `docs/WINDOWS_PACKAGING_BASELINE.md`, while its numeric package version maps the application prerelease `0.1.0-alpha.1` to `0.1.0.1` for WiX compatibility.
+
 Run Rust backend tests:
 
 ```powershell

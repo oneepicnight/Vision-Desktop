@@ -8,10 +8,16 @@ pub mod reports;
 pub mod supervisor;
 
 use supervisor::SupervisorState;
+use tauri::Manager;
 
 pub fn run() {
     tauri::Builder::default()
         .manage(SupervisorState::default())
+        .setup(|app| {
+            let resource_dir = app.path().resource_dir()?;
+            core_manifest::initialize_resource_root(resource_dir).map_err(std::io::Error::other)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::verify_core_binary,
             commands::get_core_manifest,

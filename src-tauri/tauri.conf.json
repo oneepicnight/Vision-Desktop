@@ -26,9 +26,15 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": ["../bundled/core/windows-x64/vision-core.exe", "../bundled/core/windows-x64/manifest.json"],
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "../bundled/core/windows-x64/vision-core.exe": "bundled/core/windows-x64/vision-core.exe",
+      "../bundled/core/windows-x64/manifest.json": "bundled/core/windows-x64/manifest.json"
+    },
     "windows": {
       "wix": {
+        "version": "0.1.0.1",
+        "upgradeCode": "59952895-6664-56c1-8ebc-f94bfe9dca35",
         "language": "en-US"
       }
     }

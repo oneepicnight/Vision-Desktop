@@ -1,3 +1,4 @@
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -9,6 +10,8 @@ pub const EXPECTED_CORE_SHA256: &str =
     "41F61A18B48D1FB28604910D27D4AADD8368D35CEF27B4E6EB385ADA0BA02C01";
 pub const CORE_MANIFEST_RELATIVE: &str = "bundled/core/windows-x64/manifest.json";
 pub const CORE_BINARY_RELATIVE: &str = "bundled/core/windows-x64/vision-core.exe";
+
+static RESOURCE_ROOT: OnceCell<PathBuf> = OnceCell::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreManifest {
@@ -36,12 +39,26 @@ pub fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
+pub fn initialize_resource_root(root: PathBuf) -> Result<(), String> {
+    RESOURCE_ROOT
+        .set(root)
+        .map_err(|_| "Desktop resource directory was already initialized".to_string())
+}
+
+fn resource_root() -> PathBuf {
+    RESOURCE_ROOT.get().cloned().unwrap_or_else(repository_root)
+}
+
+fn bundled_path(root: &Path, relative: &str) -> PathBuf {
+    root.join(relative)
+}
+
 pub fn bundled_core_binary_path() -> PathBuf {
-    repository_root().join(CORE_BINARY_RELATIVE)
+    bundled_path(&resource_root(), CORE_BINARY_RELATIVE)
 }
 
 pub fn bundled_core_manifest_path() -> PathBuf {
-    repository_root().join(CORE_MANIFEST_RELATIVE)
+    bundled_path(&resource_root(), CORE_MANIFEST_RELATIVE)
 }
 
 pub fn load_core_manifest_from(path: &Path) -> Result<CoreManifest, String> {
@@ -105,5 +122,18 @@ mod tests {
         let manifest = load_core_manifest().unwrap();
         let result = verify_core_binary_at(&file, &manifest).unwrap();
         assert!(!result.matches);
+    }
+
+    #[test]
+    fn bundled_paths_are_rooted_under_runtime_resource_directory() {
+        let root = Path::new("C:/Program Files/Vision Desktop");
+        assert_eq!(
+            bundled_path(root, CORE_BINARY_RELATIVE),
+            root.join("bundled/core/windows-x64/vision-core.exe")
+        );
+        assert_eq!(
+            bundled_path(root, CORE_MANIFEST_RELATIVE),
+            root.join("bundled/core/windows-x64/manifest.json")
+        );
     }
 }

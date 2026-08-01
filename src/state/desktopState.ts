@@ -368,7 +368,8 @@ export function useDesktopState(): DesktopStateController {
     [state.activeLifecycleAction, state.activeView, state.config.miner_reward_address, state.mockMode],
   );
 
-  usePollingEffect(() => refresh("polling"), 5000);
+  const poll = React.useCallback(() => refresh("polling"), [refresh]);
+  usePollingEffect(poll, 5000);
 
   const runAction = React.useCallback(
     async (name: string, fn: () => Promise<unknown>) => {

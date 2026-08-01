@@ -32,6 +32,14 @@
       "../bundled/core/windows-x64/manifest.json": "bundled/core/windows-x64/manifest.json"
     },
     "windows": {
+      "nsis": {
+        "headerImage": "icons/nsis-header.bmp",
+        "sidebarImage": "icons/nsis-sidebar.bmp",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "uninstallerHeaderImage": "icons/nsis-uninstaller-header.bmp",
+        "installMode": "currentUser"
+      },
       "wix": {
         "version": "0.1.0.1",
         "upgradeCode": "59952895-6664-56c1-8ebc-f94bfe9dca35",

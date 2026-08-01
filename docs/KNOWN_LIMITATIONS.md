@@ -2,7 +2,6 @@
 
 - Windows-first.
 - MSI and NSIS bundles are unsigned local engineering builds; public distribution requires a trusted code-signing certificate and release-signing procedure.
-- The current Windows icon is a preliminary 16 x 16 ICO and needs a production multi-resolution icon set.
 - No automatic updater yet.
 - The Wallet is read-only and does not provide custody, key generation, signing, or transaction submission.
 - No exchange yet.
@@ -16,7 +15,7 @@
 - No automatic restart loop yet.
 - Windows MSI and NSIS packaging is implemented. The unsigned MSI passed a local elevated lifecycle, and the unsigned NSIS package passed a local silent per-user install, launch, direct-uninstall, and cleanup cycle.
 - The NSIS package creates and removes the expected current-user Windows uninstall registration.
-- The interactive NSIS lifecycle passed locally, but installation begins immediately when Setup opens and the wizard still uses generic NSIS visual presentation.
+- The branded interactive NSIS install, packaged-app launch, and retained-data uninstall lifecycle passed locally; clean-machine and cross-display-scale presentation remain unqualified.
 - Clean-machine, upgrade/downgrade, signing, and public-release qualification remain incomplete.
 - Real Core launch remains blocked because the frozen RC2 Core cannot bind its HTTP API to loopback only.
 - Public endpoint redaction is conservative and may require review before sharing reports.

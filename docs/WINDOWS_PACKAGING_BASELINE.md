@@ -117,6 +117,27 @@ The first uninstall-registration check incorrectly queried the sandbox worker's 
 
 This proves the local silent NSIS install, Windows uninstall registration, installed-path launch, direct-uninstaller, and cleanup paths for this unsigned engineering build. It does not qualify the interactive installer UI, clean-machine compatibility, upgrade, downgrade, code signing, or public distribution.
 
+## Interactive NSIS Lifecycle Qualification
+
+Recorded: `2026-08-01T00:30:53-04:00` on the same ASUS Windows workstation.
+
+The visible current-user installer and uninstaller flow passed locally:
+
+- opening the installer began the per-user installation immediately; this package does not present a separate pre-install confirmation page;
+- the installer displayed `Installation Complete` and `Setup was completed successfully`;
+- the details view accurately listed the per-user output directory, Desktop executable, bundled Core directory, manifest, Core executable, generated uninstaller, and Start menu shortcut;
+- the finish page offered checked, explicit options to run Vision Desktop and create a Desktop shortcut;
+- selecting Finish closed Setup, created the requested Desktop shortcut, and launched the installed executable;
+- the host-user Windows uninstall registration, installed payload hashes, and shortcut locations matched the silent-install qualification above;
+- the installed app rendered normally in mock mode;
+- live observation mode left Core stopped and preserved the RC2 launch restriction;
+- Diagnostics reported the installed Core binary as `Verified`;
+- the interactive uninstaller displayed the exact installation directory and an unchecked `Delete the application data` option;
+- after explicit approval, interactive uninstall removed the Windows uninstall key, program directory, Start menu shortcut, Desktop shortcut, and running process;
+- because application-data deletion was not selected, `C:\Users\bighe\AppData\Local\com.vision.desktop` and its WebView data remained.
+
+The interactive NSIS lifecycle is functionally qualified on this workstation. The immediate one-step installation flow and generic NSIS visual presentation remain release UX review items. Clean-machine compatibility, upgrades, downgrades, signing, and public distribution are not qualified by this result.
+
 ## Confirmed Packaging Fixes
 
 - Added the explicit Windows icon required by the Tauri bundle step.
@@ -132,7 +153,8 @@ This proves the local silent NSIS install, Windows uninstall registration, insta
 - Sign and verify the executable, MSI, and NSIS setup executable in a controlled release workflow.
 - Replace the preliminary 16 x 16 ICO with a production multi-resolution Windows icon set.
 - Repeat install and uninstall qualification on clean supported Windows systems.
-- Qualify the interactive NSIS installer and future-version upgrade, downgrade, and rollback behavior.
+- Review and brand the immediate one-step NSIS installer experience for public release.
+- Qualify future-version upgrade, downgrade, and rollback behavior.
 - Confirm the intentionally disabled MSI repair policy remains appropriate for release.
 - Define and implement the updater only after signed update metadata and release hosting are approved.
 - Retain the real-Core launch block until Vision-Core provides a loopback-only private API bind setting.

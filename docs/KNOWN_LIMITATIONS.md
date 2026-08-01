@@ -16,6 +16,7 @@
 - No automatic restart loop yet.
 - Windows MSI and NSIS packaging is implemented. The unsigned MSI passed a local elevated lifecycle, and the unsigned NSIS package passed a local silent per-user install, launch, direct-uninstall, and cleanup cycle.
 - The NSIS package creates and removes the expected current-user Windows uninstall registration.
-- Clean-machine, interactive NSIS, upgrade/downgrade, signing, and public-release qualification remain incomplete.
+- The interactive NSIS lifecycle passed locally, but installation begins immediately when Setup opens and the wizard still uses generic NSIS visual presentation.
+- Clean-machine, upgrade/downgrade, signing, and public-release qualification remain incomplete.
 - Real Core launch remains blocked because the frozen RC2 Core cannot bind its HTTP API to loopback only.
 - Public endpoint redaction is conservative and may require review before sharing reports.

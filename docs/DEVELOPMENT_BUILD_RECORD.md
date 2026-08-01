@@ -55,6 +55,10 @@
 - Local silent NSIS direct uninstall: passed; program files, per-user shortcuts, and process were removed
 - Repeated NSIS install/uninstall cleanup: passed
 - NSIS Windows uninstall registration: passed at `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Vision Desktop`; the key was removed during uninstall
+- Interactive NSIS installation-completion and details pages: passed
+- NSIS finish-page run and Desktop-shortcut options: passed
+- Interactive NSIS installed-app launch and Diagnostics Core verification: passed (`Verified`)
+- Interactive NSIS uninstall with application-data deletion unchecked: passed; application binaries, shortcuts, registration, and process were removed while the retained WebView data directory remained
 
 ## Core Integration Result
 
@@ -71,7 +75,8 @@ The Desktop supervisor continues to enforce this restriction. Mock mode remains 
 - The updater is not implemented.
 - The current ICO contains only a preliminary 16 x 16 image.
 - The MSI lifecycle result is from the development workstation, not an isolated clean Windows system.
-- The NSIS lifecycle result is a silent local test, not an interactive-wizard or clean-machine qualification.
+- The silent and interactive NSIS lifecycle results are from the development workstation, not an isolated clean Windows system.
+- The current interactive NSIS flow begins installing immediately when Setup opens and uses generic NSIS visual presentation.
 - Clean-machine compatibility remains unqualified.
 - Upgrade and downgrade require a future package version and remain untested.
 - MSI repair is intentionally disabled (`ARPNOREPAIR=yes`, `NoRepair=1`); the release policy for repair remains to be confirmed.

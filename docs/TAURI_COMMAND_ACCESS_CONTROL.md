@@ -35,16 +35,16 @@ The main window may invoke:
 - the capability is expanded beyond the `main` Windows window;
 - a remote-origin grant appears;
 - a broad or namespaced plugin permission appears;
-- the pinned dialog or single-instance plugin is initialized;
+- the native dialog plugin is initialized or the single-instance plugin is registered after other startup work;
 - a wallet permission is added.
 
 Adding or removing an application command therefore requires one reviewed change across command registration, the AppManifest, the capability, and this documentation.
 
-## Deliberately inactive plugins and wallet surface
+## Plugin and wallet surface
 
-`tauri-plugin-dialog` and `tauri-plugin-single-instance` remain exact-version Windows dependencies only. Neither plugin is initialized, and neither has a capability permission. There are no wallet Tauri commands or wallet permissions.
+`tauri-plugin-single-instance` is initialized on Windows as the first plugin. It has no frontend command permission, discards duplicate-process launch data, and only activates the existing `main` window. `tauri-plugin-dialog` remains an exact-version, uninitialized Windows dependency. Neither plugin has a WebView capability permission. There are no wallet Tauri commands or wallet permissions.
 
-Plugin initialization and custody commands remain later security gates. They require their own implementation, lifecycle tests, and review; this migration does not activate them.
+Native dialog initialization and custody commands remain later security gates. They require their own implementation, lifecycle tests, and review.
 
 ## WebView network boundary
 

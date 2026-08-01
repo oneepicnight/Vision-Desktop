@@ -8,11 +8,25 @@ pub mod reports;
 pub mod supervisor;
 pub mod wallet;
 
+#[cfg(windows)]
+mod single_instance;
+
 use supervisor::SupervisorState;
 use tauri::Manager;
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // This must remain the first plugin so duplicate processes are rejected before any future
+    // wallet- or dialog-capable plugin can initialize.
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(
+        |app, _duplicate_arguments, _duplicate_working_directory| {
+            single_instance::activate_main_window(app);
+        },
+    ));
+
+    builder
         .manage(SupervisorState::default())
         .setup(|app| {
             let resource_dir = app.path().resource_dir()?;

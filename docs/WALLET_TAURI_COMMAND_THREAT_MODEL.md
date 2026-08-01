@@ -2,7 +2,7 @@
 
 ## Status
 
-This document specifies a future interface. No wallet command is registered with Tauri, no wallet service wrapper exists in React, the pinned dialog and single-instance Rust dependencies are not initialized, and wallet creation, restore, unlock, signing, and submission remain unavailable.
+This document specifies a future interface. No wallet command is registered with Tauri, no wallet service wrapper exists in React, the pinned dialog dependency is not initialized, and wallet creation, restore, unlock, signing, and submission remain unavailable. The pinned single-instance plugin is now active on Windows as a process-exclusion prerequisite.
 
 The specification is fail-closed. An implementation must not register a partial subset that weakens the ordering, origin, path, lifecycle, or compatibility gates below.
 
@@ -66,7 +66,7 @@ No custody command may be registered until all of these are true:
 
 1. The supported Vision-Core release provides loopback-only HTTP binding and the Desktop manifest accepts that exact release.
 2. An independent review approves the vault, recovery, session, onboarding, transaction, receipt, and journal boundaries.
-3. The application enforces a single running wallet-owning Desktop process or an equivalent operating-system wallet lock.
+3. The application enforces a single running wallet-owning Desktop process or an equivalent operating-system wallet lock. Desktop duplicate-launch handling is active and tested on Windows, but this custody gate remains open until `WalletRuntimeState` owns an independent fail-closed operating-system wallet lock.
 4. The production CSP no longer permits general `http://127.0.0.1:*` frontend connections. Development-only connectivity belongs in `devCsp`; production uses IPC only unless a separately reviewed source is required. Completed for the current frontend and protected by automated source and configuration tests.
 5. `build.rs` declares every application command through `tauri_build::AppManifest` so custom commands participate in ACL resolution. Completed for the existing command surface; automated tests enforce inventory parity.
 6. One explicit capability applies to the `main` window. It lists only individually approved application commands and has no `remote.urls`, wildcard window, shell, generic filesystem, HTTP, clipboard, plugin, or wallet permission. Completed for the existing command surface.
@@ -299,15 +299,16 @@ Before activation:
 ## Implementation sequence
 
 1. Obtain independent review of this interface and the existing Rust custody modules.
-2. Add and pin the official Tauri dialog and single-instance plugins in a dependency-only commit with provenance review. Completed; the crates remain uninitialized.
+2. Add and pin the official Tauri dialog and single-instance plugins in a dependency-only commit with provenance review. Completed.
 3. Add `AppManifest`, explicit application permissions, and one main-window capability; migrate existing commands without changing behavior. Completed; the 19-command inventory is protected by automated parity tests and the plugins remain inactive.
 4. Split production CSP from `devCsp` and prove no frontend direct-Core requests are required. Completed; production permits only Tauri IPC transports and the frontend source boundary is tested.
-5. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands.
-6. Implement and test destination/source token selection in Rust.
-7. Implement create/restore/unlock/lock commands but keep them unregistered behind the activation policy.
-8. Add the isolated frontend onboarding UI and service wrappers; perform secret-leak and accessibility review.
-9. Integrate a supported loopback-only Core release through the separate compatibility workflow.
-10. Register only the reviewed wallet commands and run adversarial, recovery, packaging, and signed-release validation.
+5. Initialize the single-instance plugin first, discard duplicate launch data, restore the primary main window, and prove ordinary duplicate-launch and process-lock recovery behavior. Completed on Windows; source review retains a dedicated custody-lock requirement for step 6.
+6. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands.
+7. Implement and test destination/source token selection in Rust.
+8. Implement create/restore/unlock/lock commands but keep them unregistered behind the activation policy.
+9. Add the isolated frontend onboarding UI and service wrappers; perform secret-leak and accessibility review.
+10. Integrate a supported loopback-only Core release through the separate compatibility workflow.
+11. Register only the reviewed wallet commands and run adversarial, recovery, packaging, and signed-release validation.
 
 ## Decision record
 
@@ -320,13 +321,12 @@ Approved on 2026-08-01:
 - immediate frontend field clearing with no shared-state or persistence;
 - no user-facing wallet creation until private loopback operation is available;
 - no mnemonic, clipboard recovery, automatic cloud backup, arbitrary filesystem access, or send activation.
-- exact-version, Windows-only Rust dependencies for official Tauri dialog and single-instance support, with no JavaScript packages, plugin initialization, plugin permissions, or wallet commands;
+- exact-version, Windows-only Rust dependencies for official Tauri dialog and single-instance support, with no JavaScript packages, plugin permissions, or wallet commands;
 - explicit AppManifest registration and a single main-window-only Windows capability for the existing non-wallet application commands before either plugin is initialized.
+- Windows single-instance enforcement registered before all other startup work; duplicate arguments and working directories are discarded and the existing main window is activated best-effort.
 
 Still requiring explicit review before implementation:
 
-- initializing the official dialog and single-instance plugins and defining their lifecycle behavior;
-- the complete Tauri ACL migration for existing commands;
-- production CSP separation;
+- initializing the official dialog plugin and defining its lifecycle behavior;
 - the exact operating-system session-lock integration;
 - independent cryptographic and application-security approval.

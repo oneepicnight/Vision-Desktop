@@ -177,13 +177,53 @@ fn tauri_config_selects_only_the_explicit_main_window_capability() {
 }
 
 #[test]
-fn pinned_wallet_plugins_remain_uninitialized_and_unpermissioned() {
+fn single_instance_is_first_and_plugins_remain_unpermissioned() {
     let lib_source = read("src/lib.rs");
     let capability_source = read("capabilities/main-desktop.json");
 
     assert!(!lib_source.contains("tauri_plugin_dialog"));
-    assert!(!lib_source.contains("tauri_plugin_single_instance"));
+    let single_instance = lib_source
+        .find(".plugin(tauri_plugin_single_instance::init(")
+        .expect("single-instance plugin is initialized");
+    let managed_state = lib_source
+        .find(".manage(SupervisorState::default())")
+        .expect("supervisor state is managed");
+    let setup = lib_source
+        .find(".setup(")
+        .expect("application setup exists");
+    let invoke_handler = lib_source
+        .find(".invoke_handler(")
+        .expect("invoke handler exists");
+
+    assert!(single_instance < managed_state);
+    assert!(single_instance < setup);
+    assert!(single_instance < invoke_handler);
+    assert_eq!(
+        lib_source
+            .match_indices(".plugin(tauri_plugin_single_instance::init(")
+            .count(),
+        1
+    );
+    assert!(lib_source.contains("|app, _duplicate_arguments, _duplicate_working_directory|"));
+    assert!(lib_source.contains("single_instance::activate_main_window(app);"));
     assert!(!capability_source.contains("dialog:"));
     assert!(!capability_source.contains("single-instance:"));
     assert!(!capability_source.contains("wallet"));
+}
+
+#[test]
+fn duplicate_launch_data_cannot_reach_the_window_activation_handler() {
+    let source = read("src/single_instance.rs");
+
+    assert!(source.contains("pub(crate) fn activate_main_window<R: Runtime>(app: &AppHandle<R>)"));
+    assert!(!source.contains("Vec<String>"));
+    assert!(!source.contains("PathBuf"));
+    assert!(!source.contains("current_dir"));
+    assert!(!source.contains("std::env"));
+    assert!(!source.contains("println!"));
+    assert!(!source.contains("tracing::"));
+    assert!(source.contains("app.get_webview_window(MAIN_WINDOW_LABEL)"));
+    assert!(source.contains("window.show()"));
+    assert!(source.contains("window.unminimize()"));
+    assert!(source.contains("window.set_focus()"));
 }

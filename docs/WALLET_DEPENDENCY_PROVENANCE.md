@@ -2,7 +2,7 @@
 
 ## Status
 
-This record covers dependency admission only. The two crates below are pinned for the Windows target but are not initialized. No JavaScript package, Tauri capability, wallet command, file dialog, process lock, or user-visible behavior is enabled by this change.
+This record began as dependency admission. The single-instance crate is now initialized on Windows as the first plugin, while the dialog crate remains uninitialized. No JavaScript package, Tauri capability, wallet command, file dialog, or frontend wallet behavior is enabled.
 
 ## Admission record
 
@@ -33,7 +33,8 @@ Official references:
 - Versions use exact `=` requirements so normal dependency resolution cannot silently select a later plugin release.
 - The dialog crate disables its default Linux GTK feature because the admitted target is Windows.
 - The dialog JavaScript package is absent from `package.json` and `package-lock.json`.
-- Neither plugin is initialized in `src-tauri/src/lib.rs`.
+- The single-instance plugin is initialized first in `src-tauri/src/lib.rs`; duplicate-launch arguments and working directories are discarded, and only the existing `main` window is restored and focused.
+- The dialog plugin remains uninitialized.
 - No dialog or single-instance permission is granted to a WebView.
 - No application capability file, wallet Tauri command, or frontend service wrapper is added.
 - Cargo registry checksums are committed in `src-tauri/Cargo.lock` and must remain part of release verification.
@@ -46,10 +47,12 @@ The admission-time scan on 2026-08-01 loaded 1,178 RustSec advisories and report
 
 ## Deferred review
 
-Initialization is a separate security change. Before it occurs, review must prove:
+Single-instance initialization completed with source-contract, lifecycle, ordinary duplicate-launch,
+forced-termination recovery, and 12-process burst tests. Source review also identified a narrow
+Windows mutex/receiver startup interval, so the plugin is not accepted as the sole future custody
+lock. Before native dialog initialization occurs, review must still prove:
 
-1. The single-instance plugin is registered before every other plugin and duplicate-instance arguments and working directories are discarded rather than logged or trusted.
-2. The native dialog plugin is invoked only from Rust application commands; its JavaScript package and WebView permissions remain absent.
-3. Selected recovery paths remain in Rust and are represented to the WebView only by short-lived, single-use, window-bound opaque tokens.
-4. Application shutdown, second-instance activation, window destruction, cancellation, and plugin-initialization failure preserve fail-closed wallet locking.
-5. The complete dependency tree and registry checksums receive release-time vulnerability and provenance review in addition to the automated CI gate.
+1. The native dialog plugin is invoked only from Rust application commands; its JavaScript package and WebView permissions remain absent.
+2. Selected recovery paths remain in Rust and are represented to the WebView only by short-lived, single-use, window-bound opaque tokens.
+3. Application shutdown, window destruction, cancellation, and dialog-plugin failure preserve fail-closed wallet locking.
+4. The complete dependency tree and registry checksums receive release-time vulnerability and provenance review in addition to the automated CI gate.

@@ -89,6 +89,33 @@ The elevated MSI lifecycle then passed:
 
 This proves the local MSI install, installed-path launch, and uninstall paths for this unsigned engineering build. It does not qualify clean-machine compatibility, NSIS installation, upgrade, downgrade, code signing, or public distribution.
 
+## Local NSIS Lifecycle Qualification
+
+Recorded: `2026-07-31T23:42:24-04:00` on the same ASUS Windows workstation.
+
+This was a local silent-install qualification, not an interactive-wizard or clean-machine test. The Tauri CLI `2.11.4` schema defaults NSIS to `currentUser`, and the package installed without elevation at:
+
+`C:\Users\bighe\AppData\Local\Vision Desktop`
+
+The local NSIS lifecycle confirmed:
+
+- silent installation returned `0`;
+- `vision-desktop.exe` was installed with product/file version `0.1.0-alpha.1`, size `12,078,080` bytes, and SHA-256 `9F4F8597BACDC6C9CCEC948315844AB5A12EDFC466A36391A2D12B46A579AFB9`;
+- `uninstall.exe` was installed with SHA-256 `8A00C080F7ED07089A947B9693295BB3E4A5D8FCA3C7E4E76517B35059D5F298`;
+- the bundled Core executable and manifest were installed at `bundled\core\windows-x64\` and matched the frozen hashes above;
+- per-user Start menu and Desktop shortcuts were created;
+- the installed executable launched from the per-user installation directory;
+- mock mode rendered normally;
+- live observation mode left Core stopped and preserved the RC2 safety restriction;
+- Diagnostics reported the installed Core binary as `Verified`;
+- silent uninstallation through the installed `uninstall.exe` returned `0`;
+- the program directory, both per-user shortcuts, and running process were absent after uninstall;
+- a repeated install/uninstall cycle produced the same cleanup result.
+
+The package did not create an Apps & Features uninstall registration. This was confirmed after a repeated installation across the standard 32-bit and 64-bit HKCU and HKLM uninstall registry locations. The installed `uninstall.exe` works when invoked directly, but normal Windows uninstall discovery is missing. The local Tauri schema states that current-user installer metadata should be stored under HKCU, so this is a release blocker that requires correction and requalification.
+
+This proves the local silent NSIS install, installed-path launch, direct-uninstaller, and cleanup paths for this unsigned engineering build. It does not qualify the interactive installer UI, Windows uninstall discovery, clean-machine compatibility, upgrade, downgrade, code signing, or public distribution.
+
 ## Confirmed Packaging Fixes
 
 - Added the explicit Windows icon required by the Tauri bundle step.
@@ -104,7 +131,8 @@ This proves the local MSI install, installed-path launch, and uninstall paths fo
 - Sign and verify the executable, MSI, and NSIS setup executable in a controlled release workflow.
 - Replace the preliminary 16 x 16 ICO with a production multi-resolution Windows icon set.
 - Repeat install and uninstall qualification on clean supported Windows systems.
-- Qualify the NSIS installer and future-version upgrade, downgrade, and rollback behavior.
+- Correct and requalify NSIS Apps & Features uninstall registration.
+- Qualify the interactive NSIS installer and future-version upgrade, downgrade, and rollback behavior.
 - Confirm the intentionally disabled MSI repair policy remains appropriate for release.
 - Define and implement the updater only after signed update metadata and release hosting are approved.
 - Retain the real-Core launch block until Vision-Core provides a loopback-only private API bind setting.

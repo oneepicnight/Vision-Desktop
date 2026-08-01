@@ -49,6 +49,12 @@
 - Installed-path application launch: passed
 - Installed-path Diagnostics manifest load and bundled Core verification: passed (`Verified`)
 - Local elevated MSI uninstall: passed; program files, product registration, shortcuts, and process were removed
+- Local silent NSIS current-user install: passed
+- NSIS installed-path application launch: passed
+- NSIS installed-path Diagnostics manifest load and bundled Core verification: passed (`Verified`)
+- Local silent NSIS direct uninstall: passed; program files, per-user shortcuts, and process were removed
+- Repeated NSIS install/uninstall cleanup: passed
+- NSIS Apps & Features registration: failed; no matching uninstall metadata was present in standard HKCU or HKLM uninstall locations
 
 ## Core Integration Result
 
@@ -65,7 +71,9 @@ The Desktop supervisor continues to enforce this restriction. Mock mode remains 
 - The updater is not implemented.
 - The current ICO contains only a preliminary 16 x 16 image.
 - The MSI lifecycle result is from the development workstation, not an isolated clean Windows system.
-- NSIS install/uninstall and clean-machine compatibility remain unqualified.
+- The NSIS lifecycle result is a silent local test, not an interactive-wizard or clean-machine qualification.
+- NSIS Windows uninstall discovery is missing even though the installed direct uninstaller succeeds.
+- Clean-machine compatibility remains unqualified.
 - Upgrade and downgrade require a future package version and remain untested.
 - MSI repair is intentionally disabled (`ARPNOREPAIR=yes`, `NoRepair=1`); the release policy for repair remains to be confirmed.
 - Real Core launch remains blocked by RC2 API bind behavior.

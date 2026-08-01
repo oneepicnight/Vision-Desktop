@@ -56,15 +56,16 @@ The first encrypted vault foundation is implemented inside the Rust wallet modul
 - identical non-revealing errors for an incorrect password and damaged ciphertext;
 - Rust-only unlocked sessions with explicit lock and five-minute idle auto-lock enforcement before every secret operation;
 - escalating unlock backoff after repeated incorrect-password or damaged-vault results;
+- an internal versioned portable recovery artifact that encrypts the same opaque seed with an independent Argon2id password key and XChaCha20-Poly1305, without DPAPI or machine binding;
 - no plaintext temporary files or crash-report inclusion.
 
 No wallet creation, recovery, unlock, signing, or send command is registered with Tauri yet. Before custody is enabled for users, the remaining vault work includes:
 
 - integration of the Rust-only session with future Tauri commands and process/window lifecycle events;
 - versioned migration with backup-before-upgrade behavior;
-- secure backup/recovery UX and an independent cryptographic review.
+- secure backup/recovery UX, explicit offline-storage guidance, and an independent cryptographic review.
 
-The internal vault schema is version 2 and is device-bound. Copying the local vault file to another Windows user or computer is intentionally insufficient for recovery. No user-facing wallet creation may be enabled until a separate portable recovery artifact can reproduce the same approved Vision address without relying on DPAPI or the original machine.
+The internal vault schema is version 2 and is device-bound. Copying the local vault file to another Windows user or computer is intentionally insufficient for recovery. The internal portable recovery schema is version 1 and deliberately excludes the DPAPI device factor. Its tests prove that the encrypted artifact restores the exact original opaque seed using only its recovery password, but they do not yet prove a Vision public key or address. The artifact has no Tauri command, frontend state, automatic export, filesystem policy, or user-facing workflow. Because a portable password-only artifact becomes an offline guessing target if stolen, it must be explicitly requested, protected by a strong independent password, and stored offline when the future UX is approved.
 
 ## Recovery requirements
 
@@ -77,6 +78,8 @@ The repository contains conflicting historical recovery descriptions. No mnemoni
 - restoration to the identical address across platforms.
 
 The legacy browser wallet derivation is not approved for reuse.
+
+The portable artifact foundation does not select or replace these recovery vectors. User-facing wallet creation and restore remain disabled until the restored opaque seed independently reproduces the same approved Vision public key and address across platforms.
 
 ## Review gates
 

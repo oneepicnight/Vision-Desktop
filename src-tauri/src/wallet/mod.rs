@@ -6,6 +6,7 @@
 
 mod contract;
 mod device_protection;
+mod recovery;
 mod secrets;
 mod session;
 mod storage_security;

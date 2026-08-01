@@ -41,10 +41,7 @@ pub struct WalletCompatibilityGate {
 pub fn wallet_contract_gate() -> WalletCompatibilityGate {
     WalletCompatibilityGate {
         signing_enabled: false,
-        unmet_requirements: vec![
-            WalletContractRequirement::ReceiptAndHistory,
-            WalletContractRequirement::PrivateLoopbackBinding,
-        ],
+        unmet_requirements: vec![WalletContractRequirement::PrivateLoopbackBinding],
     }
 }
 
@@ -84,7 +81,7 @@ mod tests {
         let gate = wallet_contract_gate();
 
         assert!(!gate.signing_enabled);
-        assert_eq!(gate.unmet_requirements.len(), 2);
+        assert_eq!(gate.unmet_requirements.len(), 1);
         assert!(!gate
             .unmet_requirements
             .contains(&WalletContractRequirement::KeyDerivation));
@@ -106,7 +103,7 @@ mod tests {
         assert!(!gate
             .unmet_requirements
             .contains(&WalletContractRequirement::SubmissionResponse));
-        assert!(gate
+        assert!(!gate
             .unmet_requirements
             .contains(&WalletContractRequirement::ReceiptAndHistory));
         assert!(gate

@@ -95,7 +95,7 @@ Desktop now has a Rust-only parser that verifies the echoed transaction identifi
 
 RC2 can reorganize to a strictly higher-work branch regardless of depth. Its historical `FINALITY_DEPTH = 50` constant is explicitly retained for diagnostics only until deterministic checkpoint/finality semantics are specified. Desktop therefore does not call any confirmation count final and does not treat the diagnostic constant as consensus.
 
-The `ReceiptAndHistory` gate remains unmet because Core exposes point lookup rather than account history and does not provide deterministic finality. The receipt observer is not registered with Tauri and no automatic polling or submission path was added.
+Core exposes point lookup rather than account history and does not provide deterministic finality. Desktop therefore pairs the receipt observer with a versioned, append-only local activity journal containing only public metadata for transactions accepted from this Desktop installation. The observer and journal are not registered with Tauri, and no automatic polling or submission path was added.
 
 ## Product decision: confirmation language
 
@@ -105,7 +105,7 @@ This decision cannot be derived from the current Core protocol:
 2. Show `Confirmed` after one block and `High confidence` after a chosen threshold. This is familiar wallet language but requires careful explanation that `Confirmed` is not irreversible.
 3. Keep sending disabled until Vision-Core defines deterministic checkpoint/finality semantics. This is the strictest interpretation, but it delays an end-to-end wallet even though probabilistic confirmation tracking is available.
 
-No threshold or irreversible-funds claim has been selected in code. The neutral receipt model supports any later approved presentation without changing Core behavior.
+The recommended policy was approved on 2026-08-01. Desktop will show `Pending`, then `Mined - N confirmations`; at 50 confirmations it may show `High confidence`. It will never call this state `Final`, and it will state that reorganization remains possible. The 50-confirmation threshold is presentation policy only, not consensus.
 
 ## Product decision: transaction history source
 
@@ -115,7 +115,7 @@ RC2 exposes exact point lookup by transaction identifier, but it does not expose
 2. Keep all sending disabled until Vision-Core exposes a typed, paginated account-history API whose ordering and reorganization behavior are specified.
 3. Scan the chain inside Desktop to reconstruct account history. This is not recommended because it duplicates indexing behavior, increases resource use, and creates another protocol-coupled implementation.
 
-No history source has been selected in code. A local journal must contain public transaction metadata only, never vault credentials, signing seeds, recovery material, or plaintext secrets.
+The recommended first-release source was approved on 2026-08-01. The internal journal records the transaction identifier, public sender and recipient, exact raw amount, nonce, tip, fee limit, timestamps, and validated receipt observations. It excludes signed bytes, signatures, vault credentials, signing seeds, recovery material, and plaintext secrets. Its schema, wallet identity, event sequence, size limits, restrictive permissions, and complete-line writes are validated when loaded. Corruption fails closed. The journal is display metadata only and is never an authority for balances, nonces, signing, or transaction success.
 
 ## Product decision: private Core connectivity
 
@@ -125,14 +125,11 @@ The frozen RC2 executable cannot bind its HTTP API to loopback only. An end-to-e
 2. Use the current externally reachable API. This is not recommended and must not be enabled by relaxing the existing Desktop safety restriction.
 3. Add a Desktop proxy or sidecar while leaving the underlying Core API externally reachable. This does not remove the original exposure and is not an adequate security boundary by itself.
 
-No private-connectivity choice has been implemented. Vision Desktop continues to enforce the existing loopback-bind restriction and does not modify Vision-Core.
+The recommended private-connectivity policy was approved on 2026-08-01. Vision Desktop will keep real submission disabled until a supported Vision-Core release provides loopback-only API binding and is accepted through an explicit compatibility-manifest integration task. Desktop continues to enforce the existing restriction and does not modify Vision-Core.
 
 ## Required approved vectors
 
-User-facing signing and submission remain disabled until the supported release and Desktop integration provide confirmed contracts for:
-
-1. account transaction history and an approved probabilistic-confirmation or deterministic-finality presentation;
-2. loopback-only private API operation.
+The `ReceiptAndHistory` compatibility gate is satisfied by the approved local-activity limitation, exact receipt observer, conservative confirmation language, and executable storage/transition tests. User-facing signing and submission remain disabled until the supported release and Desktop integration provide loopback-only private API operation.
 
 The current recovery contract is the versioned encrypted portable artifact, not a recovery phrase. Any future mnemonic feature requires a separately approved phrase, normalization, checksum, and phrase-to-seed contract before it can be implemented.
 

@@ -7,10 +7,13 @@
 )]
 
 use super::transaction::{canonical_transaction_id, VisionTransaction};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+const HIGH_CONFIDENCE_CONFIRMATIONS: u64 = 50;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub(in crate::wallet) enum WalletReceiptObservation {
     NotFound,
     Pending,
@@ -30,6 +33,22 @@ pub(in crate::wallet) enum WalletReceiptChange {
     ConfirmationsAdvanced,
     Reorganized,
     ObservationLost,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::wallet) enum WalletReceiptConfidence {
+    Observed,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::wallet) enum WalletReceiptPresentation {
+    NotObserved,
+    Pending,
+    Mined {
+        confirmations: u64,
+        confidence: WalletReceiptConfidence,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +174,25 @@ pub(in crate::wallet) fn classify_receipt_change(
             WalletReceiptChange::ObservationLost
         }
         (WalletReceiptObservation::NotFound, _) => WalletReceiptChange::FirstObservation,
+    }
+}
+
+/// Applies the approved Desktop presentation policy without claiming
+/// deterministic finality. The 50-confirmation threshold is diagnostic only.
+pub(in crate::wallet) fn receipt_presentation(
+    observation: &WalletReceiptObservation,
+) -> WalletReceiptPresentation {
+    match observation {
+        WalletReceiptObservation::NotFound => WalletReceiptPresentation::NotObserved,
+        WalletReceiptObservation::Pending => WalletReceiptPresentation::Pending,
+        WalletReceiptObservation::Mined { confirmations, .. } => WalletReceiptPresentation::Mined {
+            confirmations: *confirmations,
+            confidence: if *confirmations >= HIGH_CONFIDENCE_CONFIRMATIONS {
+                WalletReceiptConfidence::High
+            } else {
+                WalletReceiptConfidence::Observed
+            },
+        },
     }
 }
 
@@ -369,6 +407,38 @@ mod tests {
         assert_eq!(
             classify_receipt_change(Some(&pending), &WalletReceiptObservation::NotFound),
             WalletReceiptChange::ObservationLost
+        );
+    }
+
+    #[test]
+    fn presentation_uses_confirmations_without_declaring_finality() {
+        assert_eq!(
+            receipt_presentation(&WalletReceiptObservation::NotFound),
+            WalletReceiptPresentation::NotObserved
+        );
+        assert_eq!(
+            receipt_presentation(&WalletReceiptObservation::Pending),
+            WalletReceiptPresentation::Pending
+        );
+        let mined = |confirmations| WalletReceiptObservation::Mined {
+            block_hash: "aa".repeat(32),
+            block_height: 10,
+            tx_index: 0,
+            confirmations,
+        };
+        assert_eq!(
+            receipt_presentation(&mined(49)),
+            WalletReceiptPresentation::Mined {
+                confirmations: 49,
+                confidence: WalletReceiptConfidence::Observed,
+            }
+        );
+        assert_eq!(
+            receipt_presentation(&mined(50)),
+            WalletReceiptPresentation::Mined {
+                confirmations: 50,
+                confidence: WalletReceiptConfidence::High,
+            }
         );
     }
 }

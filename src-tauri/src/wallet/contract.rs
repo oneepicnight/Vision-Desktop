@@ -108,6 +108,9 @@ mod tests {
             .contains(&WalletContractRequirement::SubmissionResponse));
         assert!(gate
             .unmet_requirements
+            .contains(&WalletContractRequirement::ReceiptAndHistory));
+        assert!(gate
+            .unmet_requirements
             .contains(&WalletContractRequirement::PrivateLoopbackBinding));
     }
 }

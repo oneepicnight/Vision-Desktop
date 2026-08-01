@@ -8,6 +8,7 @@ mod account;
 mod amount;
 mod contract;
 mod device_protection;
+mod receipt;
 mod recovery;
 mod secrets;
 mod session;

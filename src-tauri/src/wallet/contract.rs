@@ -42,9 +42,6 @@ pub fn wallet_contract_gate() -> WalletCompatibilityGate {
     WalletCompatibilityGate {
         signing_enabled: false,
         unmet_requirements: vec![
-            WalletContractRequirement::AmountDenomination,
-            WalletContractRequirement::FeeAndNonceRules,
-            WalletContractRequirement::SubmissionResponse,
             WalletContractRequirement::ReceiptAndHistory,
             WalletContractRequirement::PrivateLoopbackBinding,
         ],
@@ -87,7 +84,7 @@ mod tests {
         let gate = wallet_contract_gate();
 
         assert!(!gate.signing_enabled);
-        assert_eq!(gate.unmet_requirements.len(), 5);
+        assert_eq!(gate.unmet_requirements.len(), 2);
         assert!(!gate
             .unmet_requirements
             .contains(&WalletContractRequirement::KeyDerivation));
@@ -100,6 +97,15 @@ mod tests {
         assert!(!gate
             .unmet_requirements
             .contains(&WalletContractRequirement::SignatureVector));
+        assert!(!gate
+            .unmet_requirements
+            .contains(&WalletContractRequirement::AmountDenomination));
+        assert!(!gate
+            .unmet_requirements
+            .contains(&WalletContractRequirement::FeeAndNonceRules));
+        assert!(!gate
+            .unmet_requirements
+            .contains(&WalletContractRequirement::SubmissionResponse));
         assert!(gate
             .unmet_requirements
             .contains(&WalletContractRequirement::PrivateLoopbackBinding));

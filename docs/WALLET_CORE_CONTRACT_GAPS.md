@@ -59,16 +59,36 @@ A separate fixed signing vector was independently generated for seed byte `0x07`
 
 This satisfies the Desktop `TransactionSerialization` and `SignatureVector` gates. The implementation is Rust-only, is not registered as a Tauri command, and cannot sign or submit a user transaction.
 
+## Verified RC2 amount, nonce, and fee contract
+
+The exact supported source marks the native-token denomination as 9 decimal places: one displayed Vision token is `1,000,000,000` raw units. Balances and transfer amounts use unsigned `u128` raw units. Desktop now parses and formats these amounts with checked integer arithmetic only. It rejects signs, separators, exponent notation, whitespace, more than 9 fractional digits, and overflow; no floating-point value enters wallet arithmetic.
+
+`GET /balance/:address` returns `{ address, exists, balance }` and `GET /nonce/:address` returns `{ address, exists, nonce }`. Desktop now decodes those exact typed objects, preserves balance and nonce as decimal strings at the frontend boundary, and rejects inconsistent echoed addresses or existence flags.
+
+The nonce endpoint exposes the sender's next canonical nonce, with `0` for a new account. The safe Desktop draft uses that exact nonce. It does not speculate about later nonces, automatically replace a pending transaction, or silently re-sign after a nonce rejection.
+
+For `cash::transfer`, the charged fee is exactly `1 + tip` raw units, while `fee_limit` is the maximum authorized fee and must be at least `201`. The first safe Desktop policy uses tip `0` and fee limit `201`, rejects arithmetic overflow, and refuses to sign when the calculated fee exceeds the authorized limit. Any future custom-tip or replacement workflow requires separate explicit user review.
+
+This satisfies the Desktop `AmountDenomination` and `FeeAndNonceRules` gates.
+
+## Verified RC2 submission response contract
+
+The exact route is `POST /transactions` with the canonical signed transaction JSON object. Core returns:
+
+- HTTP `200`, status `accepted`, the canonical `tx_id`, the current nonce, and an `accept` or `replace` decision;
+- HTTP `422`, status `rejected`, the canonical `tx_id`, current nonce, and a typed error code/message;
+- HTTP `400`, status `malformed_request`, with no transaction identifier or nonce.
+
+The Rust-only Desktop response parser requires the returned transaction identifier and accepted nonce to match the reviewed transaction. It rejects unknown shapes and error codes, refuses an unapproved replacement even when Core returns HTTP `200`, and never treats an HTTP success alone as proof that a transaction was mined or final. No network submission command is registered yet.
+
+This satisfies the Desktop `SubmissionResponse` gate.
+
 ## Required approved vectors
 
-User-facing signing remains disabled until the supported release provides confirmed contracts for:
+User-facing signing and submission remain disabled until the supported release and Desktop integration provide confirmed contracts for:
 
-1. smallest-unit denomination and display precision;
-2. nonce semantics and conflict handling;
-3. fee estimation and tip behavior beyond the confirmed minimum transfer fee limit;
-4. submission request and explicit accepted/rejected responses;
-5. pending transaction lookup, receipts, and finality states;
-6. loopback-only private API operation.
+1. pending transaction lookup, mined receipts, reorg handling, and finality states;
+2. loopback-only private API operation.
 
 The current recovery contract is the versioned encrypted portable artifact, not a recovery phrase. Any future mnemonic feature requires a separately approved phrase, normalization, checksum, and phrase-to-seed contract before it can be implemented.
 

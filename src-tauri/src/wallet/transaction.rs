@@ -14,6 +14,8 @@ use std::fmt;
 const CASH_MODULE: &str = "cash";
 const TRANSFER_METHOD: &str = "transfer";
 const MIN_CASH_TRANSFER_FEE_LIMIT: u64 = 201;
+const CASH_TRANSFER_BASE_FEE: u64 = 1;
+const DEFAULT_CASH_TRANSFER_TIP: u64 = 0;
 
 /// Exact Vision-Core RC2 transaction envelope.
 ///
@@ -40,6 +42,24 @@ pub(in crate::wallet) struct CashTransferDraft {
     pub fee_limit_raw_units: u64,
 }
 
+impl CashTransferDraft {
+    /// Safe first-send policy: use the exact canonical nonce, no replacement
+    /// tip, and the RC2 minimum authorized transfer fee limit.
+    pub(in crate::wallet) fn for_current_nonce(
+        nonce: u64,
+        recipient: String,
+        amount_raw_units: u128,
+    ) -> Self {
+        Self {
+            nonce,
+            recipient,
+            amount_raw_units,
+            tip_raw_units: DEFAULT_CASH_TRANSFER_TIP,
+            fee_limit_raw_units: MIN_CASH_TRANSFER_FEE_LIMIT,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct CashTransferArgs<'a> {
     to: &'a str,
@@ -52,6 +72,8 @@ pub(in crate::wallet) enum WalletTransactionError {
     ZeroAmount,
     TransferToSelf,
     FeeLimitTooLow,
+    FeeArithmeticOverflow,
+    FeeExceedsLimit,
     SerializationUnavailable,
 }
 
@@ -62,6 +84,8 @@ impl fmt::Display for WalletTransactionError {
             Self::ZeroAmount => "transfer amount must be greater than zero",
             Self::TransferToSelf => "transfer recipient must differ from the sender",
             Self::FeeLimitTooLow => "transfer fee limit is below the Core minimum",
+            Self::FeeArithmeticOverflow => "transfer fee arithmetic overflowed",
+            Self::FeeExceedsLimit => "transfer fee exceeds the authorized limit",
             Self::SerializationUnavailable => "transaction serialization is unavailable",
         };
         formatter.write_str(message)
@@ -89,9 +113,9 @@ pub(in crate::wallet) fn canonical_transaction_id(
 
 /// Builds and signs only RC2 `cash::transfer` transactions inside Rust.
 ///
-/// This is not registered as a Tauri command. Amount, nonce, and fee values
-/// remain raw Core units and must not be supplied by the UI until their
-/// separate compatibility and review gates pass.
+/// This is not registered as a Tauri command. Amount, nonce, and fee policy is
+/// verified internally, but no UI may reach signing until every remaining
+/// compatibility and security gate passes.
 pub(in crate::wallet) fn sign_cash_transfer(
     seed: &WalletSeed,
     draft: &CashTransferDraft,
@@ -104,6 +128,12 @@ pub(in crate::wallet) fn sign_cash_transfer(
     }
     if draft.fee_limit_raw_units < MIN_CASH_TRANSFER_FEE_LIMIT {
         return Err(WalletTransactionError::FeeLimitTooLow);
+    }
+    let charged_fee = CASH_TRANSFER_BASE_FEE
+        .checked_add(draft.tip_raw_units)
+        .ok_or(WalletTransactionError::FeeArithmeticOverflow)?;
+    if charged_fee > draft.fee_limit_raw_units {
+        return Err(WalletTransactionError::FeeExceedsLimit);
     }
 
     let identity = derive_account_identity(seed);
@@ -271,11 +301,35 @@ mod tests {
         );
 
         let mut draft = signed_vector_draft();
+        draft.tip_raw_units = u64::MAX;
+        assert_eq!(
+            sign_cash_transfer(&seed, &draft).unwrap_err(),
+            WalletTransactionError::FeeArithmeticOverflow
+        );
+
+        let mut draft = signed_vector_draft();
+        draft.tip_raw_units = MIN_CASH_TRANSFER_FEE_LIMIT;
+        assert_eq!(
+            sign_cash_transfer(&seed, &draft).unwrap_err(),
+            WalletTransactionError::FeeExceedsLimit
+        );
+
+        let mut draft = signed_vector_draft();
         draft.recipient = derive_account_identity(&seed).address;
         assert_eq!(
             sign_cash_transfer(&seed, &draft).unwrap_err(),
             WalletTransactionError::TransferToSelf
         );
+    }
+
+    #[test]
+    fn safe_draft_uses_current_nonce_and_non_replacing_fee_policy() {
+        let draft = CashTransferDraft::for_current_nonce(7, "22".repeat(32), 42);
+
+        assert_eq!(draft.nonce, 7);
+        assert_eq!(draft.tip_raw_units, 0);
+        assert_eq!(draft.fee_limit_raw_units, 201);
+        sign_cash_transfer(&WalletSeed::from_bytes([7; 32]), &draft).unwrap();
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use reqwest::Url;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MiningStatusSnapshot {
@@ -91,6 +91,20 @@ pub struct ExplorerTransactionResult {
     pub payload: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct AccountBalanceResponse {
+    address: String,
+    exists: bool,
+    balance: u128,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountNonceResponse {
+    address: String,
+    exists: bool,
+    nonce: u64,
+}
+
 fn create_api_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
@@ -128,18 +142,36 @@ fn fetch_text(client: &reqwest::blocking::Client, url: Url) -> Result<String, St
         .map_err(|e| e.to_string())
 }
 
+fn fetch_json<T: DeserializeOwned>(
+    client: &reqwest::blocking::Client,
+    url: Url,
+) -> Result<T, String> {
+    client
+        .get(url)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| error.to_string())?
+        .json::<T>()
+        .map_err(|error| error.to_string())
+}
+
 pub fn fetch_explorer_address(
     api_port: u16,
     address: &str,
 ) -> Result<ExplorerAddressResult, String> {
     let client = create_api_client()?;
-    let balance = fetch_text(&client, endpoint_url(api_port, "balance", address)?)?;
-    let nonce = fetch_text(&client, endpoint_url(api_port, "nonce", address)?)?;
+    let balance: AccountBalanceResponse =
+        fetch_json(&client, endpoint_url(api_port, "balance", address)?)?;
+    let nonce: AccountNonceResponse =
+        fetch_json(&client, endpoint_url(api_port, "nonce", address)?)?;
+    if balance.address != address || nonce.address != address || balance.exists != nonce.exists {
+        return Err("Core returned inconsistent account identity data".to_string());
+    }
     Ok(ExplorerAddressResult {
         kind: "address".to_string(),
         address: address.to_string(),
-        balance: normalize_response_text(&balance),
-        nonce: normalize_response_text(&nonce),
+        balance: balance.balance.to_string(),
+        nonce: nonce.nonce.to_string(),
     })
 }
 
@@ -324,8 +356,16 @@ mod tests {
         let api_port = listener.local_addr().unwrap().port();
         let address = "a".repeat(64);
         let expected_requests = [
-            (format!("/balance/{address}"), "12345678901234567890"),
-            (format!("/nonce/{address}"), "7"),
+            (
+                format!("/balance/{address}"),
+                format!(
+                    "{{\"address\":\"{address}\",\"exists\":true,\"balance\":12345678901234567890}}"
+                ),
+            ),
+            (
+                format!("/nonce/{address}"),
+                format!("{{\"address\":\"{address}\",\"exists\":true,\"nonce\":7}}"),
+            ),
         ];
 
         let server = thread::spawn(move || {
@@ -340,7 +380,7 @@ mod tests {
                 );
 
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 stream.write_all(response.as_bytes()).unwrap();
@@ -354,5 +394,36 @@ mod tests {
         assert_eq!(result.address, address);
         assert_eq!(result.balance, "12345678901234567890");
         assert_eq!(result.nonce, "7");
+    }
+
+    #[test]
+    fn rejects_inconsistent_account_identity_from_core() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let api_port = listener.local_addr().unwrap().port();
+        let requested_address = "a".repeat(64);
+        let wrong_address = "b".repeat(64);
+        let responses = [
+            format!("{{\"address\":\"{wrong_address}\",\"exists\":true,\"balance\":42}}"),
+            format!("{{\"address\":\"{requested_address}\",\"exists\":true,\"nonce\":0}}"),
+        ];
+
+        let server = thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request_bytes = [0_u8; 2048];
+                let request_size = stream.read(&mut request_bytes).unwrap();
+                assert!(request_size > 0);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let error = fetch_explorer_address(api_port, &requested_address).unwrap_err();
+        server.join().unwrap();
+
+        assert_eq!(error, "Core returned inconsistent account identity data");
     }
 }

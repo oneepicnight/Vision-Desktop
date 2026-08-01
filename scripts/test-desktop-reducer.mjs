@@ -20,6 +20,8 @@ const files = [
   ["src/features/diagnostics/diagnosticsStatus.test.ts", "src/features/diagnostics/diagnosticsStatus.test.js"],
   ["src/features/mining/miningStatus.ts", "src/features/mining/miningStatus.js"],
   ["src/features/mining/miningStatus.test.ts", "src/features/mining/miningStatus.test.js"],
+  ["src/features/marketplace/marketplaceStatus.ts", "src/features/marketplace/marketplaceStatus.js"],
+  ["src/features/marketplace/marketplaceStatus.test.ts", "src/features/marketplace/marketplaceStatus.test.js"],
   ["src/features/wallet/walletStatus.ts", "src/features/wallet/walletStatus.js"],
   ["src/features/wallet/walletStatus.test.ts", "src/features/wallet/walletStatus.test.js"],
 ];
@@ -48,6 +50,7 @@ try {
   await import(pathToFileURL(path.join(outRoot, "src/features/node-manager/lifecycleControls.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/diagnostics/diagnosticsStatus.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/mining/miningStatus.test.js")));
+  await import(pathToFileURL(path.join(outRoot, "src/features/marketplace/marketplaceStatus.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/wallet/walletStatus.test.js")));
   console.log("Desktop state transition tests passed");
 } finally {

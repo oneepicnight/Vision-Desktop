@@ -4,7 +4,7 @@
 - MSI and NSIS bundles are unsigned local engineering builds; public distribution requires a trusted code-signing certificate and release-signing procedure.
 - No automatic updater yet.
 - The Wallet is read-only and does not provide custody, key generation, signing, or transaction submission.
-- No exchange yet.
+- The Marketplace is a read-only integration view; no market feed, exchange, land listing, cash order, checkout, settlement, or transaction action is connected.
 - No game launcher yet.
 - No automatic NAT traversal yet.
 - No relay yet.

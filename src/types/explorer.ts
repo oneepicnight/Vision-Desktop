@@ -1,4 +1,12 @@
-export type DesktopView = "dashboard" | "wallet" | "explorer" | "peers" | "mining" | "diagnostics" | "configuration";
+export type DesktopView =
+  | "dashboard"
+  | "wallet"
+  | "marketplace"
+  | "explorer"
+  | "peers"
+  | "mining"
+  | "diagnostics"
+  | "configuration";
 
 export type ExplorerLookupMode = "address" | "transaction";
 

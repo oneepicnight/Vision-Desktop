@@ -5,6 +5,7 @@ import { DashboardGrid } from "./features/dashboard/DashboardGrid";
 import { DiagnosticsPanel } from "./features/diagnostics/DiagnosticsPanel";
 import { ExplorerPanel } from "./features/explorer/ExplorerPanel";
 import { MiningPanel } from "./features/mining/MiningPanel";
+import { MarketplacePanel } from "./features/marketplace/MarketplacePanel";
 import { CreateNodeWizard } from "./features/node-manager/CreateNodeWizard";
 import { NodeControls } from "./features/node-manager/NodeControls";
 import { PeerManagerPanel } from "./features/peers/PeerManagerPanel";
@@ -14,6 +15,7 @@ import { useDesktopState } from "./state/desktopState";
 const viewTitles = {
   dashboard: "Node Manager",
   wallet: "Wallet",
+  marketplace: "Marketplace",
   explorer: "Blockchain Explorer",
   peers: "Peer Manager",
   mining: "Mining Status",
@@ -68,6 +70,8 @@ export function AppShell() {
           <DiagnosticsPanel state={state} actions={actions} />
         ) : state.activeView === "wallet" ? (
           <WalletPanel state={state} />
+        ) : state.activeView === "marketplace" ? (
+          <MarketplacePanel state={state} />
         ) : state.activeView === "configuration" ? (
           <ConfigurationPanel state={state} />
         ) : (

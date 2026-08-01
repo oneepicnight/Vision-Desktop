@@ -11,6 +11,7 @@ Current desktop scope includes:
 - node-manager dashboard
 - desktop-managed process controls
 - read-only wallet account view for configured reward-address visibility and confirmed account lookup data
+- read-only marketplace integration view with no market feed or transaction actions
 - read-only blockchain explorer for address and transaction inspection
 - read-only peer manager for current connection and recovery visibility
 - read-only mining status from the existing Desktop snapshot
@@ -79,6 +80,17 @@ Wallet limitations and security boundary:
 - no private keys, seed phrases, mnemonics, keystores, signing, imports, exports, or transaction submission are implemented
 - balance denomination and precision metadata are not currently exposed, so values are displayed exactly as returned
 - transaction or receipt history is not currently exposed by the Desktop service boundary
+
+The Marketplace uses the legacy wallet-marketplace market-terminal hierarchy as a visual reference only. Its read-only observatory shows Core, recovery, mock-mode, and refresh context from the existing Desktop state while making the missing marketplace service boundary explicit. It does not display fallback prices, fabricated order books, balances, listings, trades, or transaction history.
+
+Marketplace limitations and security boundary:
+
+- no marketplace, exchange, land-listing, cash-order, checkout, or settlement API is connected
+- no direct browser fetch, hard-coded localhost endpoint, WebSocket, or additional polling loop is present
+- no buy, sell, checkout, order placement, mint, replay, or payment action is exposed
+- no floating-point price or amount arithmetic is performed
+- no wallet keys, custody, signing, or ownership claims are introduced
+- live integration requires an explicitly approved typed Desktop service boundary; Vision Desktop does not invent the external API
 
 The initial Mining page is read-only. It displays confirmed data already present in the Desktop snapshot and Desktop-managed node configuration:
 

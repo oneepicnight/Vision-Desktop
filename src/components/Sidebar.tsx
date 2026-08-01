@@ -6,6 +6,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  Store,
   Terminal,
   Wifi,
   type LucideIcon,
@@ -22,6 +23,7 @@ type SidebarProps = {
 const primaryNavigation = [
   { view: "dashboard", label: "Dashboard", icon: Activity },
   { view: "wallet", label: "Wallet", icon: Landmark },
+  { view: "marketplace", label: "Marketplace", icon: Store },
   { view: "explorer", label: "Explorer", icon: Search },
   { view: "peers", label: "Peers", icon: Network },
   { view: "mining", label: "Mining", icon: Flame },

@@ -6,6 +6,7 @@
 
 mod contract;
 mod secrets;
+mod vault;
 
 pub use contract::{
     wallet_contract_gate, WalletCompatibilityGate, WalletContractRequirement, WalletPublicMetadata,

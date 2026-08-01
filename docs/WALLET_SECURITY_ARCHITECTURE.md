@@ -43,18 +43,25 @@ Vision Core receives public queries and fully signed transactions only. Desktop 
 - No automatic signing, submission, retry, password capture, recovery export, clipboard copy, or unlock is allowed.
 - Support packages must never include wallet directories, vault contents, public-to-secret mappings, or secret-bearing errors.
 
-## Planned vault requirements
+## Encrypted vault status
 
-The encrypted vault implementation is a later isolated slice. Before it is enabled it must include:
+The first encrypted vault foundation is implemented inside the Rust wallet module but is not exposed through Tauri commands. It includes:
 
-- authenticated encryption with a unique random nonce for every write;
-- a memory-hard password KDF with stored versioned parameters and a unique salt;
-- OS-backed protection for an additional wrapping key where available;
-- atomic file replacement, restrictive file permissions, and corruption detection;
-- explicit lock, short idle auto-lock, and process-exit lock behavior;
-- bounded unlock attempts and non-revealing errors;
-- versioned migration with backup-before-upgrade behavior;
+- Argon2id password-based key derivation with fixed, validated cost parameters;
+- XChaCha20-Poly1305 authenticated encryption with a unique random salt and nonce for every vault;
+- authenticated vault metadata so identifiers and cryptographic parameters cannot be altered silently;
+- encrypted-only, create-new file storage that never overwrites an existing vault, Unix `0600` creation permissions, bounded file sizes, and corruption detection;
+- identical non-revealing errors for an incorrect password and damaged ciphertext;
 - no plaintext temporary files or crash-report inclusion.
+
+No wallet creation, recovery, unlock, signing, or send command is registered with Tauri yet. Before custody is enabled for users, the remaining vault work includes:
+
+- OS-backed protection for an additional wrapping key where available;
+- restrictive Windows ACL creation and verification;
+- explicit lock, short idle auto-lock, and process-exit lock behavior;
+- bounded interactive unlock attempts and backoff;
+- versioned migration with backup-before-upgrade behavior;
+- secure backup/recovery UX and an independent cryptographic review.
 
 ## Recovery requirements
 

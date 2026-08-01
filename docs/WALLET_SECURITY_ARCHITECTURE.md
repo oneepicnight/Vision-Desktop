@@ -57,6 +57,7 @@ The first encrypted vault foundation is implemented inside the Rust wallet modul
 - Rust-only unlocked sessions with explicit lock and five-minute idle auto-lock enforcement before every secret operation;
 - escalating unlock backoff after repeated incorrect-password or damaged-vault results;
 - an internal versioned portable recovery artifact that encrypts the same opaque seed with an independent Argon2id password key and XChaCha20-Poly1305, without DPAPI or machine binding;
+- a Rust-only onboarding coordinator that requires distinct local-vault and recovery passwords, an explicit create-new backup destination, read-back of the saved artifact, successful in-memory restoration, and equality of the restored Vision account identity before the local vault can be stored;
 - no plaintext temporary files or crash-report inclusion.
 
 The Rust wallet module now also contains an internal RC2-compatible `cash::transfer` builder, exact 9-decimal amount conversion, conservative current-nonce and zero-tip fee policy, canonical bincode serializer, BLAKE3 transaction-identifier function, Ed25519 signer, strict submission-response parser, canonical receipt observer, and public-metadata-only local activity journal backed by exact Core and independent fixed vectors. These primitives are deliberately not registered as Tauri commands, are not connected to the unlocked-session manager, and cannot be invoked by React. They accept only exact integer units and a narrowly typed transfer draft; arbitrary modules or methods are not exposed. Unknown response shapes, mismatched transaction identifiers, unexpected accepted nonces, unapproved replacements, inconsistent returned transactions, invalid block references, damaged activity records, and unknown journal schemas fail closed.
@@ -67,9 +68,10 @@ No wallet creation, recovery, unlock, user-facing signing, or send command is re
 
 - integration of the Rust-only session with future Tauri commands and process/window lifecycle events;
 - versioned migration with backup-before-upgrade behavior;
-- secure backup/recovery UX, explicit offline-storage guidance, and an independent cryptographic review.
+- user-facing save-location selection and explicit offline-storage guidance without clipboard or automatic cloud behavior;
+- an independent cryptographic review.
 
-The internal vault schema is version 2 and is device-bound. Copying the local vault file to another Windows user or computer is intentionally insufficient for recovery. The internal portable recovery schema is version 1 and deliberately excludes the DPAPI device factor. Its tests prove that the encrypted artifact restores the exact original opaque seed using only its recovery password, but they do not yet prove a Vision public key or address. The artifact has no Tauri command, frontend state, automatic export, filesystem policy, or user-facing workflow. Because a portable password-only artifact becomes an offline guessing target if stolen, it must be explicitly requested, protected by a strong independent password, and stored offline when the future UX is approved.
+The internal vault schema is version 2 and is device-bound. Copying the local vault file to another Windows user or computer is intentionally insufficient for recovery. The internal portable recovery schema is version 1 and deliberately excludes the DPAPI device factor. Its tests prove that the encrypted artifact restores the exact original opaque seed and Vision account identity using only its recovery password. The approved onboarding policy requires a different recovery password of at least 16 bytes, never overwrites the selected destination, never creates arbitrary parent directories, reloads the stored artifact through a bounded regular-file parser, and withholds local-vault storage until the restored identity matches. The artifact has no Tauri command, frontend state, automatic export, clipboard path, or file-picker workflow. Portable backups rely on encryption rather than device-bound filesystem permissions so that offline recovery remains possible on another machine. Because a password-only artifact becomes an offline guessing target if stolen, the future UI must direct the user to an explicitly selected offline destination.
 
 ## Recovery requirements
 
@@ -77,7 +79,7 @@ The current Desktop recovery contract is the versioned encrypted portable artifa
 
 The repository contains conflicting historical phrase descriptions, so no mnemonic is selected or implied. If a mnemonic is added later, its word list, normalization, checksum, and phrase-to-seed algorithm require a separately approved contract and cross-platform vectors. The legacy browser wallet derivation remains unapproved.
 
-The verified identity, amount, nonce/fee, serialization, transaction-identifier, signature, submission-response, receipt-observation, and local-activity contracts do not unlock user-facing transaction signing. The conservative confirmation presentation, limited local-history model, and requirement to wait for loopback-only Core binding were approved on 2026-08-01. Wallet creation and restore remain disabled until private-loopback compatibility is delivered and the recovery UX and independent security review pass.
+The verified identity, amount, nonce/fee, serialization, transaction-identifier, signature, submission-response, receipt-observation, local-activity, and recovery-gated onboarding contracts do not unlock user-facing transaction signing. The conservative confirmation presentation, limited local-history model, recovery-backup ordering, separate-password rule, and requirement to wait for loopback-only Core binding were approved on 2026-08-01. Wallet creation and restore remain inaccessible to the frontend until the narrow Tauri lifecycle is reviewed; signing and submission additionally remain disabled until private-loopback compatibility and the independent security review pass.
 
 ## Review gates
 

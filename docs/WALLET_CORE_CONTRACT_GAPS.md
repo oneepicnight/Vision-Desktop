@@ -131,7 +131,7 @@ The recommended private-connectivity policy was approved on 2026-08-01. Vision D
 
 The `ReceiptAndHistory` compatibility gate is satisfied by the approved local-activity limitation, exact receipt observer, conservative confirmation language, and executable storage/transition tests. User-facing signing and submission remain disabled until the supported release and Desktop integration provide loopback-only private API operation.
 
-The current recovery contract is the versioned encrypted portable artifact, not a recovery phrase. Any future mnemonic feature requires a separately approved phrase, normalization, checksum, and phrase-to-seed contract before it can be implemented.
+The current recovery contract is the versioned encrypted portable artifact, not a recovery phrase. The approved Rust-only onboarding order requires a separately password-protected backup to be saved, read back, decrypted, and verified against the generated Vision address before the device-bound local vault may be stored. No frontend command or mnemonic behavior is implied. Any future mnemonic feature requires a separately approved phrase, normalization, checksum, and phrase-to-seed contract before it can be implemented.
 
 ## Desktop implementation rule
 

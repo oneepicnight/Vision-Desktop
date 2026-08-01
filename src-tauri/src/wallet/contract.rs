@@ -12,6 +12,7 @@ pub struct WalletPublicMetadata {
     pub address: String,
     pub created_at_unix_ms: u64,
     pub locked: bool,
+    pub backup_verified: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +59,7 @@ mod tests {
             address: "22".repeat(32),
             created_at_unix_ms: 1_700_000_000_000,
             locked: true,
+            backup_verified: true,
         };
 
         let serialized = serde_json::to_string(&metadata).unwrap();

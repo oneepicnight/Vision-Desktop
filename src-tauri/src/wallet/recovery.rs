@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "portable recovery remains internal until its UX and Vision vectors pass review"
-    )
-)]
-
 use super::secrets::{WalletPassword, WalletSeed};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -13,7 +5,11 @@ use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
 };
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{
+    fmt, fs,
+    io::{Read, Write},
+    path::Path,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 const RECOVERY_SCHEMA: &str = "vision-desktop-portable-recovery";
@@ -36,7 +32,7 @@ const MAX_RECOVERY_JSON_BYTES: usize = 16 * 1024;
 /// of the local DPAPI-bound vault.
 ///
 /// This type remains private to the Rust wallet module. It does not establish a
-/// mnemonic, key-derivation, address, export-UI, or storage contract.
+/// mnemonic, frontend export UI, clipboard path, or automatic destination.
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(in crate::wallet) struct PortableRecoveryArtifact {
@@ -81,6 +77,8 @@ pub(in crate::wallet) enum RecoveryArtifactError {
     InvalidPasswordOrDamagedArtifact,
     RandomSourceUnavailable,
     SerializationUnavailable,
+    StorageUnavailable,
+    ArtifactAlreadyExists,
 }
 
 impl fmt::Display for RecoveryArtifactError {
@@ -96,8 +94,71 @@ impl fmt::Display for RecoveryArtifactError {
             }
             Self::RandomSourceUnavailable => "secure operating-system randomness is unavailable",
             Self::SerializationUnavailable => "portable recovery serialization is unavailable",
+            Self::StorageUnavailable => "portable recovery storage is unavailable",
+            Self::ArtifactAlreadyExists => "portable recovery destination already exists",
         };
         formatter.write_str(message)
+    }
+}
+
+/// Stores an encrypted portable artifact at an explicitly selected path.
+/// Parent directories are never created and existing files are never replaced.
+pub(in crate::wallet) fn store_new_recovery_artifact(
+    path: &Path,
+    artifact: &PortableRecoveryArtifact,
+) -> Result<(), RecoveryArtifactError> {
+    let parent = path
+        .parent()
+        .ok_or(RecoveryArtifactError::StorageUnavailable)?;
+    let parent_metadata =
+        fs::symlink_metadata(parent).map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(RecoveryArtifactError::StorageUnavailable);
+    }
+    let bytes = Zeroizing::new(artifact.to_json()?);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options.open(path).map_err(map_storage_error)?;
+    let result = file
+        .write_all(bytes.as_slice())
+        .and_then(|_| file.sync_all())
+        .map_err(|_| RecoveryArtifactError::StorageUnavailable);
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result
+}
+
+/// Loads only a bounded, regular encrypted artifact from the selected path.
+pub(in crate::wallet) fn load_recovery_artifact(
+    path: &Path,
+) -> Result<PortableRecoveryArtifact, RecoveryArtifactError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_RECOVERY_JSON_BYTES as u64
+    {
+        return Err(RecoveryArtifactError::InvalidOrUnsupportedFormat);
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    fs::File::open(path)
+        .map_err(|_| RecoveryArtifactError::StorageUnavailable)?
+        .take(MAX_RECOVERY_JSON_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
+    if bytes.len() > MAX_RECOVERY_JSON_BYTES {
+        return Err(RecoveryArtifactError::InvalidOrUnsupportedFormat);
+    }
+    PortableRecoveryArtifact::from_json(bytes.as_slice())
+}
+
+fn map_storage_error(error: std::io::Error) -> RecoveryArtifactError {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        RecoveryArtifactError::ArtifactAlreadyExists
+    } else {
+        RecoveryArtifactError::StorageUnavailable
     }
 }
 

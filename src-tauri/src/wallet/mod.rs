@@ -9,6 +9,7 @@ mod amount;
 mod contract;
 mod device_protection;
 mod journal;
+mod onboarding;
 mod receipt;
 mod recovery;
 mod secrets;

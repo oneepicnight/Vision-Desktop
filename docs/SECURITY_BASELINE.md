@@ -15,6 +15,8 @@ Security rules implemented from the first milestone:
 - No automatic firewall or router changes are performed.
 - Rust dependencies are audited against RustSec on relevant changes, weekly, and on manual request.
 - Frontend production and development dependencies are audited from `package-lock.json` on relevant changes, weekly, and on manual request. Moderate, high, and critical npm advisories fail the job; low-severity findings remain visible.
+- The production WebView's script connection policy has no general network source. Its `connect-src` is limited to Tauri IPC, while local Vite and loopback development sources exist only in `devCsp`.
+- Frontend TypeScript cannot call Core directly; automated tests keep Tauri core access centralized in `src/services/coreApi.ts`.
 
 The frontend audit uses the committed npm lockfile without installing packages or running dependency lifecycle scripts. Its checkout and Node setup actions are pinned to reviewed full commit SHAs, the job has read-only repository permission, and package-manager caching is disabled. The admission-time npm audit on 2026-08-01 reported zero vulnerabilities across the locked frontend graph.
 

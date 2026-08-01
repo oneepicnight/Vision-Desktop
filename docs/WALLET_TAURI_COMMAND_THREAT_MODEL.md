@@ -67,7 +67,7 @@ No custody command may be registered until all of these are true:
 1. The supported Vision-Core release provides loopback-only HTTP binding and the Desktop manifest accepts that exact release.
 2. An independent review approves the vault, recovery, session, onboarding, transaction, receipt, and journal boundaries.
 3. The application enforces a single running wallet-owning Desktop process or an equivalent operating-system wallet lock.
-4. The production CSP no longer permits general `http://127.0.0.1:*` frontend connections. Development-only connectivity belongs in `devCsp`; production uses IPC only unless a separately reviewed source is required.
+4. The production CSP no longer permits general `http://127.0.0.1:*` frontend connections. Development-only connectivity belongs in `devCsp`; production uses IPC only unless a separately reviewed source is required. Completed for the current frontend and protected by automated source and configuration tests.
 5. `build.rs` declares every application command through `tauri_build::AppManifest` so custom commands participate in ACL resolution. Completed for the existing command surface; automated tests enforce inventory parity.
 6. One explicit capability applies to the `main` window. It lists only individually approved application commands and has no `remote.urls`, wildcard window, shell, generic filesystem, HTTP, clipboard, plugin, or wallet permission. Completed for the existing command surface.
 7. The Rust side of the official dialog plugin performs recovery save/open selection. Its JavaScript package is not installed and dialog permissions are not exposed to React.
@@ -301,7 +301,7 @@ Before activation:
 1. Obtain independent review of this interface and the existing Rust custody modules.
 2. Add and pin the official Tauri dialog and single-instance plugins in a dependency-only commit with provenance review. Completed; the crates remain uninitialized.
 3. Add `AppManifest`, explicit application permissions, and one main-window capability; migrate existing commands without changing behavior. Completed; the 19-command inventory is protected by automated parity tests and the plugins remain inactive.
-4. Split production CSP from `devCsp` and prove no frontend direct-Core requests are required.
+4. Split production CSP from `devCsp` and prove no frontend direct-Core requests are required. Completed; production permits only Tauri IPC transports and the frontend source boundary is tested.
 5. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands.
 6. Implement and test destination/source token selection in Rust.
 7. Implement create/restore/unlock/lock commands but keep them unregistered behind the activation policy.

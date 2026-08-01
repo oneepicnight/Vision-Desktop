@@ -46,6 +46,6 @@ Adding or removing an application command therefore requires one reviewed change
 
 Plugin initialization and custody commands remain later security gates. They require their own implementation, lifecycle tests, and review; this migration does not activate them.
 
-## Remaining work
+## WebView network boundary
 
-The production CSP still permits loopback HTTP for the existing node interface. Moving that source to development-only policy is the next independent hardening step described in `docs/WALLET_TAURI_COMMAND_THREAT_MODEL.md`. It was intentionally not combined with this behavior-preserving ACL migration.
+The production CSP is now restricted to Tauri IPC. General loopback HTTP and the Vite hot-reload WebSocket are confined to `devCsp`, and automated tests prevent direct frontend network access or additional Tauri core imports. `docs/WEBVIEW_NETWORK_SECURITY.md` records this complementary boundary.

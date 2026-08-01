@@ -54,7 +54,7 @@
 - NSIS installed-path Diagnostics manifest load and bundled Core verification: passed (`Verified`)
 - Local silent NSIS direct uninstall: passed; program files, per-user shortcuts, and process were removed
 - Repeated NSIS install/uninstall cleanup: passed
-- NSIS Apps & Features registration: failed; no matching uninstall metadata was present in standard HKCU or HKLM uninstall locations
+- NSIS Windows uninstall registration: passed at `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Vision Desktop`; the key was removed during uninstall
 
 ## Core Integration Result
 
@@ -72,7 +72,6 @@ The Desktop supervisor continues to enforce this restriction. Mock mode remains 
 - The current ICO contains only a preliminary 16 x 16 image.
 - The MSI lifecycle result is from the development workstation, not an isolated clean Windows system.
 - The NSIS lifecycle result is a silent local test, not an interactive-wizard or clean-machine qualification.
-- NSIS Windows uninstall discovery is missing even though the installed direct uninstaller succeeds.
 - Clean-machine compatibility remains unqualified.
 - Upgrade and downgrade require a future package version and remain untested.
 - MSI repair is intentionally disabled (`ARPNOREPAIR=yes`, `NoRepair=1`); the release policy for repair remains to be confirmed.

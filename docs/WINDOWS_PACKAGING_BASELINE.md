@@ -104,6 +104,7 @@ The local NSIS lifecycle confirmed:
 - `uninstall.exe` was installed with SHA-256 `8A00C080F7ED07089A947B9693295BB3E4A5D8FCA3C7E4E76517B35059D5F298`;
 - the bundled Core executable and manifest were installed at `bundled\core\windows-x64\` and matched the frozen hashes above;
 - per-user Start menu and Desktop shortcuts were created;
+- Windows uninstall metadata was registered at `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Vision Desktop` with the expected display name, version, publisher, install location, icon, uninstaller, estimated size, and modify/repair policy;
 - the installed executable launched from the per-user installation directory;
 - mock mode rendered normally;
 - live observation mode left Core stopped and preserved the RC2 safety restriction;
@@ -112,9 +113,9 @@ The local NSIS lifecycle confirmed:
 - the program directory, both per-user shortcuts, and running process were absent after uninstall;
 - a repeated install/uninstall cycle produced the same cleanup result.
 
-The package did not create an Apps & Features uninstall registration. This was confirmed after a repeated installation across the standard 32-bit and 64-bit HKCU and HKLM uninstall registry locations. The installed `uninstall.exe` works when invoked directly, but normal Windows uninstall discovery is missing. The local Tauri schema states that current-user installer metadata should be stored under HKCU, so this is a release blocker that requires correction and requalification.
+The first uninstall-registration check incorrectly queried the sandbox worker's HKCU hive while the installer had run under the host user. Repeating the check under the same host identity as the installer confirmed the expected registration. After direct uninstallation, that uninstall key was absent along with the program directory, shortcuts, and process.
 
-This proves the local silent NSIS install, installed-path launch, direct-uninstaller, and cleanup paths for this unsigned engineering build. It does not qualify the interactive installer UI, Windows uninstall discovery, clean-machine compatibility, upgrade, downgrade, code signing, or public distribution.
+This proves the local silent NSIS install, Windows uninstall registration, installed-path launch, direct-uninstaller, and cleanup paths for this unsigned engineering build. It does not qualify the interactive installer UI, clean-machine compatibility, upgrade, downgrade, code signing, or public distribution.
 
 ## Confirmed Packaging Fixes
 
@@ -131,7 +132,6 @@ This proves the local silent NSIS install, installed-path launch, direct-uninsta
 - Sign and verify the executable, MSI, and NSIS setup executable in a controlled release workflow.
 - Replace the preliminary 16 x 16 ICO with a production multi-resolution Windows icon set.
 - Repeat install and uninstall qualification on clean supported Windows systems.
-- Correct and requalify NSIS Apps & Features uninstall registration.
 - Qualify the interactive NSIS installer and future-version upgrade, downgrade, and rollback behavior.
 - Confirm the intentionally disabled MSI repair policy remains appropriate for release.
 - Define and implement the updater only after signed update metadata and release hosting are approved.

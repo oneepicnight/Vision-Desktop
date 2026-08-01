@@ -6,7 +6,10 @@
     )
 )]
 
-use super::secrets::{WalletPassword, WalletSeed};
+use super::{
+    secrets::{WalletPassword, WalletSeed},
+    storage_security,
+};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
@@ -261,6 +264,7 @@ pub(in crate::wallet) fn store_new_vault(
 ) -> Result<(), WalletVaultError> {
     let parent = path.parent().ok_or(WalletVaultError::StorageUnavailable)?;
     fs::create_dir_all(parent).map_err(|_| WalletVaultError::StorageUnavailable)?;
+    storage_security::protect_directory(parent)?;
     if path.exists() {
         return Err(WalletVaultError::VaultAlreadyExists);
     }
@@ -270,12 +274,17 @@ pub(in crate::wallet) fn store_new_vault(
     getrandom::fill(&mut suffix).map_err(|_| WalletVaultError::RandomSourceUnavailable)?;
     let temporary_path = temporary_path(parent, &suffix);
     let write_result = write_new_file(&temporary_path, encrypted_json.as_slice())
-        .and_then(|_| fs::hard_link(&temporary_path, path).map_err(map_storage_error));
+        .and_then(|_| storage_security::protect_file(&temporary_path))
+        .and_then(|_| fs::hard_link(&temporary_path, path).map_err(map_storage_error))
+        .and_then(|_| storage_security::verify_file(path));
     let _ = fs::remove_file(&temporary_path);
     write_result
 }
 
 pub(in crate::wallet) fn load_vault(path: &Path) -> Result<EncryptedWalletVault, WalletVaultError> {
+    let parent = path.parent().ok_or(WalletVaultError::StorageUnavailable)?;
+    storage_security::verify_directory(parent)?;
+    storage_security::verify_file(path)?;
     let link_metadata =
         fs::symlink_metadata(path).map_err(|_| WalletVaultError::StorageUnavailable)?;
     if link_metadata.file_type().is_symlink() {

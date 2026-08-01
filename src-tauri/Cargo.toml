@@ -30,5 +30,13 @@ chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
 getrandom = "0.4.3"
 zeroize = "1.8.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = "3"

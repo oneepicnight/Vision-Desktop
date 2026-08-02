@@ -36,6 +36,21 @@ const WALLET_VAULT_FILE: &str = "wallet.vault.json";
 pub(crate) struct WalletLifecycleAdapters {
     runtime: Arc<WalletRuntimeState>,
     vault_path: PathBuf,
+    #[cfg(test)]
+    interruption_checkpoint: Option<WalletLifecycleCheckpoint>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalletLifecycleCheckpoint {
+    CreateDestinationConsumed,
+    CreatePrepared,
+    CreateRecoveryStored,
+    CreateRecoveryVerified,
+    CreateVaultStored,
+    RestoreSourceConsumed,
+    RestorePrepared,
+    RestoreVaultStored,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +159,8 @@ impl WalletLifecycleAdapters {
         Ok(Self {
             runtime,
             vault_path,
+            #[cfg(test)]
+            interruption_checkpoint: None,
         })
     }
 
@@ -207,6 +224,8 @@ impl WalletLifecycleAdapters {
                 recovery_destination_token,
             )
             .map_err(map_runtime_error)?;
+        #[cfg(test)]
+        self.interrupt_at(WalletLifecycleCheckpoint::CreateDestinationConsumed)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         let wallet_password = wallet_secret.into_wallet_password();
         let recovery_password = recovery_secret.into_wallet_password();
@@ -218,18 +237,26 @@ impl WalletLifecycleAdapters {
             &recovery_password,
         )
         .map_err(map_onboarding_error)?;
+        #[cfg(test)]
+        self.interrupt_at(WalletLifecycleCheckpoint::CreatePrepared)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         prepared
             .store_recovery_backup(&recovery_path)
             .map_err(map_onboarding_error)?;
+        #[cfg(test)]
+        self.interrupt_at(WalletLifecycleCheckpoint::CreateRecoveryStored)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         let mut verified = prepared
             .verify_stored_recovery(&recovery_path, &recovery_password)
             .map_err(map_onboarding_error)?;
+        #[cfg(test)]
+        self.interrupt_at(WalletLifecycleCheckpoint::CreateRecoveryVerified)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         let metadata = verified
             .store_local_vault(&self.vault_path)
             .map_err(map_onboarding_error)?;
+        #[cfg(test)]
+        self.interrupt_at(WalletLifecycleCheckpoint::CreateVaultStored)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         self.runtime
             .remember_public_metadata(metadata)
@@ -280,6 +307,8 @@ impl WalletLifecycleAdapters {
                 recovery_source_token,
             )
             .map_err(map_runtime_error)?;
+        #[cfg(test)]
+        self.interrupt_at(WalletLifecycleCheckpoint::RestoreSourceConsumed)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         let wallet_password = new_wallet_secret.into_wallet_password();
         let recovery_password = recovery_secret.into_wallet_password();
@@ -292,10 +321,14 @@ impl WalletLifecycleAdapters {
             &recovery_password,
         )
         .map_err(map_onboarding_error)?;
+        #[cfg(test)]
+        self.interrupt_at(WalletLifecycleCheckpoint::RestorePrepared)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         let metadata = restored
             .store_local_vault(&self.vault_path)
             .map_err(map_onboarding_error)?;
+        #[cfg(test)]
+        self.interrupt_at(WalletLifecycleCheckpoint::RestoreVaultStored)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         self.runtime
             .remember_public_metadata(metadata)
@@ -340,7 +373,32 @@ impl WalletLifecycleAdapters {
         Self {
             runtime,
             vault_path: vault_path.to_path_buf(),
+            interruption_checkpoint: None,
         }
+    }
+
+    #[cfg(test)]
+    fn for_test_with_interruption(
+        runtime: Arc<WalletRuntimeState>,
+        vault_path: &std::path::Path,
+        checkpoint: WalletLifecycleCheckpoint,
+    ) -> Self {
+        Self {
+            runtime,
+            vault_path: vault_path.to_path_buf(),
+            interruption_checkpoint: Some(checkpoint),
+        }
+    }
+
+    #[cfg(test)]
+    fn interrupt_at(
+        &self,
+        checkpoint: WalletLifecycleCheckpoint,
+    ) -> Result<(), WalletLifecycleError> {
+        if self.interruption_checkpoint == Some(checkpoint) {
+            self.runtime.invalidate_all().map_err(map_runtime_error)?;
+        }
+        Ok(())
     }
 }
 
@@ -726,6 +784,131 @@ mod tests {
         assert_eq!(adapter.lock().unwrap(), WalletLockResult { locked: true });
         assert!(runtime.lifecycle_status(true).unwrap().locked);
         assert_eq!(adapter.lock().unwrap(), WalletLockResult { locked: true });
+    }
+
+    #[test]
+    fn create_interruption_checkpoints_revoke_authority_and_preserve_only_completed_files() {
+        let root = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                WalletLifecycleCheckpoint::CreateDestinationConsumed,
+                false,
+                false,
+            ),
+            (WalletLifecycleCheckpoint::CreatePrepared, false, false),
+            (WalletLifecycleCheckpoint::CreateRecoveryStored, true, false),
+            (
+                WalletLifecycleCheckpoint::CreateRecoveryVerified,
+                true,
+                false,
+            ),
+            (WalletLifecycleCheckpoint::CreateVaultStored, true, true),
+        ];
+
+        for (index, (checkpoint, recovery_exists, vault_exists)) in cases.into_iter().enumerate() {
+            let directory = root.path().join(format!("create-{index}"));
+            fs::create_dir(&directory).unwrap();
+            let recovery_path = directory.join("wallet.vision-recovery.json");
+            let vault_path = directory.join("local").join(WALLET_VAULT_FILE);
+            let runtime = Arc::new(WalletRuntimeState::for_test());
+            let adapter = WalletLifecycleAdapters::for_test_with_interruption(
+                Arc::clone(&runtime),
+                &vault_path,
+                checkpoint,
+            );
+            let token = selection_token(&runtime, RecoveryPathPurpose::Destination, &recovery_path);
+
+            assert_eq!(
+                adapter
+                    .create_at(
+                        MAIN,
+                        &format!("interrupted-{index}"),
+                        "Interrupted Wallet",
+                        token.as_str(),
+                        secret(WALLET_PASSWORD),
+                        secret(RECOVERY_PASSWORD),
+                        1,
+                    )
+                    .unwrap_err(),
+                WalletLifecycleError::RuntimeUnavailable
+            );
+            assert_eq!(recovery_path.exists(), recovery_exists);
+            assert_eq!(vault_path.exists(), vault_exists);
+            let status = runtime.lifecycle_status(vault_exists).unwrap();
+            assert!(status.locked);
+            assert!(status.account.is_none());
+            if recovery_exists {
+                let encrypted = fs::read_to_string(&recovery_path).unwrap();
+                assert!(!encrypted.contains(WALLET_PASSWORD));
+                assert!(!encrypted.contains(RECOVERY_PASSWORD));
+            }
+        }
+    }
+
+    #[test]
+    fn restore_interruption_checkpoints_never_change_the_source_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let recovery_path = root.path().join("source.vision-recovery.json");
+        let source_runtime = Arc::new(WalletRuntimeState::for_test());
+        let source_vault = root.path().join("source-local").join(WALLET_VAULT_FILE);
+        let source = WalletLifecycleAdapters::for_test(Arc::clone(&source_runtime), &source_vault);
+        let destination = selection_token(
+            &source_runtime,
+            RecoveryPathPurpose::Destination,
+            &recovery_path,
+        );
+        source
+            .create_at(
+                MAIN,
+                "source",
+                "Source Wallet",
+                destination.as_str(),
+                secret(WALLET_PASSWORD),
+                secret(RECOVERY_PASSWORD),
+                1,
+            )
+            .unwrap();
+        let original_recovery = fs::read(&recovery_path).unwrap();
+        let cases = [
+            (WalletLifecycleCheckpoint::RestoreSourceConsumed, false),
+            (WalletLifecycleCheckpoint::RestorePrepared, false),
+            (WalletLifecycleCheckpoint::RestoreVaultStored, true),
+        ];
+
+        for (index, (checkpoint, vault_exists)) in cases.into_iter().enumerate() {
+            let vault_path = root
+                .path()
+                .join(format!("restored-{index}"))
+                .join(WALLET_VAULT_FILE);
+            let runtime = Arc::new(WalletRuntimeState::for_test());
+            let adapter = WalletLifecycleAdapters::for_test_with_interruption(
+                Arc::clone(&runtime),
+                &vault_path,
+                checkpoint,
+            );
+            let source_token =
+                selection_token(&runtime, RecoveryPathPurpose::Source, &recovery_path);
+
+            assert_eq!(
+                adapter
+                    .restore_at(
+                        MAIN,
+                        &format!("restored-{index}"),
+                        "Restored Wallet",
+                        source_token.as_str(),
+                        secret(RESTORED_PASSWORD),
+                        secret(RECOVERY_PASSWORD),
+                        2,
+                    )
+                    .unwrap_err(),
+                WalletLifecycleError::RuntimeUnavailable
+            );
+            assert_eq!(fs::read(&recovery_path).unwrap(), original_recovery);
+            assert_eq!(vault_path.exists(), vault_exists);
+            let status = runtime.lifecycle_status(vault_exists).unwrap();
+            assert!(status.locked);
+            assert!(status.account.is_none());
+        }
     }
 
     #[test]

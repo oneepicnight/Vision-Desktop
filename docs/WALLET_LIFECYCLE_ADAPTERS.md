@@ -66,6 +66,13 @@ write. Session lock, suspend, main-window loss, explicit invalidation, or stale 
 stages from being accepted. A narrow race may allow an already-entered handle-bound write to
 finish, but create-new storage prevents replacement and the result remains locked and inaccessible.
 
+Deterministic interruption tests invalidate runtime authority after destination/source consumption,
+encrypted preparation, recovery storage and verification, and local-vault storage. They prove that
+no later stage runs, the runtime remains locked with no accepted account metadata, existing files
+are never replaced, restore never changes its source backup, and only files whose handle-bound
+write already completed may remain. Retained recovery or vault artifacts are encrypted and are not
+accepted as an unlocked session.
+
 ## Restore ordering
 
 Restore consumes a source token, loads and decrypts the original bounded recovery artifact, derives

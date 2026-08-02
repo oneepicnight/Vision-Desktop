@@ -263,7 +263,7 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(lib_source.contains("wallet::WalletLifecycleAdapters::initialize("));
     assert!(lib_source.contains("app.path().local_data_dir()"));
     let wallet_adapter_production = wallet_adapter_source
-        .split("#[cfg(test)]")
+        .split("#[cfg(test)]\nmod tests")
         .next()
         .expect("wallet adapter has production source");
     assert!(!wallet_adapter_production.contains("var_os(\"LOCALAPPDATA\")"));
@@ -271,7 +271,7 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
         wallet_adapter_production
             .match_indices("validate_local_custody_root(")
             .count(),
-        2
+        3
     );
     assert!(wallet_adapter_source.contains("GetDriveTypeW"));
     assert!(wallet_adapter_source.contains("FILE_ATTRIBUTE_REPARSE_POINT"));

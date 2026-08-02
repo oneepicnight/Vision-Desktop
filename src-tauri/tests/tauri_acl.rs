@@ -227,3 +227,23 @@ fn duplicate_launch_data_cannot_reach_the_window_activation_handler() {
     assert!(source.contains("window.unminimize()"));
     assert!(source.contains("window.set_focus()"));
 }
+
+#[test]
+fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
+    let lib_source = read("src/lib.rs");
+    let runtime_source = read("src/wallet/runtime.rs");
+    let secret_input_source = read("src/wallet/secret_input.rs");
+    let capability_source = read("capabilities/main-desktop.json");
+
+    assert!(lib_source.contains("wallet::WalletRuntimeState::initialize()"));
+    assert!(lib_source.contains("app.manage(wallet_runtime)"));
+    assert!(lib_source.contains("runtime.invalidate_all()"));
+    assert!(!runtime_source.contains("#[tauri::command]"));
+    assert!(!secret_input_source.contains("#[tauri::command]"));
+    assert!(!secret_input_source.contains("impl Serialize"));
+    assert!(!secret_input_source.contains("#[derive("));
+    assert!(!secret_input_source.contains("impl Clone"));
+    assert!(!secret_input_source.contains("impl fmt::Debug"));
+    assert!(!capability_source.contains("wallet"));
+    assert!(!read("../src/services/coreApi.ts").contains("wallet_"));
+}

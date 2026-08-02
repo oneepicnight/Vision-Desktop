@@ -66,13 +66,13 @@ No custody command may be registered until all of these are true:
 
 1. The supported Vision-Core release provides loopback-only HTTP binding and the Desktop manifest accepts that exact release.
 2. An independent review approves the vault, recovery, session, onboarding, transaction, receipt, and journal boundaries.
-3. The application enforces a single running wallet-owning Desktop process or an equivalent operating-system wallet lock. Desktop duplicate-launch handling is active and tested on Windows, but this custody gate remains open until `WalletRuntimeState` owns an independent fail-closed operating-system wallet lock.
+3. The application enforces a single running wallet-owning Desktop process or an equivalent operating-system wallet lock. Completed privately on Windows: `WalletRuntimeState` owns an independent fail-closed kernel mutex in addition to tested Desktop duplicate-launch handling. No custody command is exposed.
 4. The production CSP no longer permits general `http://127.0.0.1:*` frontend connections. Development-only connectivity belongs in `devCsp`; production uses IPC only unless a separately reviewed source is required. Completed for the current frontend and protected by automated source and configuration tests.
 5. `build.rs` declares every application command through `tauri_build::AppManifest` so custom commands participate in ACL resolution. Completed for the existing command surface; automated tests enforce inventory parity.
 6. One explicit capability applies to the `main` window. It lists only individually approved application commands and has no `remote.urls`, wildcard window, shell, generic filesystem, HTTP, clipboard, plugin, or wallet permission. Completed for the existing command surface.
 7. The Rust side of the official dialog plugin performs recovery save/open selection. Its JavaScript package is not installed and dialog permissions are not exposed to React.
-8. Every secret-bearing request type is non-serializable in the response direction, non-cloneable, non-debuggable, bounded before expensive work, and zeroized on drop.
-9. Wallet state is held in a dedicated Rust `WalletRuntimeState`; it never enters `DesktopState`, reducer events, browser storage, URL state, or support packages.
+8. Every secret-bearing request type is non-serializable in the response direction, non-cloneable, non-debuggable, bounded before expensive work, and zeroized on drop. Implemented for the private `SecretInput`; frontend/IPC activation remains gated.
+9. Wallet state is held in a dedicated Rust `WalletRuntimeState`; it never enters `DesktopState`, reducer events, browser storage, URL state, or support packages. Implemented privately with no registered command or capability.
 10. Create, restore, lock, unlock, duplicate invocation, cancellation, crash, corrupt backup, wrong password, path race, stale token, window mismatch, and process shutdown tests pass.
 
 ## Capability design
@@ -95,15 +95,17 @@ The dialog plugin is initialized in Rust, but its `dialog:allow-save` and `dialo
 
 ## Dedicated Rust runtime state
 
-`WalletRuntimeState` will own:
+`WalletRuntimeState` now owns privately:
 
 - the locked/unlocked `WalletSession`;
-- public wallet metadata;
 - an optional in-progress operation marker;
 - short-lived recovery destination/source tokens;
 - window ownership for each token;
 - token creation and expiry times based on a monotonic clock;
 - a process-wide wallet lock or single-instance guard.
+
+Public wallet metadata is not yet stored in the runtime. Future lifecycle adapters may add only the
+reviewed non-secret metadata needed by status responses.
 
 It must not implement `Serialize`, `Clone`, or unrestricted `Debug`. Lock acquisition must fail closed if poisoned. Only one create, restore, unlock, or future signing operation may run at a time.
 
@@ -300,10 +302,10 @@ Before activation:
 
 1. Obtain independent review of this interface and the existing Rust custody modules.
 2. Add and pin the official Tauri dialog and single-instance plugins in a dependency-only commit with provenance review. Completed.
-3. Add `AppManifest`, explicit application permissions, and one main-window capability; migrate existing commands without changing behavior. Completed; the 19-command inventory is protected by automated parity tests and the plugins remain inactive.
+3. Add `AppManifest`, explicit application permissions, and one main-window capability; migrate existing commands without changing behavior. Completed; the 19-command inventory is protected by automated parity tests, while native dialogs and wallet commands remain inactive.
 4. Split production CSP from `devCsp` and prove no frontend direct-Core requests are required. Completed; production permits only Tauri IPC transports and the frontend source boundary is tested.
 5. Initialize the single-instance plugin first, discard duplicate launch data, restore the primary main window, and prove ordinary duplicate-launch and process-lock recovery behavior. Completed on Windows; source review retains a dedicated custody-lock requirement for step 6.
-6. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands.
+6. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands. Completed for process ownership, main-window page/close/destruction events, teardown, and poison; Windows session-lock and suspend hooks remain the next gate.
 7. Implement and test destination/source token selection in Rust.
 8. Implement create/restore/unlock/lock commands but keep them unregistered behind the activation policy.
 9. Add the isolated frontend onboarding UI and service wrappers; perform secret-leak and accessibility review.

@@ -29,9 +29,41 @@ pub fn run() {
     builder
         .manage(SupervisorState::default())
         .setup(|app| {
+            #[cfg(windows)]
+            {
+                let wallet_runtime = wallet::WalletRuntimeState::initialize()
+                    .map_err(|_| std::io::Error::other("secure wallet runtime is unavailable"))?;
+                if !app.manage(wallet_runtime) {
+                    return Err(std::io::Error::other(
+                        "secure wallet runtime state already exists",
+                    )
+                    .into());
+                }
+            }
             let resource_dir = app.path().resource_dir()?;
             core_manifest::initialize_resource_root(resource_dir).map_err(std::io::Error::other)?;
             Ok(())
+        })
+        .on_page_load(|webview, _payload| {
+            #[cfg(windows)]
+            if webview.label() == "main" {
+                if let Some(runtime) = webview.try_state::<wallet::WalletRuntimeState>() {
+                    let _ = runtime.invalidate_all();
+                }
+            }
+        })
+        .on_window_event(|window, event| {
+            #[cfg(windows)]
+            if window.label() == "main"
+                && matches!(
+                    event,
+                    tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+                )
+            {
+                if let Some(runtime) = window.try_state::<wallet::WalletRuntimeState>() {
+                    let _ = runtime.invalidate_all();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::verify_core_binary,

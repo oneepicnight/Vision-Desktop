@@ -46,6 +46,10 @@ Adding or removing an application command therefore requires one reviewed change
 
 Native dialog initialization and custody commands remain later security gates. They require their own implementation, lifecycle tests, and review.
 
+The private `WalletRuntimeState` is now managed inside Rust and protected by its own Windows process
+lock, but it is not a Tauri command surface. Automated tests continue to require exactly the same
+19 callable commands, no wallet capability, and no wallet wrapper in `coreApi.ts`.
+
 ## WebView network boundary
 
 The production CSP is now restricted to Tauri IPC. General loopback HTTP and the Vite hot-reload WebSocket are confined to `devCsp`, and automated tests prevent direct frontend network access or additional Tauri core imports. `docs/WEBVIEW_NETWORK_SECURITY.md` records this complementary boundary.

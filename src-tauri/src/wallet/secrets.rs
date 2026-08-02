@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "secret construction is activated only after the custody gates pass"
-    )
-)]
-
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use std::fmt;
 

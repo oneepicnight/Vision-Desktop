@@ -12,6 +12,8 @@ mod journal;
 mod onboarding;
 mod receipt;
 mod recovery;
+mod runtime;
+mod secret_input;
 mod secrets;
 mod session;
 mod storage_security;
@@ -23,4 +25,5 @@ pub use account::VisionAccountIdentity;
 pub use contract::{
     wallet_contract_gate, WalletCompatibilityGate, WalletContractRequirement, WalletPublicMetadata,
 };
+pub(crate) use runtime::WalletRuntimeState;
 pub use secrets::WalletSeed;

@@ -18,8 +18,8 @@ A duplicate launch:
 
 Normal exit releases the plugin mutex and receiver window. Windows also releases process-owned
 mutex resources when a process terminates unexpectedly, allowing a later launch to become the new
-primary instance. This process boundary is a prerequisite for wallet ownership; the private wallet
-runtime and its own fail-closed session state remain a later change.
+primary instance. This process boundary is complemented by the private wallet runtime's independent
+fail-closed mutex; wallet commands and signing authority remain unavailable.
 
 Engineering validation on 2026-08-01 used the production frontend and a debug, no-bundle Tauri
 executable. The primary process remained active with a nonzero main-window handle, a duplicate
@@ -32,8 +32,9 @@ The reviewed plugin's Windows implementation creates its named mutex immediately
 receiver window. Although the simultaneous-launch test did not reproduce a failure, source review
 shows a narrow startup interval in which a duplicate can observe the mutex before that window is
 discoverable. The plugin is therefore a strong Desktop-level duplicate-launch control, but it is
-not the sole future custody lock. `WalletRuntimeState` must still acquire an independent,
-fail-closed operating-system wallet lock before it can hold secrets or signing authority.
+not the sole future custody lock. `WalletRuntimeState` now acquires an independent, fail-closed
+Windows mutex during application setup, before Core resource setup, and holds it until teardown.
+No wallet command can access the runtime yet.
 
 Lifecycle:
 

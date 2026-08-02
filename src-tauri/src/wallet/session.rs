@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "wallet sessions remain internal until the custody gates pass"
-    )
-)]
-
 use super::{
     secrets::{WalletPassword, WalletSeed},
     vault::{EncryptedWalletVault, WalletVaultError},

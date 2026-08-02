@@ -9,6 +9,8 @@ mod amount;
 mod contract;
 mod device_protection;
 mod journal;
+#[cfg(windows)]
+mod lifecycle;
 mod onboarding;
 mod receipt;
 mod recovery;
@@ -27,8 +29,11 @@ mod windows_lifecycle;
 
 pub use account::VisionAccountIdentity;
 pub use contract::{
-    wallet_contract_gate, WalletCompatibilityGate, WalletContractRequirement, WalletPublicMetadata,
+    wallet_contract_gate, WalletAccountSummary, WalletCompatibilityGate, WalletContractRequirement,
+    WalletLifecycleStatus, WalletPublicMetadata,
 };
+#[cfg(windows)]
+pub(crate) use lifecycle::WalletLifecycleAdapters;
 pub(crate) use runtime::WalletRuntimeState;
 pub use secrets::WalletSeed;
 #[cfg(windows)]

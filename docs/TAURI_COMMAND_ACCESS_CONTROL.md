@@ -42,7 +42,7 @@ Adding or removing an application command therefore requires one reviewed change
 
 ## Plugin and wallet surface
 
-`tauri-plugin-single-instance` is initialized on Windows as the first plugin. It has no frontend command permission, discards duplicate-process launch data, and only activates the existing `main` window. The exact-version `tauri-plugin-dialog` follows it and is used only by private Rust recovery-selection adapters. Its JavaScript package and all dialog WebView permissions remain absent. There are no wallet Tauri commands or wallet permissions.
+`tauri-plugin-single-instance` is initialized on Windows as the first plugin. It has no frontend command permission, discards duplicate-process launch data, and only activates the existing `main` window. The exact-version `tauri-plugin-dialog` follows it and is used only by private Rust recovery-selection adapters. Its JavaScript package and all dialog WebView permissions remain absent. Private Rust lifecycle adapters are managed during setup, but they are not Tauri commands and cannot be reached through ACL. There are no wallet Tauri commands or wallet permissions.
 
 Custody commands remain a later security gate. Native selection, cancellation, stale-callback, path-validation, and lifecycle behavior are implemented and tested privately before any command activation.
 

@@ -46,10 +46,12 @@ events, browser storage, logs, or support packages.
 
 Only the exact `main` window label can begin a wallet operation. Create, restore, unlock, and future
 sign operations share one exclusion slot. A generation-bound permit clears only its own operation,
-so a stale completion cannot clear newer work. Runtime mutex poisoning invalidates the session,
-operation, and recovery authorization and then permanently returns `wallet_runtime_unavailable`.
+so a stale completion cannot clear newer work. The private lifecycle adapters now prove that their
+permit remains current around cryptographic and filesystem stages. Runtime mutex poisoning
+invalidates the session, operation, and recovery authorization and then permanently returns
+`wallet_runtime_unavailable`.
 
-No operation adapter or Tauri command uses these permits yet.
+The adapters are managed only as private Rust state. No Tauri command exposes them.
 
 ## Secret input
 
@@ -136,6 +138,10 @@ The internal runtime uses fixed codes and operator-safe messages only:
 
 Errors contain no path, token, password, wallet material, operating-system detail, or backoff state.
 
+The connected private lifecycle adds its own fixed error mapping and deliberately omits unlock
+retry duration. `docs/WALLET_LIFECYCLE_ADAPTERS.md` records the storage, ordering, metadata, and
+failure contracts.
+
 ## Validation
 
 Automated tests cover process-lock exclusion and reacquisition, main-window ownership, mutual
@@ -144,6 +150,11 @@ lifecycle invalidation, native session/power/end-session message classification 
 errors, bounded secret deserialization, Tauri command absence, capability absence, and frontend
 service absence. Unlock and resume are tested as non-restoring events. The complete existing wallet
 cryptographic and storage suite remains required.
+
+Private lifecycle tests additionally cover create-backup-verify-store ordering, restore to a new
+device-bound vault, address equality, locked completion, unlock and idempotent lock, restart
+metadata conservatism, non-overwrite behavior, single-use selection, stale-operation invalidation,
+and fixed non-disclosing failures.
 
 Executable validation on 2026-08-01 also proved that a normal duplicate exits successfully without
 disturbing the primary runtime; a launch made while an external process owns the exact wallet mutex

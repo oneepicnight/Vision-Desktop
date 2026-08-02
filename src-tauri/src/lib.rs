@@ -48,6 +48,13 @@ pub fn run() {
                 .map_err(|_| {
                     std::io::Error::other("secure wallet lifecycle monitoring is unavailable")
                 })?;
+                let wallet_adapters =
+                    wallet::WalletLifecycleAdapters::initialize(Arc::clone(&wallet_runtime))
+                        .map_err(|_| {
+                            std::io::Error::other(
+                                "secure wallet lifecycle adapters are unavailable",
+                            )
+                        })?;
                 if !app.manage(wallet_runtime) {
                     return Err(std::io::Error::other(
                         "secure wallet runtime state already exists",
@@ -57,6 +64,12 @@ pub fn run() {
                 if !app.manage(wallet_lifecycle) {
                     return Err(std::io::Error::other(
                         "secure wallet lifecycle monitoring already exists",
+                    )
+                    .into());
+                }
+                if !app.manage(wallet_adapters) {
+                    return Err(std::io::Error::other(
+                        "secure wallet lifecycle adapters already exist",
                     )
                     .into());
                 }

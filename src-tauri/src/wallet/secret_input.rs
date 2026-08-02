@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "secret IPC input remains private until wallet commands pass review"
-    )
-)]
-
 use super::secrets::WalletPassword;
 use serde::de::{self, Deserialize, Deserializer, Visitor};
 use std::fmt;

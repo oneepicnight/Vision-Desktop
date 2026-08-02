@@ -246,6 +246,7 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let runtime_source = read("src/wallet/runtime.rs");
     let lifecycle_source = read("src/wallet/windows_lifecycle.rs");
     let recovery_selection_source = read("src/wallet/recovery_selection.rs");
+    let wallet_adapter_source = read("src/wallet/lifecycle.rs");
     let secret_input_source = read("src/wallet/secret_input.rs");
     let capability_source = read("capabilities/main-desktop.json");
 
@@ -255,6 +256,8 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(lib_source.contains("&wallet_runtime"));
     assert!(lib_source.contains("app.manage(wallet_runtime)"));
     assert!(lib_source.contains("app.manage(wallet_lifecycle)"));
+    assert!(lib_source.contains("wallet::WalletLifecycleAdapters::initialize("));
+    assert!(lib_source.contains("app.manage(wallet_adapters)"));
     assert!(lib_source.contains("runtime.invalidate_all()"));
     assert!(!runtime_source.contains("#[tauri::command]"));
     assert!(!lifecycle_source.contains("#[tauri::command]"));
@@ -265,6 +268,12 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(lifecycle_source.contains("WM_QUERYENDSESSION"));
     assert!(lifecycle_source.contains("runtime.invalidate_all()"));
     assert!(!recovery_selection_source.contains("#[tauri::command]"));
+    assert!(!wallet_adapter_source.contains("#[tauri::command]"));
+    assert!(!wallet_adapter_source.contains("tauri::Window"));
+    assert!(!wallet_adapter_source.contains("AppHandle"));
+    assert!(wallet_adapter_source.contains("begin_operation"));
+    assert!(wallet_adapter_source.contains("consume_recovery_path"));
+    assert!(wallet_adapter_source.contains("ensure_current"));
     assert!(!recovery_selection_source.contains("into_path()"));
     assert!(recovery_selection_source.contains("Some(FilePath::Path(path))"));
     assert!(recovery_selection_source.contains(".set_parent(window)"));

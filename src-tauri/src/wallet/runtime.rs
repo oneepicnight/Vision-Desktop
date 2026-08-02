@@ -6,7 +6,13 @@
     )
 )]
 
-use super::session::WalletSession;
+use super::{
+    account::derive_account_identity,
+    contract::{WalletAccountSummary, WalletLifecycleStatus, WalletPublicMetadata},
+    secrets::WalletPassword,
+    session::{WalletSession, WalletSessionError},
+    vault::EncryptedWalletVault,
+};
 use std::{
     fmt,
     path::PathBuf,
@@ -36,6 +42,7 @@ struct WalletRuntimeInner {
     active_operation: Option<ActiveOperation>,
     pending_path_selection: Option<PendingPathSelection>,
     path_authorization: Option<PathAuthorization>,
+    public_account: Option<WalletAccountSummary>,
     next_generation: u64,
 }
 
@@ -160,6 +167,7 @@ impl WalletRuntimeState {
                 active_operation: None,
                 pending_path_selection: None,
                 path_authorization: None,
+                public_account: None,
                 next_generation: 0,
             }),
             _process_lock: process_lock,
@@ -331,6 +339,84 @@ impl WalletRuntimeState {
         Ok(())
     }
 
+    pub(in crate::wallet) fn remember_public_metadata(
+        &self,
+        metadata: WalletPublicMetadata,
+    ) -> Result<WalletLifecycleStatus, WalletRuntimeError> {
+        let mut inner = self.lock_inner()?;
+        inner.session.lock();
+        inner.public_account = Some(metadata.into());
+        Ok(inner.lifecycle_status(true))
+    }
+
+    pub(in crate::wallet) fn unlock_vault(
+        &self,
+        vault: &EncryptedWalletVault,
+        password: &WalletPassword,
+    ) -> Result<WalletLifecycleStatus, WalletSessionError> {
+        let mut inner = self
+            .lock_inner()
+            .map_err(|_| WalletSessionError::VaultUnavailable)?;
+        inner.session.unlock(vault, password)?;
+        let identity = match inner
+            .session
+            .with_seed(|wallet_id, seed| (wallet_id.to_string(), derive_account_identity(seed)))
+        {
+            Ok(identity) => identity,
+            Err(error) => {
+                inner.session.lock();
+                return Err(error);
+            }
+        };
+        if identity.0 != vault.wallet_id()
+            || inner.public_account.as_ref().is_some_and(|account| {
+                account.wallet_id != identity.0
+                    || account.address != identity.1.address
+                    || account.public_key != identity.1.public_key
+            })
+        {
+            inner.session.lock();
+            return Err(WalletSessionError::VaultUnavailable);
+        }
+        let prior = inner.public_account.take();
+        inner.public_account = Some(WalletAccountSummary {
+            wallet_id: identity.0,
+            label: prior.as_ref().and_then(|account| account.label.clone()),
+            public_key: identity.1.public_key,
+            address: identity.1.address,
+            created_at_unix_ms: vault.created_at_unix_ms(),
+            backup_verified: prior.and_then(|account| account.backup_verified),
+        });
+        Ok(inner.lifecycle_status(true))
+    }
+
+    pub(in crate::wallet) fn lifecycle_status(
+        &self,
+        vault_exists: bool,
+    ) -> Result<WalletLifecycleStatus, WalletRuntimeError> {
+        let mut inner = self.lock_inner()?;
+        if !vault_exists {
+            inner.session.lock();
+            inner.public_account = None;
+        }
+        Ok(inner.lifecycle_status(vault_exists))
+    }
+
+    pub(in crate::wallet) fn lifecycle_status_for_vault(
+        &self,
+        vault: &EncryptedWalletVault,
+    ) -> Result<WalletLifecycleStatus, WalletRuntimeError> {
+        let mut inner = self.lock_inner()?;
+        if inner.public_account.as_ref().is_some_and(|account| {
+            account.wallet_id != vault.wallet_id()
+                || account.created_at_unix_ms != vault.created_at_unix_ms()
+        }) {
+            inner.session.lock();
+            inner.public_account = None;
+        }
+        Ok(inner.lifecycle_status(true))
+    }
+
     fn now_ms(&self) -> Result<u64, WalletRuntimeError> {
         let inner = self.lock_inner()?;
         Ok(u64::try_from(inner.started_at.elapsed().as_millis()).unwrap_or(u64::MAX))
@@ -369,6 +455,14 @@ impl WalletRuntimeInner {
         self.pending_path_selection = None;
         self.path_authorization = None;
     }
+
+    fn lifecycle_status(&mut self, vault_exists: bool) -> WalletLifecycleStatus {
+        WalletLifecycleStatus {
+            vault_exists,
+            locked: self.session.is_locked(),
+            account: self.public_account.clone(),
+        }
+    }
 }
 
 impl PendingPathSelection {
@@ -397,6 +491,20 @@ impl Drop for WalletOperationPermit<'_> {
             operation.generation == self.generation && operation.owner_window == self.owner_window
         }) {
             inner.active_operation = None;
+        }
+    }
+}
+
+impl WalletOperationPermit<'_> {
+    /// Proves that no lifecycle event, explicit lock, or newer operation revoked this work.
+    pub(in crate::wallet) fn ensure_current(&self) -> Result<(), WalletRuntimeError> {
+        let inner = self.state.lock_inner()?;
+        if inner.active_operation.as_ref().is_some_and(|operation| {
+            operation.generation == self.generation && operation.owner_window == self.owner_window
+        }) {
+            Ok(())
+        } else {
+            Err(WalletRuntimeError::RuntimeUnavailable)
         }
     }
 }
@@ -545,6 +653,11 @@ mod tests {
         let current = runtime
             .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
             .unwrap();
+        assert_eq!(
+            stale.ensure_current(),
+            Err(WalletRuntimeError::RuntimeUnavailable)
+        );
+        current.ensure_current().unwrap();
         drop(stale);
         assert_eq!(
             runtime

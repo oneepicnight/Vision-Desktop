@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "vault operations remain internal until the custody gates pass"
-    )
-)]
-
 use super::{
     device_protection::{self, DeviceKey, ProtectedDeviceKey},
     secrets::{WalletPassword, WalletSeed},
@@ -116,6 +108,10 @@ impl std::error::Error for WalletVaultError {}
 impl EncryptedWalletVault {
     pub(in crate::wallet) fn wallet_id(&self) -> &str {
         &self.wallet_id
+    }
+
+    pub(in crate::wallet) fn created_at_unix_ms(&self) -> u64 {
+        self.created_at_unix_ms
     }
 
     /// Encrypts a seed without exposing a creation command to the frontend.

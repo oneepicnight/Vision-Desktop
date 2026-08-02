@@ -15,6 +15,42 @@ pub struct WalletPublicMetadata {
     pub backup_verified: bool,
 }
 
+/// Public account details known by the current Rust wallet runtime.
+///
+/// The label and backup state are optional because the encrypted vault deliberately
+/// persists neither value. After an application restart they remain unknown until a
+/// reviewed metadata store exists; the runtime never reconstructs or guesses them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalletAccountSummary {
+    pub wallet_id: String,
+    pub label: Option<String>,
+    pub public_key: String,
+    pub address: String,
+    pub created_at_unix_ms: u64,
+    pub backup_verified: Option<bool>,
+}
+
+/// Secret-free lifecycle status suitable for a future reviewed command boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalletLifecycleStatus {
+    pub vault_exists: bool,
+    pub locked: bool,
+    pub account: Option<WalletAccountSummary>,
+}
+
+impl From<WalletPublicMetadata> for WalletAccountSummary {
+    fn from(metadata: WalletPublicMetadata) -> Self {
+        Self {
+            wallet_id: metadata.wallet_id,
+            label: Some(metadata.label),
+            public_key: metadata.public_key,
+            address: metadata.address,
+            created_at_unix_ms: metadata.created_at_unix_ms,
+            backup_verified: Some(metadata.backup_verified),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WalletContractRequirement {
@@ -76,6 +112,28 @@ mod tests {
         }
         assert!(serialized.contains("public_key"));
         assert!(serialized.contains("address"));
+    }
+
+    #[test]
+    fn lifecycle_status_serialization_is_public_only_and_allows_unknown_metadata() {
+        let status = WalletLifecycleStatus {
+            vault_exists: true,
+            locked: true,
+            account: Some(WalletAccountSummary {
+                wallet_id: "wallet-1".to_string(),
+                label: None,
+                public_key: "11".repeat(32),
+                address: "22".repeat(32),
+                created_at_unix_ms: 1_700_000_000_000,
+                backup_verified: None,
+            }),
+        };
+        let serialized = serde_json::to_string(&status).unwrap();
+        for forbidden in ["seed", "mnemonic", "password", "private_key", "secret_key"] {
+            assert!(!serialized.contains(forbidden));
+        }
+        assert!(serialized.contains("\"label\":null"));
+        assert!(serialized.contains("\"backup_verified\":null"));
     }
 
     #[test]

@@ -108,6 +108,40 @@ pub(in crate::wallet) fn prepare_new_wallet(
     )
 }
 
+/// Restores an existing portable recovery artifact into a new device-bound local vault.
+/// The original recovery file is read only and is never replaced or deleted.
+pub(in crate::wallet) fn prepare_restored_wallet(
+    recovery_path: &Path,
+    wallet_id: &str,
+    label: &str,
+    created_at_unix_ms: u64,
+    wallet_password: &WalletPassword,
+    recovery_password: &WalletPassword,
+) -> Result<VerifiedWalletOnboarding, WalletOnboardingError> {
+    validate_label(label)?;
+    require_distinct_passwords(wallet_password, recovery_password)?;
+    let artifact = load_recovery_artifact(recovery_path).map_err(map_recovery_read_error)?;
+    let seed = artifact
+        .restore(recovery_password)
+        .map_err(map_recovery_restore_error)?;
+    let identity = derive_account_identity(&seed);
+    let vault =
+        EncryptedWalletVault::encrypt(wallet_id, created_at_unix_ms, &seed, wallet_password)
+            .map_err(map_vault_protection_error)?;
+    Ok(VerifiedWalletOnboarding {
+        metadata: WalletPublicMetadata {
+            wallet_id: wallet_id.to_string(),
+            label: label.to_string(),
+            public_key: identity.public_key,
+            address: identity.address,
+            created_at_unix_ms,
+            locked: true,
+            backup_verified: true,
+        },
+        vault: Some(vault),
+    })
+}
+
 impl PreparedWalletOnboarding {
     pub(in crate::wallet) fn public_metadata(&self) -> &WalletPublicMetadata {
         &self.metadata
@@ -363,6 +397,42 @@ mod tests {
         let vault = load_vault(&vault_path).unwrap();
         let restored = vault.unlock(&password(WALLET_PASSWORD)).unwrap();
         assert_eq!(derive_account_identity(&restored).address, metadata.address);
+    }
+
+    #[test]
+    fn restore_reads_original_backup_and_creates_a_new_locked_device_vault() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup_path = directory.path().join("primary-recovery.json");
+        let restored_vault_path = directory.path().join("restored").join("wallet.json");
+        let original_backup;
+        {
+            let source = prepared();
+            source.store_recovery_backup(&backup_path).unwrap();
+            original_backup = fs::read(&backup_path).unwrap();
+        }
+
+        let mut restored = prepare_restored_wallet(
+            &backup_path,
+            "restored",
+            "Restored Wallet",
+            1_800_000_000_000,
+            &password("new local wallet password"),
+            &password(RECOVERY_PASSWORD),
+        )
+        .unwrap();
+        assert!(restored.public_metadata().locked);
+        assert!(restored.public_metadata().backup_verified);
+        restored.store_local_vault(&restored_vault_path).unwrap();
+        assert_eq!(fs::read(&backup_path).unwrap(), original_backup);
+
+        let vault = load_vault(&restored_vault_path).unwrap();
+        let seed = vault
+            .unlock(&password("new local wallet password"))
+            .unwrap();
+        assert_eq!(
+            derive_account_identity(&seed).address,
+            restored.public_metadata().address
+        );
     }
 
     #[test]

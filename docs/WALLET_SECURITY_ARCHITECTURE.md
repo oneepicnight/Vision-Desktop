@@ -64,11 +64,10 @@ The Rust wallet module now also contains an internal RC2-compatible `cash::trans
 
 The activity journal is append-only, versioned, wallet-bound, sequence-checked, size-bounded, synchronized within the Desktop process, and stored with the same restrictive filesystem permissions as wallet storage. It records only public transfer metadata after an exact accepted submission and later validated receipt observations. It never stores signed bytes, signatures, passwords, seeds, recovery material, or vault contents, and it never supplies balances, nonces, or signing decisions. Its `High confidence` presentation at 50 canonical confirmations is a Desktop diagnostic policy, never a claim of deterministic finality.
 
-No wallet creation, recovery, unlock, user-facing signing, or send command is registered with Tauri yet. Before custody is enabled for users, the remaining vault work includes:
+No wallet creation, recovery, unlock, user-facing signing, or send command is registered with Tauri yet. Private Rust lifecycle adapters now connect status, create, restore, unlock, and lock to the existing vault, recovery, session, runtime, and native-selection primitives. They use one fixed `%LOCALAPPDATA%` device-vault path, complete create/restore locked, never overwrite either vault or recovery data, and remain inaccessible to React. Before custody is enabled for users, the remaining vault work includes:
 
-- private create/restore/unlock/lock adapters behind the existing activation gates;
 - versioned migration with backup-before-upgrade behavior;
-- user-facing save-location selection and explicit offline-storage guidance without clipboard or automatic cloud behavior;
+- user-facing recovery selection and explicit offline-storage guidance without clipboard or automatic cloud behavior;
 - an independent cryptographic review.
 
 The private Rust runtime now exists without registered commands. It owns the existing session, an
@@ -89,7 +88,7 @@ The current Desktop recovery contract is the versioned encrypted portable artifa
 
 The repository contains conflicting historical phrase descriptions, so no mnemonic is selected or implied. If a mnemonic is added later, its word list, normalization, checksum, and phrase-to-seed algorithm require a separately approved contract and cross-platform vectors. The legacy browser wallet derivation remains unapproved.
 
-The verified identity, amount, nonce/fee, serialization, transaction-identifier, signature, submission-response, receipt-observation, local-activity, and recovery-gated onboarding contracts do not unlock user-facing transaction signing. The conservative confirmation presentation, limited local-history model, recovery-backup ordering, separate-password rule, and requirement to wait for loopback-only Core binding were approved on 2026-08-01. Wallet creation and restore remain inaccessible to the frontend until the narrow Tauri lifecycle is reviewed; signing and submission additionally remain disabled until private-loopback compatibility and the independent security review pass.
+The verified identity, amount, nonce/fee, serialization, transaction-identifier, signature, submission-response, receipt-observation, local-activity, recovery-gated onboarding, and private lifecycle contracts do not unlock user-facing transaction signing. The conservative confirmation presentation, limited local-history model, recovery-backup ordering, separate-password rule, and requirement to wait for loopback-only Core binding were approved on 2026-08-01. Wallet creation and restore remain inaccessible to the frontend until the narrow Tauri lifecycle is reviewed; signing and submission additionally remain disabled until private-loopback compatibility and the independent security review pass.
 
 ## Review gates
 

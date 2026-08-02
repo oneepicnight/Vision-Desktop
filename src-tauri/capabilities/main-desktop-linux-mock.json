@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-desktop-linux-mock",
+  "description": "Allows the Linux main window to read mock dashboard and non-secret Desktop configuration data.",
+  "windows": ["main"],
+  "platforms": ["linux"],
+  "permissions": [
+    "allow-get-mock-dashboard-snapshot",
+    "allow-get-node-config-snapshot",
+    "allow-get-default-paths"
+  ]
+}

@@ -24,6 +24,12 @@ const COMMANDS: &[&str] = &[
     "get_default_paths",
 ];
 
+const LINUX_MOCK_COMMANDS: &[&str] = &[
+    "get_mock_dashboard_snapshot",
+    "get_node_config_snapshot",
+    "get_default_paths",
+];
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -172,8 +178,45 @@ fn tauri_config_selects_only_the_explicit_main_window_capability() {
     assert_eq!(config["app"]["windows"][0]["label"], "main");
     assert_eq!(
         config["app"]["security"]["capabilities"],
-        serde_json::json!(["main-desktop"])
+        serde_json::json!(["main-desktop", "main-desktop-linux-mock"])
     );
+}
+
+#[test]
+fn linux_mock_capability_is_read_only_and_least_privilege() {
+    let capability: Value =
+        serde_json::from_str(&read("capabilities/main-desktop-linux-mock.json"))
+            .expect("Linux mock capability is valid JSON");
+    let permissions: BTreeSet<String> = capability["permissions"]
+        .as_array()
+        .expect("Linux mock permissions are an array")
+        .iter()
+        .map(|permission| {
+            permission
+                .as_str()
+                .expect("permission is a string")
+                .to_string()
+        })
+        .collect();
+    let expected: BTreeSet<String> = LINUX_MOCK_COMMANDS
+        .iter()
+        .map(|command| format!("allow-{}", command.replace('_', "-")))
+        .collect();
+
+    assert_eq!(capability["identifier"], "main-desktop-linux-mock");
+    assert_eq!(capability["windows"], serde_json::json!(["main"]));
+    assert_eq!(capability["platforms"], serde_json::json!(["linux"]));
+    assert!(capability.get("remote").is_none());
+    assert_eq!(permissions, expected);
+    assert!(!permissions.iter().any(|permission| {
+        permission.contains("start")
+            || permission.contains("stop")
+            || permission.contains("restart")
+            || permission.contains("save")
+            || permission.contains("open")
+            || permission.contains("generate")
+            || permission.contains("run-network")
+    }));
 }
 
 #[test]

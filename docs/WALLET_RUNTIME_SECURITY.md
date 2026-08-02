@@ -83,11 +83,22 @@ The runtime synchronously locks its session and revokes operations and path auth
 - main-window close request;
 - main-window destruction;
 - main WebView page load or reload;
+- Windows user-session lock;
+- Windows suspend or standby notification;
+- Windows logoff or shutdown query and confirmed end-session notification;
 - runtime drop and application teardown;
 - mutex poison or internal synchronization failure.
 
-Minimize and focus loss do not lock the wallet. Windows user-session lock and system suspend hooks
-remain the next lifecycle hardening slice and must be completed before custody activation.
+Windows lifecycle events arrive through a hidden Rust-owned native notification window registered
+for the current session. The window owns only an `Arc` to the private runtime, exposes no Tauri
+command or WebView capability, opens no network or filesystem boundary, and adds no polling loop.
+Application setup fails closed with a fixed error if the native listener or session notification
+registration cannot be established.
+
+Unlock and resume notifications do not restore wallet authority. The user must explicitly unlock
+again after a session lock or suspend. Minimize and focus loss do not lock the wallet because they
+do not prove workstation abandonment. Native window teardown also performs a final synchronous
+invalidation before releasing its runtime reference.
 
 ## Fixed error contract
 
@@ -108,9 +119,10 @@ Errors contain no path, token, password, wallet material, operating-system detai
 
 Automated tests cover process-lock exclusion and reacquisition, main-window ownership, mutual
 exclusion, stale permit behavior, mutex poisoning, random and fixed token paths, expiry, single use,
-lifecycle invalidation, fixed errors, bounded secret deserialization, Tauri command absence,
-capability absence, and frontend service absence. The complete existing wallet cryptographic and
-storage suite remains required.
+lifecycle invalidation, native session/power/end-session message classification and dispatch, fixed
+errors, bounded secret deserialization, Tauri command absence, capability absence, and frontend
+service absence. Unlock and resume are tested as non-restoring events. The complete existing wallet
+cryptographic and storage suite remains required.
 
 Executable validation on 2026-08-01 also proved that a normal duplicate exits successfully without
 disturbing the primary runtime; a launch made while an external process owns the exact wallet mutex

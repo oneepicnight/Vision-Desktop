@@ -277,6 +277,11 @@ The Rust wallet session locks and all path tokens are invalidated on:
 
 Minimizing or losing focus alone does not prove workstation abandonment and is not currently selected as an automatic-lock trigger. The UI may offer a user-configurable stricter policy later.
 
+The current Windows implementation receives session lock, suspend/standby, and logoff/shutdown
+messages through a hidden Rust-owned native window. It invalidates authority synchronously and does
+not restore it on unlock or resume. Listener registration is a fail-closed startup requirement. No
+listener handle, operating-system detail, or lifecycle command is exposed to React.
+
 ## Production WebView hardening
 
 Before activation:
@@ -305,7 +310,7 @@ Before activation:
 3. Add `AppManifest`, explicit application permissions, and one main-window capability; migrate existing commands without changing behavior. Completed; the 19-command inventory is protected by automated parity tests, while native dialogs and wallet commands remain inactive.
 4. Split production CSP from `devCsp` and prove no frontend direct-Core requests are required. Completed; production permits only Tauri IPC transports and the frontend source boundary is tested.
 5. Initialize the single-instance plugin first, discard duplicate launch data, restore the primary main window, and prove ordinary duplicate-launch and process-lock recovery behavior. Completed on Windows; source review retains a dedicated custody-lock requirement for step 6.
-6. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands. Completed for process ownership, main-window page/close/destruction events, teardown, and poison; Windows session-lock and suspend hooks remain the next gate.
+6. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands. Completed for process ownership, main-window page/close/destruction events, Windows session lock, suspend/standby, logoff/shutdown, teardown, and poison. Unlock and resume do not restore authority.
 7. Implement and test destination/source token selection in Rust.
 8. Implement create/restore/unlock/lock commands but keep them unregistered behind the activation policy.
 9. Add the isolated frontend onboarding UI and service wrappers; perform secret-leak and accessibility review.
@@ -326,9 +331,9 @@ Approved on 2026-08-01:
 - exact-version, Windows-only Rust dependencies for official Tauri dialog and single-instance support, with no JavaScript packages, plugin permissions, or wallet commands;
 - explicit AppManifest registration and a single main-window-only Windows capability for the existing non-wallet application commands before either plugin is initialized.
 - Windows single-instance enforcement registered before all other startup work; duplicate arguments and working directories are discarded and the existing main window is activated best-effort.
+- Rust-only Windows lifecycle monitoring that fails startup closed, clears wallet authority on session lock, suspend/standby, logoff/shutdown, and teardown, and never restores authority on unlock or resume.
 
 Still requiring explicit review before implementation:
 
 - initializing the official dialog plugin and defining its lifecycle behavior;
-- the exact operating-system session-lock integration;
 - independent cryptographic and application-security approval.

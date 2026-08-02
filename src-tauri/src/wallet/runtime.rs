@@ -269,7 +269,7 @@ impl WalletRuntimeState {
     }
 
     #[cfg(test)]
-    fn for_test() -> Self {
+    pub(in crate::wallet) fn for_test() -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         static NEXT_TEST_LOCK: AtomicU64 = AtomicU64::new(1);

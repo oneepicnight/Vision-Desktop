@@ -11,6 +11,8 @@ pub mod wallet;
 #[cfg(windows)]
 mod single_instance;
 
+#[cfg(windows)]
+use std::sync::Arc;
 use supervisor::SupervisorState;
 use tauri::Manager;
 
@@ -31,11 +33,25 @@ pub fn run() {
         .setup(|app| {
             #[cfg(windows)]
             {
-                let wallet_runtime = wallet::WalletRuntimeState::initialize()
-                    .map_err(|_| std::io::Error::other("secure wallet runtime is unavailable"))?;
+                let wallet_runtime =
+                    Arc::new(wallet::WalletRuntimeState::initialize().map_err(|_| {
+                        std::io::Error::other("secure wallet runtime is unavailable")
+                    })?);
+                let wallet_lifecycle = wallet::WindowsWalletLifecycle::register(Arc::clone(
+                    &wallet_runtime,
+                ))
+                .map_err(|_| {
+                    std::io::Error::other("secure wallet lifecycle monitoring is unavailable")
+                })?;
                 if !app.manage(wallet_runtime) {
                     return Err(std::io::Error::other(
                         "secure wallet runtime state already exists",
+                    )
+                    .into());
+                }
+                if !app.manage(wallet_lifecycle) {
+                    return Err(std::io::Error::other(
+                        "secure wallet lifecycle monitoring already exists",
                     )
                     .into());
                 }
@@ -47,7 +63,7 @@ pub fn run() {
         .on_page_load(|webview, _payload| {
             #[cfg(windows)]
             if webview.label() == "main" {
-                if let Some(runtime) = webview.try_state::<wallet::WalletRuntimeState>() {
+                if let Some(runtime) = webview.try_state::<Arc<wallet::WalletRuntimeState>>() {
                     let _ = runtime.invalidate_all();
                 }
             }
@@ -60,7 +76,7 @@ pub fn run() {
                     tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
                 )
             {
-                if let Some(runtime) = window.try_state::<wallet::WalletRuntimeState>() {
+                if let Some(runtime) = window.try_state::<Arc<wallet::WalletRuntimeState>>() {
                     let _ = runtime.invalidate_all();
                 }
             }

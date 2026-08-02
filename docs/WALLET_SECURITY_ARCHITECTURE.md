@@ -66,7 +66,6 @@ The activity journal is append-only, versioned, wallet-bound, sequence-checked, 
 
 No wallet creation, recovery, unlock, user-facing signing, or send command is registered with Tauri yet. Before custody is enabled for users, the remaining vault work includes:
 
-- Windows user-session-lock and suspend integration for the private runtime;
 - reviewed native-dialog path selection and private create/restore/unlock/lock adapters;
 - versioned migration with backup-before-upgrade behavior;
 - user-facing save-location selection and explicit offline-storage guidance without clipboard or automatic cloud behavior;
@@ -75,9 +74,10 @@ No wallet creation, recovery, unlock, user-facing signing, or send command is re
 The private Rust runtime now exists without registered commands. It owns the existing session, an
 independent Windows kernel wallet mutex, main-window operation exclusion, generation-safe permits,
 and one short-lived recovery authorization. Page load/reload, main-window close/destruction,
-teardown, and mutex poison synchronously revoke authority. `SecretInput` provides a bounded,
-zeroizing future Rust request representation. `docs/WALLET_RUNTIME_SECURITY.md` records the exact
-boundary and the remaining operating-system lifecycle work.
+Windows session lock, suspend/standby, logoff/shutdown, teardown, and mutex poison synchronously
+revoke authority. Unlock and resume never restore authority automatically. `SecretInput` provides a
+bounded, zeroizing future Rust request representation. `docs/WALLET_RUNTIME_SECURITY.md` records
+the exact boundary.
 
 The internal vault schema is version 2 and is device-bound. Copying the local vault file to another Windows user or computer is intentionally insufficient for recovery. The internal portable recovery schema is version 1 and deliberately excludes the DPAPI device factor. Its tests prove that the encrypted artifact restores the exact original opaque seed and Vision account identity using only its recovery password. The approved onboarding policy requires a different recovery password of at least 16 bytes, never overwrites the selected destination, never creates arbitrary parent directories, reloads the stored artifact through a bounded regular-file parser, and withholds local-vault storage until the restored identity matches. The artifact has no Tauri command, frontend state, automatic export, clipboard path, or file-picker workflow. Portable backups rely on encryption rather than device-bound filesystem permissions so that offline recovery remains possible on another machine. Because a password-only artifact becomes an offline guessing target if stolen, the future UI must direct the user to an explicitly selected offline destination.
 

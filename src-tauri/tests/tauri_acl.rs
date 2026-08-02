@@ -232,13 +232,25 @@ fn duplicate_launch_data_cannot_reach_the_window_activation_handler() {
 fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let lib_source = read("src/lib.rs");
     let runtime_source = read("src/wallet/runtime.rs");
+    let lifecycle_source = read("src/wallet/windows_lifecycle.rs");
     let secret_input_source = read("src/wallet/secret_input.rs");
     let capability_source = read("capabilities/main-desktop.json");
 
     assert!(lib_source.contains("wallet::WalletRuntimeState::initialize()"));
+    assert!(lib_source.contains("wallet::WindowsWalletLifecycle::register("));
+    assert!(lib_source.contains("WindowsWalletLifecycle::register(Arc::clone("));
+    assert!(lib_source.contains("&wallet_runtime"));
     assert!(lib_source.contains("app.manage(wallet_runtime)"));
+    assert!(lib_source.contains("app.manage(wallet_lifecycle)"));
     assert!(lib_source.contains("runtime.invalidate_all()"));
     assert!(!runtime_source.contains("#[tauri::command]"));
+    assert!(!lifecycle_source.contains("#[tauri::command]"));
+    assert!(!lifecycle_source.contains("AppHandle"));
+    assert!(lifecycle_source.contains("WTSRegisterSessionNotification"));
+    assert!(lifecycle_source.contains("WM_WTSSESSION_CHANGE"));
+    assert!(lifecycle_source.contains("WM_POWERBROADCAST"));
+    assert!(lifecycle_source.contains("WM_QUERYENDSESSION"));
+    assert!(lifecycle_source.contains("runtime.invalidate_all()"));
     assert!(!secret_input_source.contains("#[tauri::command]"));
     assert!(!secret_input_source.contains("impl Serialize"));
     assert!(!secret_input_source.contains("#[derive("));

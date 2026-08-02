@@ -36,6 +36,13 @@ not the sole future custody lock. `WalletRuntimeState` now acquires an independe
 Windows mutex during application setup, before Core resource setup, and holds it until teardown.
 No wallet command can access the runtime yet.
 
+The private runtime also owns a hidden Rust-only Windows notification window. Windows session lock,
+suspend/standby, logoff/shutdown, and native listener teardown synchronously lock the wallet session
+and revoke operations and recovery-path authorization. Listener registration must succeed during
+application setup; otherwise startup fails closed. Unlock and resume do not automatically restore
+wallet authority. The listener adds no WebView command, capability, direct network access, or
+polling loop.
+
 Lifecycle:
 
 1. Verify bundled Core manifest.

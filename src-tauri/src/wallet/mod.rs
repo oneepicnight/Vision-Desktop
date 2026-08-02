@@ -20,6 +20,8 @@ mod storage_security;
 mod submission;
 mod transaction;
 mod vault;
+#[cfg(windows)]
+mod windows_lifecycle;
 
 pub use account::VisionAccountIdentity;
 pub use contract::{
@@ -27,3 +29,5 @@ pub use contract::{
 };
 pub(crate) use runtime::WalletRuntimeState;
 pub use secrets::WalletSeed;
+#[cfg(windows)]
+pub(crate) use windows_lifecycle::WindowsWalletLifecycle;

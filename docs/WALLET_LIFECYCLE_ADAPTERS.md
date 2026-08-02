@@ -17,10 +17,13 @@ The first lifecycle supports one local, device-bound vault at:
 
 `%LOCALAPPDATA%\Vision\Desktop\wallet\wallet.vault.json`
 
-The path is derived inside Rust and is never supplied by React. Vault storage retains the existing
-create-new, no-overwrite, bounded-file, DPAPI, and verified Windows DACL protections. A missing
-vault is reported as a locked, uninitialized lifecycle. An existing invalid or insecure vault
-fails closed as unavailable.
+The path is resolved through Tauri's Windows Known Folder implementation for
+`FOLDERID_LocalAppData`; it does not trust the `LOCALAPPDATA` process environment variable and is
+never supplied by React. Startup rejects relative, UNC, verbatim/device, removable, remote, and
+non-fixed-volume roots, as well as any existing root component that is not a real directory or is
+a Windows reparse point. Vault storage retains the existing create-new, no-overwrite, bounded-file,
+DPAPI, and verified Windows DACL protections. A missing vault is reported as a locked,
+uninitialized lifecycle. An existing invalid or insecure vault fails closed as unavailable.
 
 The portable recovery file is different. Its destination or source must come from the existing
 main-window-parented native dialog flow and be redeemed by a matching two-minute, single-use,

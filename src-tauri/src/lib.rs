@@ -48,13 +48,16 @@ pub fn run() {
                 .map_err(|_| {
                     std::io::Error::other("secure wallet lifecycle monitoring is unavailable")
                 })?;
-                let wallet_adapters =
-                    wallet::WalletLifecycleAdapters::initialize(Arc::clone(&wallet_runtime))
-                        .map_err(|_| {
-                            std::io::Error::other(
-                                "secure wallet lifecycle adapters are unavailable",
-                            )
-                        })?;
+                let wallet_local_data = app.path().local_data_dir().map_err(|_| {
+                    std::io::Error::other("secure wallet storage location is unavailable")
+                })?;
+                let wallet_adapters = wallet::WalletLifecycleAdapters::initialize(
+                    Arc::clone(&wallet_runtime),
+                    &wallet_local_data,
+                )
+                .map_err(|_| {
+                    std::io::Error::other("secure wallet lifecycle adapters are unavailable")
+                })?;
                 if !app.manage(wallet_runtime) {
                     return Err(std::io::Error::other(
                         "secure wallet runtime state already exists",

@@ -15,10 +15,15 @@ use super::{
     vault::{load_vault, WalletVaultError},
 };
 use std::{
-    env, fmt,
-    path::PathBuf,
+    fmt,
+    os::windows::{ffi::OsStrExt, fs::MetadataExt},
+    path::{Component, Path, PathBuf, Prefix},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
+};
+use windows_sys::Win32::{
+    Storage::FileSystem::{GetDriveTypeW, FILE_ATTRIBUTE_REPARSE_POINT},
+    System::WindowsProgramming::DRIVE_FIXED,
 };
 
 const WALLET_DIRECTORY: &str = "wallet";
@@ -123,17 +128,22 @@ impl std::error::Error for WalletLifecycleError {}
 impl WalletLifecycleAdapters {
     pub(crate) fn initialize(
         runtime: Arc<WalletRuntimeState>,
+        local_app_data: &Path,
     ) -> Result<Self, WalletLifecycleError> {
-        let local_app_data = env::var_os("LOCALAPPDATA")
-            .filter(|value| !value.is_empty())
-            .ok_or(WalletLifecycleError::VaultStorageUnavailable)?;
+        validate_local_custody_root(local_app_data)?;
+        let vault_path = local_app_data
+            .join("Vision")
+            .join("Desktop")
+            .join(WALLET_DIRECTORY)
+            .join(WALLET_VAULT_FILE);
+        validate_local_custody_root(
+            vault_path
+                .parent()
+                .ok_or(WalletLifecycleError::VaultStorageUnavailable)?,
+        )?;
         Ok(Self {
             runtime,
-            vault_path: PathBuf::from(local_app_data)
-                .join("Vision")
-                .join("Desktop")
-                .join(WALLET_DIRECTORY)
-                .join(WALLET_VAULT_FILE),
+            vault_path,
         })
     }
 
@@ -332,6 +342,57 @@ impl WalletLifecycleAdapters {
             vault_path: vault_path.to_path_buf(),
         }
     }
+}
+
+fn validate_local_custody_root(path: &Path) -> Result<(), WalletLifecycleError> {
+    const MAX_WINDOWS_PATH_UNITS: usize = 32_767;
+
+    if path.as_os_str().is_empty()
+        || path.as_os_str().encode_wide().count() > MAX_WINDOWS_PATH_UNITS
+        || path.as_os_str().encode_wide().any(|unit| unit == 0)
+    {
+        return Err(WalletLifecycleError::VaultStorageUnavailable);
+    }
+    let mut components = path.components();
+    let drive = match components.next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(drive) => drive,
+            _ => return Err(WalletLifecycleError::VaultStorageUnavailable),
+        },
+        _ => return Err(WalletLifecycleError::VaultStorageUnavailable),
+    };
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return Err(WalletLifecycleError::VaultStorageUnavailable);
+    }
+    if components.any(|component| !matches!(component, Component::Normal(_))) {
+        return Err(WalletLifecycleError::VaultStorageUnavailable);
+    }
+
+    let drive_root = [u16::from(drive), u16::from(b':'), u16::from(b'\\'), 0];
+    // SAFETY: `drive_root` is a valid null-terminated UTF-16 drive-root path.
+    if unsafe { GetDriveTypeW(drive_root.as_ptr()) } != DRIVE_FIXED {
+        return Err(WalletLifecycleError::VaultStorageUnavailable);
+    }
+
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if !metadata.is_dir()
+                    || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                {
+                    return Err(WalletLifecycleError::VaultStorageUnavailable);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return Err(WalletLifecycleError::VaultStorageUnavailable),
+        }
+    }
+    Ok(())
 }
 
 fn now_unix_ms() -> Result<u64, WalletLifecycleError> {
@@ -664,6 +725,24 @@ mod tests {
             assert!(!error.to_string().contains('\\'));
             assert!(!error.to_string().contains(':'));
             assert!(!error.to_string().contains("retry"));
+        }
+    }
+
+    #[test]
+    fn custody_root_requires_a_fixed_local_absolute_non_reparse_path() {
+        let local_app_data = std::env::var_os("LOCALAPPDATA").unwrap();
+        validate_local_custody_root(Path::new(&local_app_data)).unwrap();
+
+        for rejected in [
+            PathBuf::from("relative"),
+            PathBuf::from(r"\\server\share\wallet"),
+            PathBuf::from(r"\\?\C:\wallet"),
+            PathBuf::from(r"C:\safe\..\wallet"),
+        ] {
+            assert_eq!(
+                validate_local_custody_root(&rejected),
+                Err(WalletLifecycleError::VaultStorageUnavailable)
+            );
         }
     }
 }

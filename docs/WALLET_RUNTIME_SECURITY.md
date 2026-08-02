@@ -152,7 +152,7 @@ service absence. Unlock and resume are tested as non-restoring events. The compl
 cryptographic and storage suite remains required.
 
 Private lifecycle tests additionally cover create-backup-verify-store ordering, restore to a new
-device-bound vault, address equality, locked completion, unlock and idempotent lock, restart
+current-user-protected local vault, address equality, locked completion, unlock and idempotent lock, restart
 metadata conservatism, non-overwrite behavior, single-use selection, stale-operation invalidation,
 and fixed non-disclosing failures.
 

@@ -13,7 +13,7 @@ runtime, and native-selection primitives before an IPC boundary is permitted to 
 
 ## Local storage contract
 
-The first lifecycle supports one local, device-bound vault at:
+The first lifecycle supports one local, current-user DPAPI-protected vault at:
 
 `%LOCALAPPDATA%\Vision\Desktop\wallet\wallet.vault.json`
 
@@ -55,7 +55,7 @@ Create performs these steps inside one main-window-owned exclusive runtime opera
 1. Prove that no local vault already exists.
 2. Consume the recovery-destination authorization before secret processing.
 3. Convert the bounded zeroizing secret inputs into Rust-only passwords.
-4. Generate the seed and separately encrypt the device vault and portable recovery artifact.
+4. Generate the seed and separately encrypt the current-user-protected local vault and portable recovery artifact.
 5. Store the recovery artifact with create-new semantics.
 6. Read it back through the bounded parser, decrypt it, and prove the same Vision identity.
 7. Store the local vault with create-new semantics.
@@ -69,7 +69,7 @@ finish, but create-new storage prevents replacement and the result remains locke
 ## Restore ordering
 
 Restore consumes a source token, loads and decrypts the original bounded recovery artifact, derives
-the same Vision account identity, encrypts a new device-bound vault under a new local password, and
+the same Vision account identity, encrypts a new current-user-protected vault under a new local password, and
 stores it with create-new semantics. The source recovery file is read only and is never changed or
 deleted. The local and recovery passwords must differ. Restore completes locked.
 

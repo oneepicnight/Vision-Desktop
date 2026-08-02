@@ -749,7 +749,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_device_bound_vault_round_trips_through_dpapi() {
+    fn windows_current_user_dpapi_vault_round_trips() {
         let seed = WalletSeed::from_bytes([0x3c; SEED_BYTES]);
         let password = password("correct horse battery staple");
         let vault = EncryptedWalletVault::encrypt("windows_wallet", 1, &seed, &password).unwrap();

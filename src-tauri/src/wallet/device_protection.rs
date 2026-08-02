@@ -131,6 +131,8 @@ mod windows_dpapi {
         let input = blob_from_slice(plaintext)?;
         let entropy_blob = blob_from_slice(entropy)?;
         let mut output = empty_blob();
+        // Deliberately use default current-user DPAPI scope. Machine-wide scope would allow any
+        // local account to unwrap this factor and would weaken per-user isolation.
         // SAFETY: both input blobs reference live Rust slices, all optional UI
         // pointers are null, and `output` is an initialized out structure.
         let protected = unsafe {
@@ -300,7 +302,7 @@ mod tests {
 
     #[test]
     fn windows_dpapi_round_trips_only_with_matching_entropy() {
-        let entropy = b"vision-wallet-device-binding-test";
+        let entropy = b"vision-wallet-current-user-dpapi-test";
         let protected = generate_and_protect(entropy).unwrap();
         let restored = unprotect(protected.algorithm, &protected.protected_bytes, entropy).unwrap();
         let matches = protected

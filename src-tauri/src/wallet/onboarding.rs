@@ -108,7 +108,7 @@ pub(in crate::wallet) fn prepare_new_wallet(
     )
 }
 
-/// Restores an existing portable recovery artifact into a new device-bound local vault.
+/// Restores an existing portable recovery artifact into a new current-user-protected local vault.
 /// The original recovery file is read only and is never replaced or deleted.
 pub(in crate::wallet) fn prepare_restored_wallet(
     recovery_path: &Path,
@@ -193,7 +193,7 @@ impl VerifiedWalletOnboarding {
         &self.metadata
     }
 
-    /// Stores the device-bound local vault only after backup verification.
+    /// Stores the current-user-protected local vault only after backup verification.
     /// The resulting public wallet remains locked by default.
     pub(in crate::wallet) fn store_local_vault(
         &mut self,
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_reads_original_backup_and_creates_a_new_locked_device_vault() {
+    fn restore_reads_original_backup_and_creates_a_new_locked_local_vault() {
         let directory = tempfile::tempdir().unwrap();
         let backup_path = directory.path().join("primary-recovery.json");
         let restored_vault_path = directory.path().join("restored").join("wallet.json");

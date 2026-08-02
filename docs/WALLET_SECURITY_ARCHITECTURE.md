@@ -49,7 +49,7 @@ The first encrypted vault foundation is implemented inside the Rust wallet modul
 
 - Argon2id password-based key derivation with fixed, validated cost parameters;
 - XChaCha20-Poly1305 authenticated encryption with a unique random salt and nonce for every vault;
-- a random device key protected for the current Windows user and machine by DPAPI, combined with the Argon2id password key so neither factor is sufficient alone;
+- a random local protection key wrapped by current-user DPAPI with authenticated optional entropy, combined with the Argon2id password key so neither factor is sufficient alone;
 - authenticated vault metadata so identifiers and cryptographic parameters cannot be altered silently;
 - encrypted-only, create-new file storage that never overwrites an existing vault, bounded file sizes, and corruption detection;
 - handle-bound Windows vault and recovery I/O that holds ancestor directories against rename, rejects reparse traversal, applies the vault DACL and performs non-replacing atomic publication through the staging handle, and avoids path-based deletion after failed writes;
@@ -81,7 +81,22 @@ revoke authority. Unlock and resume never restore authority automatically. `Secr
 bounded, zeroizing future Rust request representation. `docs/WALLET_RUNTIME_SECURITY.md` records
 the exact boundary.
 
-The internal vault schema is version 2 and is device-bound. Copying the local vault file to another Windows user or computer is intentionally insufficient for recovery. The internal portable recovery schema is version 1 and deliberately excludes the DPAPI device factor. Its tests prove that the encrypted artifact restores the exact original opaque seed and Vision account identity using only its recovery password. The approved onboarding policy requires a different recovery password of at least 16 bytes, never overwrites the selected destination, never creates arbitrary parent directories, reloads the stored artifact through a bounded regular-file parser, and withholds local-vault storage until the restored identity matches. The artifact has no Tauri command, frontend state, automatic export, clipboard path, or file-picker workflow. Portable backups rely on encryption rather than device-bound filesystem permissions so that offline recovery remains possible on another machine. Because a password-only artifact becomes an offline guessing target if stolen, the future UI must direct the user to an explicitly selected offline destination.
+The internal vault schema is version 2 and records the existing `windows_dpapi_current_user` protection algorithm. Copying the local vault file alone is insufficient for recovery: decryption also requires the wallet password and the DPAPI-protected local factor. The internal portable recovery schema is version 1 and deliberately excludes that factor. Its tests prove that the encrypted artifact restores the exact original opaque seed and Vision account identity using only its recovery password. The approved onboarding policy requires a different recovery password of at least 16 bytes, never overwrites the selected destination, never creates arbitrary parent directories, reloads the stored artifact through a bounded regular-file parser, and withholds local-vault storage until the restored identity matches. The artifact has no Tauri command, frontend state, automatic export, clipboard path, or file-picker workflow. Portable backups rely on encryption rather than local filesystem permissions so that offline recovery remains possible on another machine. Because a password-only artifact becomes an offline guessing target if stolen, the future UI must direct the user to an explicitly selected offline destination.
+
+### Windows DPAPI scope decision
+
+Vision Desktop calls `CryptProtectData` with its default current-user scope and does not request
+machine-wide scope. Microsoft documents that default DPAPI normally requires matching user logon
+credentials and usually the same computer, but explicitly identifies roaming profiles as an
+exception. Therefore version 2 is described as current-user DPAPI-protected, not guaranteed
+hardware- or device-bound. See Microsoft's
+[`CryptProtectData` documentation](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata).
+
+Machine-wide DPAPI is intentionally rejected: Microsoft documents that any user on that computer
+could then unwrap the DPAPI layer, which would weaken per-user isolation. Strict TPM-backed binding
+is not a version 2 activation requirement. Adding it later would require a new versioned vault
+format, hardware-availability and recovery policy, migration behavior, deterministic tests, and an
+independent review. No current code or documentation may claim that version 2 is hardware-bound.
 
 ## Recovery requirements
 

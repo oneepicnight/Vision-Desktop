@@ -34,7 +34,7 @@ The design protects:
 
 - the 32-byte Ed25519 wallet seed;
 - local and recovery passwords;
-- password-derived keys and the DPAPI-protected device factor;
+- password-derived keys and the current-user DPAPI-protected local factor;
 - decrypted vault contents and unlocked session state;
 - transaction signing authority;
 - selected recovery paths and short-lived path authorizations;
@@ -190,7 +190,7 @@ Behavior:
 - consumes the source token before secret work;
 - loads and decrypts the bounded artifact inside Rust;
 - derives the exact RC2 public identity;
-- creates a new device-bound vault without changing the seed;
+- creates a new current-user-protected local vault without changing the seed;
 - never overwrites an existing vault;
 - retains the original portable backup and returns locked public metadata;
 - never returns the artifact, seed, or selected source path.

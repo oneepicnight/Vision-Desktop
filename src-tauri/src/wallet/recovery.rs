@@ -31,7 +31,7 @@ const MAX_RECOVERY_PASSWORD_BYTES: usize = 1024;
 pub(in crate::wallet) const MAX_RECOVERY_JSON_BYTES: usize = 16 * 1024;
 
 /// Password-encrypted backup of a wallet seed that is intentionally independent
-/// of the local DPAPI-bound vault.
+/// of the local current-user DPAPI-protected vault.
 ///
 /// This type remains private to the Rust wallet module. It does not establish a
 /// mnemonic, frontend export UI, clipboard path, or automatic destination.

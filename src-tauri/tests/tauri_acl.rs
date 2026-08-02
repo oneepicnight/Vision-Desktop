@@ -250,6 +250,7 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let secure_filesystem_source = read("src/wallet/secure_filesystem.rs");
     let storage_security_source = read("src/wallet/storage_security.rs");
     let vault_source = read("src/wallet/vault.rs");
+    let device_protection_source = read("src/wallet/device_protection.rs");
     let secret_input_source = read("src/wallet/secret_input.rs");
     let capability_source = read("capabilities/main-desktop.json");
 
@@ -297,6 +298,8 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(vault_source.contains("storage_security::protect_open_file(&temporary)"));
     assert!(vault_source.contains("publish_open_file(&temporary, path)"));
     assert!(!vault_source.contains("fs::rename(&temporary_path, path)"));
+    assert!(device_protection_source.contains("windows_dpapi_current_user"));
+    assert!(!device_protection_source.contains("CRYPTPROTECT_LOCAL_MACHINE"));
     assert!(!wallet_adapter_source.contains("tauri::Window"));
     assert!(!wallet_adapter_source.contains("AppHandle"));
     assert!(wallet_adapter_source.contains("begin_operation"));

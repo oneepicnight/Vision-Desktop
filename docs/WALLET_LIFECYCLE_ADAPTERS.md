@@ -82,8 +82,11 @@ session locks and the operation fails closed. Backoff duration and filesystem de
 returned.
 
 Lock is idempotent. It synchronously drops the unlocked seed and invalidates active operations,
-pending native selections, and path authorizations before returning current public status. The
-existing five-minute idle lock and Windows lifecycle invalidation continue to apply.
+pending native selections, and path authorizations before returning only `{ locked: true }`. It
+does not inspect the vault or depend on storage status, so damaged or unavailable storage cannot
+turn a completed lock into a reported failure. Current account and storage information must be
+requested separately through status. The existing five-minute idle lock and Windows lifecycle
+invalidation continue to apply.
 
 ## Public metadata and restart behavior
 

@@ -38,6 +38,15 @@ pub struct WalletLifecycleStatus {
     pub account: Option<WalletAccountSummary>,
 }
 
+/// Storage-independent acknowledgement returned after explicit runtime invalidation.
+///
+/// Lock never needs to inspect the vault before confirming that Rust has dropped the active
+/// secret session and invalidated outstanding wallet authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalletLockResult {
+    pub locked: bool,
+}
+
 impl From<WalletPublicMetadata> for WalletAccountSummary {
     fn from(metadata: WalletPublicMetadata) -> Self {
         Self {
@@ -134,6 +143,12 @@ mod tests {
         }
         assert!(serialized.contains("\"label\":null"));
         assert!(serialized.contains("\"backup_verified\":null"));
+    }
+
+    #[test]
+    fn lock_result_serializes_only_the_storage_independent_acknowledgement() {
+        let serialized = serde_json::to_string(&WalletLockResult { locked: true }).unwrap();
+        assert_eq!(serialized, r#"{"locked":true}"#);
     }
 
     #[test]

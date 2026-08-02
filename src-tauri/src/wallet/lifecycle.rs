@@ -7,7 +7,7 @@
 )]
 
 use super::{
-    contract::WalletLifecycleStatus,
+    contract::{WalletLifecycleStatus, WalletLockResult},
     onboarding::{prepare_new_wallet, prepare_restored_wallet, WalletOnboardingError},
     runtime::{RecoveryPathPurpose, WalletOperationKind, WalletRuntimeError, WalletRuntimeState},
     secret_input::SecretInput,
@@ -322,9 +322,9 @@ impl WalletLifecycleAdapters {
         Ok(status)
     }
 
-    pub(in crate::wallet) fn lock(&self) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
+    pub(in crate::wallet) fn lock(&self) -> Result<WalletLockResult, WalletLifecycleError> {
         self.runtime.invalidate_all().map_err(map_runtime_error)?;
-        self.status()
+        Ok(WalletLockResult { locked: true })
     }
 
     fn require_vault_absent(&self) -> Result<(), WalletLifecycleError> {
@@ -690,6 +690,42 @@ mod tests {
         drop(operation);
         assert!(adapter.lock().unwrap().locked);
         assert!(adapter.lock().unwrap().locked);
+    }
+
+    #[test]
+    fn explicit_lock_succeeds_even_when_vault_status_is_unavailable() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup_path = directory.path().join("lock.vision-recovery.json");
+        let vault_path = directory.path().join("wallet").join(WALLET_VAULT_FILE);
+        let runtime = Arc::new(WalletRuntimeState::for_test());
+        let adapter = WalletLifecycleAdapters::for_test(Arc::clone(&runtime), &vault_path);
+        let token = selection_token(&runtime, RecoveryPathPurpose::Destination, &backup_path);
+        adapter
+            .create_at(
+                MAIN,
+                "lock-independent",
+                "Lock Independent",
+                token.as_str(),
+                secret(WALLET_PASSWORD),
+                secret(RECOVERY_PASSWORD),
+                1,
+            )
+            .unwrap();
+        assert!(
+            !adapter
+                .unlock(MAIN, secret(WALLET_PASSWORD))
+                .unwrap()
+                .locked
+        );
+
+        fs::write(&vault_path, b"damaged encrypted vault").unwrap();
+        assert_eq!(
+            adapter.status().unwrap_err(),
+            WalletLifecycleError::WalletUnavailable
+        );
+        assert_eq!(adapter.lock().unwrap(), WalletLockResult { locked: true });
+        assert!(runtime.lifecycle_status(true).unwrap().locked);
+        assert_eq!(adapter.lock().unwrap(), WalletLockResult { locked: true });
     }
 
     #[test]

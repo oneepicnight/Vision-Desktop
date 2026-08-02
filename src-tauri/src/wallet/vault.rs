@@ -9,8 +9,10 @@ use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(any(not(windows), test))]
+use std::fs;
 use std::{
-    fmt, fs,
+    fmt,
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -334,39 +336,121 @@ pub(in crate::wallet) fn store_new_vault(
     path: &Path,
     vault: &EncryptedWalletVault,
 ) -> Result<(), WalletVaultError> {
+    #[cfg(windows)]
+    return store_new_vault_windows(path, vault);
+
+    #[cfg(not(windows))]
+    {
+        let parent = path.parent().ok_or(WalletVaultError::StorageUnavailable)?;
+        fs::create_dir_all(parent).map_err(|_| WalletVaultError::StorageUnavailable)?;
+        storage_security::protect_directory(parent)?;
+        if path.exists() {
+            return Err(WalletVaultError::VaultAlreadyExists);
+        }
+
+        let encrypted_json = Zeroizing::new(vault.to_json()?);
+        let mut suffix = [0_u8; 16];
+        getrandom::fill(&mut suffix).map_err(|_| WalletVaultError::RandomSourceUnavailable)?;
+        let temporary_path = temporary_path(parent, &suffix);
+        let write_result = write_new_file(&temporary_path, encrypted_json.as_slice())
+            .and_then(|_| storage_security::protect_file(&temporary_path))
+            .and_then(|_| fs::hard_link(&temporary_path, path).map_err(map_storage_error))
+            .and_then(|_| storage_security::verify_file(path));
+        let _ = fs::remove_file(&temporary_path);
+        write_result
+    }
+}
+
+pub(in crate::wallet) fn load_vault(path: &Path) -> Result<EncryptedWalletVault, WalletVaultError> {
+    #[cfg(windows)]
+    return load_vault_windows(path);
+
+    #[cfg(not(windows))]
+    {
+        let parent = path.parent().ok_or(WalletVaultError::StorageUnavailable)?;
+        storage_security::verify_directory(parent)?;
+        storage_security::verify_file(path)?;
+        let link_metadata =
+            fs::symlink_metadata(path).map_err(|_| WalletVaultError::StorageUnavailable)?;
+        if link_metadata.file_type().is_symlink() {
+            return Err(WalletVaultError::StorageUnavailable);
+        }
+        let file = fs::File::open(path).map_err(|_| WalletVaultError::StorageUnavailable)?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| WalletVaultError::StorageUnavailable)?;
+        if !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_VAULT_JSON_BYTES as u64
+        {
+            return Err(WalletVaultError::InvalidOrUnsupportedFormat);
+        }
+        let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+        file.take(MAX_VAULT_JSON_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| WalletVaultError::StorageUnavailable)?;
+        if bytes.len() > MAX_VAULT_JSON_BYTES {
+            return Err(WalletVaultError::InvalidOrUnsupportedFormat);
+        }
+        EncryptedWalletVault::from_json(bytes.as_slice())
+    }
+}
+
+#[cfg(windows)]
+fn store_new_vault_windows(
+    path: &Path,
+    vault: &EncryptedWalletVault,
+) -> Result<(), WalletVaultError> {
+    use super::secure_filesystem::{
+        create_new_publishable_file, publish_open_file, rewind, DirectoryChainGuard,
+    };
+
     let parent = path.parent().ok_or(WalletVaultError::StorageUnavailable)?;
-    fs::create_dir_all(parent).map_err(|_| WalletVaultError::StorageUnavailable)?;
+    let _directories =
+        DirectoryChainGuard::ensure(parent).map_err(|_| WalletVaultError::StorageUnavailable)?;
     storage_security::protect_directory(parent)?;
     if path.exists() {
         return Err(WalletVaultError::VaultAlreadyExists);
     }
-
     let encrypted_json = Zeroizing::new(vault.to_json()?);
     let mut suffix = [0_u8; 16];
     getrandom::fill(&mut suffix).map_err(|_| WalletVaultError::RandomSourceUnavailable)?;
     let temporary_path = temporary_path(parent, &suffix);
-    let write_result = write_new_file(&temporary_path, encrypted_json.as_slice())
-        .and_then(|_| storage_security::protect_file(&temporary_path))
-        .and_then(|_| fs::hard_link(&temporary_path, path).map_err(map_storage_error))
-        .and_then(|_| storage_security::verify_file(path));
-    let _ = fs::remove_file(&temporary_path);
-    write_result
-}
-
-pub(in crate::wallet) fn load_vault(path: &Path) -> Result<EncryptedWalletVault, WalletVaultError> {
-    let parent = path.parent().ok_or(WalletVaultError::StorageUnavailable)?;
-    storage_security::verify_directory(parent)?;
-    storage_security::verify_file(path)?;
-    let link_metadata =
-        fs::symlink_metadata(path).map_err(|_| WalletVaultError::StorageUnavailable)?;
-    if link_metadata.file_type().is_symlink() {
+    let mut temporary = create_new_publishable_file(&temporary_path).map_err(map_storage_error)?;
+    storage_security::protect_open_file(&temporary)?;
+    temporary
+        .write_all(encrypted_json.as_slice())
+        .and_then(|_| temporary.sync_all())
+        .map_err(|_| WalletVaultError::StorageUnavailable)?;
+    storage_security::verify_open_file(&temporary)?;
+    publish_open_file(&temporary, path).map_err(map_storage_error)?;
+    storage_security::verify_open_file(&temporary)?;
+    rewind(&mut temporary).map_err(|_| WalletVaultError::StorageUnavailable)?;
+    let mut stored = Zeroizing::new(Vec::with_capacity(encrypted_json.len()));
+    temporary
+        .take(MAX_VAULT_JSON_BYTES as u64 + 1)
+        .read_to_end(&mut stored)
+        .map_err(|_| WalletVaultError::StorageUnavailable)?;
+    if stored.as_slice() != encrypted_json.as_slice() {
         return Err(WalletVaultError::StorageUnavailable);
     }
-    let file = fs::File::open(path).map_err(|_| WalletVaultError::StorageUnavailable)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn load_vault_windows(path: &Path) -> Result<EncryptedWalletVault, WalletVaultError> {
+    use super::secure_filesystem::{open_existing_file, DirectoryChainGuard};
+
+    let parent = path.parent().ok_or(WalletVaultError::StorageUnavailable)?;
+    let _directories = DirectoryChainGuard::open_existing(parent)
+        .map_err(|_| WalletVaultError::StorageUnavailable)?;
+    let file = open_existing_file(path).map_err(|_| WalletVaultError::StorageUnavailable)?;
+    storage_security::verify_directory(parent)?;
+    storage_security::verify_open_file(&file)?;
     let metadata = file
         .metadata()
         .map_err(|_| WalletVaultError::StorageUnavailable)?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_VAULT_JSON_BYTES as u64 {
+    if metadata.len() == 0 || metadata.len() > MAX_VAULT_JSON_BYTES as u64 {
         return Err(WalletVaultError::InvalidOrUnsupportedFormat);
     }
     let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
@@ -465,6 +549,7 @@ fn temporary_path(parent: &Path, suffix: &[u8; 16]) -> PathBuf {
     parent.join(format!(".wallet-vault-{}.tmp", hex::encode(suffix)))
 }
 
+#[cfg(not(windows))]
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), WalletVaultError> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);

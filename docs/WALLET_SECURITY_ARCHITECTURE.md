@@ -52,6 +52,7 @@ The first encrypted vault foundation is implemented inside the Rust wallet modul
 - a random device key protected for the current Windows user and machine by DPAPI, combined with the Argon2id password key so neither factor is sufficient alone;
 - authenticated vault metadata so identifiers and cryptographic parameters cannot be altered silently;
 - encrypted-only, create-new file storage that never overwrites an existing vault, bounded file sizes, and corruption detection;
+- handle-bound Windows vault and recovery I/O that holds ancestor directories against rename, rejects reparse traversal, applies the vault DACL and performs non-replacing atomic publication through the staging handle, and avoids path-based deletion after failed writes;
 - fail-closed storage permissions: Unix `0700` wallet directories and `0600` vault files; protected Windows DACLs granting full control only to the owner, SYSTEM, and local Administrators;
 - identical non-revealing errors for an incorrect password and damaged ciphertext;
 - Rust-only unlocked sessions with explicit lock and five-minute idle auto-lock enforcement before every secret operation;

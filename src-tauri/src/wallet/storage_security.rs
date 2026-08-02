@@ -1,4 +1,6 @@
 use super::vault::WalletVaultError;
+#[cfg(windows)]
+use std::fs::File;
 use std::path::Path;
 
 pub(in crate::wallet) fn protect_directory(path: &Path) -> Result<(), WalletVaultError> {
@@ -18,9 +20,23 @@ pub(in crate::wallet) fn verify_file(path: &Path) -> Result<(), WalletVaultError
 }
 
 #[cfg(windows)]
+pub(in crate::wallet) fn protect_open_file(file: &File) -> Result<(), WalletVaultError> {
+    platform::protect_handle(file, false)
+}
+
+#[cfg(windows)]
+pub(in crate::wallet) fn verify_open_file(file: &File) -> Result<(), WalletVaultError> {
+    platform::verify_handle(file, false)
+}
+
+#[cfg(windows)]
 mod platform {
     use super::*;
-    use std::{ffi::c_void, os::windows::ffi::OsStrExt, ptr};
+    use std::{
+        ffi::c_void,
+        os::windows::{ffi::OsStrExt, io::AsRawHandle},
+        ptr,
+    };
     use windows_sys::{
         core::PWSTR,
         Win32::{
@@ -29,7 +45,8 @@ mod platform {
                 Authorization::{
                     ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
                     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
-                    SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+                    GetSecurityInfo, SetNamedSecurityInfoW, SetSecurityInfo, SDDL_REVISION_1,
+                    SE_FILE_OBJECT,
                 },
                 GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACL,
                 DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
@@ -62,12 +79,49 @@ mod platform {
         verify_expected(path, directory, &current_user_sid)
     }
 
+    pub(super) fn protect_handle(file: &File, directory: bool) -> Result<(), WalletVaultError> {
+        let current_user_sid = current_user_sid_string()?;
+        let owner_sid = owner_sid_string_handle(file)?;
+        if owner_sid != current_user_sid {
+            return Err(WalletVaultError::StorageUnavailable);
+        }
+        let expected = expected_dacl(&current_user_sid, directory);
+        apply_dacl_handle(file, &expected)?;
+        verify_expected_handle(file, directory, &current_user_sid)
+    }
+
+    pub(super) fn verify_handle(file: &File, directory: bool) -> Result<(), WalletVaultError> {
+        let current_user_sid = current_user_sid_string()?;
+        let owner_sid = owner_sid_string_handle(file)?;
+        if owner_sid != current_user_sid {
+            return Err(WalletVaultError::StorageUnavailable);
+        }
+        verify_expected_handle(file, directory, &current_user_sid)
+    }
+
     fn verify_expected(
         path: &Path,
         directory: bool,
         owner_sid: &str,
     ) -> Result<(), WalletVaultError> {
         let actual = dacl_sddl(path)?;
+        verify_expected_sddl(&actual, directory, owner_sid)
+    }
+
+    fn verify_expected_handle(
+        file: &File,
+        directory: bool,
+        owner_sid: &str,
+    ) -> Result<(), WalletVaultError> {
+        let actual = dacl_sddl_handle(file)?;
+        verify_expected_sddl(&actual, directory, owner_sid)
+    }
+
+    fn verify_expected_sddl(
+        actual: &str,
+        directory: bool,
+        owner_sid: &str,
+    ) -> Result<(), WalletVaultError> {
         let inheritance = if directory { "OICI" } else { "" };
         let required = [
             format!("(A;{inheritance};FA;;;{owner_sid})"),
@@ -141,6 +195,54 @@ mod platform {
         Ok(())
     }
 
+    fn apply_dacl_handle(file: &File, sddl: &str) -> Result<(), WalletVaultError> {
+        let sddl_wide = null_terminated_wide(sddl);
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `sddl_wide` is a valid null-terminated UTF-16 buffer and
+        // `descriptor` is an initialized out pointer released by LocalFree.
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl_wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        if converted == 0 || descriptor.is_null() {
+            return Err(WalletVaultError::StorageUnavailable);
+        }
+        let descriptor_guard = LocalAllocation(descriptor);
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl: *mut ACL = ptr::null_mut();
+        // SAFETY: the descriptor is valid for the lifetime of `descriptor_guard`; output pointers
+        // reference initialized local variables.
+        let found = unsafe {
+            GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
+        };
+        if found == 0 || present == 0 || dacl.is_null() {
+            return Err(WalletVaultError::StorageUnavailable);
+        }
+        // SAFETY: `file` owns a valid handle opened with WRITE_DAC and `dacl` remains owned by the
+        // descriptor allocation for the duration of the call.
+        let result = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle().cast(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                dacl,
+                ptr::null_mut(),
+            )
+        };
+        drop(descriptor_guard);
+        if result != ERROR_SUCCESS {
+            return Err(WalletVaultError::StorageUnavailable);
+        }
+        Ok(())
+    }
+
     fn owner_sid_string(path: &Path) -> Result<String, WalletVaultError> {
         let path_wide = path_wide(path)?;
         let mut owner: PSID = ptr::null_mut();
@@ -166,6 +268,41 @@ mod platform {
         let mut sid_wide: PWSTR = ptr::null_mut();
         // SAFETY: `owner` points inside `descriptor_guard`; `sid_wide` is an
         // initialized out pointer whose result is released by LocalFree.
+        let converted = unsafe { ConvertSidToStringSidW(owner, &mut sid_wide) };
+        if converted == 0 || sid_wide.is_null() {
+            return Err(WalletVaultError::StorageUnavailable);
+        }
+        let sid_guard = LocalAllocation(sid_wide.cast());
+        let sid = wide_pointer_to_string(sid_wide)?;
+        drop(sid_guard);
+        drop(descriptor_guard);
+        Ok(sid)
+    }
+
+    fn owner_sid_string_handle(file: &File) -> Result<String, WalletVaultError> {
+        let mut owner: PSID = ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `file` owns a valid handle opened with READ_CONTROL and each supplied output
+        // pointer references initialized local storage.
+        let result = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle().cast(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if result != ERROR_SUCCESS || owner.is_null() || descriptor.is_null() {
+            return Err(WalletVaultError::StorageUnavailable);
+        }
+        let descriptor_guard = LocalAllocation(descriptor);
+        let mut sid_wide: PWSTR = ptr::null_mut();
+        // SAFETY: `owner` points inside `descriptor_guard`; `sid_wide` is an initialized output
+        // pointer whose result is released by LocalFree.
         let converted = unsafe { ConvertSidToStringSidW(owner, &mut sid_wide) };
         if converted == 0 || sid_wide.is_null() {
             return Err(WalletVaultError::StorageUnavailable);
@@ -277,6 +414,56 @@ mod platform {
         }
         // SAFETY: the API reports `length` UTF-16 units and the allocation
         // remains alive through `sddl_guard`.
+        let units = unsafe { std::slice::from_raw_parts(sddl_wide, length) };
+        let sddl = String::from_utf16(units).map_err(|_| WalletVaultError::StorageUnavailable)?;
+        drop(sddl_guard);
+        drop(descriptor_guard);
+        Ok(sddl)
+    }
+
+    fn dacl_sddl_handle(file: &File) -> Result<String, WalletVaultError> {
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `file` owns a valid handle opened with READ_CONTROL and the descriptor output
+        // pointer references initialized local storage.
+        let result = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle().cast(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if result != ERROR_SUCCESS || descriptor.is_null() {
+            return Err(WalletVaultError::StorageUnavailable);
+        }
+        let descriptor_guard = LocalAllocation(descriptor);
+        let mut sddl_wide: PWSTR = ptr::null_mut();
+        let mut length = 0_u32;
+        // SAFETY: `descriptor` remains valid through `descriptor_guard`; output pointers reference
+        // initialized local storage.
+        let converted = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut sddl_wide,
+                &mut length,
+            )
+        };
+        if converted == 0 || sddl_wide.is_null() || length == 0 {
+            return Err(WalletVaultError::StorageUnavailable);
+        }
+        let sddl_guard = LocalAllocation(sddl_wide.cast());
+        let length = usize::try_from(length).map_err(|_| WalletVaultError::StorageUnavailable)?;
+        if length > MAX_WINDOWS_SECURITY_STRING_UNITS {
+            return Err(WalletVaultError::StorageUnavailable);
+        }
+        // SAFETY: the API reports `length` UTF-16 units and the allocation remains alive through
+        // `sddl_guard`.
         let units = unsafe { std::slice::from_raw_parts(sddl_wide, length) };
         let sddl = String::from_utf16(units).map_err(|_| WalletVaultError::StorageUnavailable)?;
         drop(sddl_guard);

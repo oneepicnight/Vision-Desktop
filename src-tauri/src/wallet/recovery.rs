@@ -5,8 +5,10 @@ use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(not(windows))]
+use std::fs;
 use std::{
-    fmt, fs,
+    fmt,
     io::{Read, Write},
     path::Path,
 };
@@ -107,45 +109,107 @@ pub(in crate::wallet) fn store_new_recovery_artifact(
     path: &Path,
     artifact: &PortableRecoveryArtifact,
 ) -> Result<(), RecoveryArtifactError> {
-    let parent = path
-        .parent()
-        .ok_or(RecoveryArtifactError::StorageUnavailable)?;
-    let parent_metadata =
-        fs::symlink_metadata(parent).map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
-    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
-        return Err(RecoveryArtifactError::StorageUnavailable);
+    #[cfg(windows)]
+    return store_new_recovery_artifact_windows(path, artifact);
+
+    #[cfg(not(windows))]
+    {
+        let parent = path
+            .parent()
+            .ok_or(RecoveryArtifactError::StorageUnavailable)?;
+        let parent_metadata =
+            fs::symlink_metadata(parent).map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
+        if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+            return Err(RecoveryArtifactError::StorageUnavailable);
+        }
+        let bytes = Zeroizing::new(artifact.to_json()?);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = options.open(path).map_err(map_storage_error)?;
+        let result = file
+            .write_all(bytes.as_slice())
+            .and_then(|_| file.sync_all())
+            .map_err(|_| RecoveryArtifactError::StorageUnavailable);
+        if result.is_err() {
+            let _ = fs::remove_file(path);
+        }
+        result
     }
-    let bytes = Zeroizing::new(artifact.to_json()?);
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    let mut file = options.open(path).map_err(map_storage_error)?;
-    let result = file
-        .write_all(bytes.as_slice())
-        .and_then(|_| file.sync_all())
-        .map_err(|_| RecoveryArtifactError::StorageUnavailable);
-    if result.is_err() {
-        let _ = fs::remove_file(path);
-    }
-    result
 }
 
 /// Loads only a bounded, regular encrypted artifact from the selected path.
 pub(in crate::wallet) fn load_recovery_artifact(
     path: &Path,
 ) -> Result<PortableRecoveryArtifact, RecoveryArtifactError> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > MAX_RECOVERY_JSON_BYTES as u64
+    #[cfg(windows)]
+    return load_recovery_artifact_windows(path);
+
+    #[cfg(not(windows))]
     {
+        let metadata =
+            fs::symlink_metadata(path).map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_RECOVERY_JSON_BYTES as u64
+        {
+            return Err(RecoveryArtifactError::InvalidOrUnsupportedFormat);
+        }
+        let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+        fs::File::open(path)
+            .map_err(|_| RecoveryArtifactError::StorageUnavailable)?
+            .take(MAX_RECOVERY_JSON_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
+        if bytes.len() > MAX_RECOVERY_JSON_BYTES {
+            return Err(RecoveryArtifactError::InvalidOrUnsupportedFormat);
+        }
+        PortableRecoveryArtifact::from_json(bytes.as_slice())
+    }
+}
+
+#[cfg(windows)]
+fn store_new_recovery_artifact_windows(
+    path: &Path,
+    artifact: &PortableRecoveryArtifact,
+) -> Result<(), RecoveryArtifactError> {
+    use super::secure_filesystem::{create_new_file, DirectoryChainGuard};
+
+    let parent = path
+        .parent()
+        .ok_or(RecoveryArtifactError::StorageUnavailable)?;
+    let _directories = DirectoryChainGuard::open_existing(parent)
+        .map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
+    let bytes = Zeroizing::new(artifact.to_json()?);
+    let mut file = create_new_file(path).map_err(map_storage_error)?;
+    // A failed or interrupted write intentionally leaves the non-overwriting partial artifact in
+    // place. Removing it by path after releasing the validated handle would reintroduce a
+    // substitution race; the operator can select a different new destination.
+    file.write_all(bytes.as_slice())
+        .and_then(|_| file.sync_all())
+        .map_err(|_| RecoveryArtifactError::StorageUnavailable)
+}
+
+#[cfg(windows)]
+fn load_recovery_artifact_windows(
+    path: &Path,
+) -> Result<PortableRecoveryArtifact, RecoveryArtifactError> {
+    use super::secure_filesystem::{open_existing_file, DirectoryChainGuard};
+
+    let parent = path
+        .parent()
+        .ok_or(RecoveryArtifactError::StorageUnavailable)?;
+    let _directories = DirectoryChainGuard::open_existing(parent)
+        .map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
+    let file = open_existing_file(path).map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
+    if metadata.len() == 0 || metadata.len() > MAX_RECOVERY_JSON_BYTES as u64 {
         return Err(RecoveryArtifactError::InvalidOrUnsupportedFormat);
     }
     let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
-    fs::File::open(path)
-        .map_err(|_| RecoveryArtifactError::StorageUnavailable)?
-        .take(MAX_RECOVERY_JSON_BYTES as u64 + 1)
+    file.take(MAX_RECOVERY_JSON_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| RecoveryArtifactError::StorageUnavailable)?;
     if bytes.len() > MAX_RECOVERY_JSON_BYTES {

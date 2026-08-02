@@ -247,6 +247,9 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let lifecycle_source = read("src/wallet/windows_lifecycle.rs");
     let recovery_selection_source = read("src/wallet/recovery_selection.rs");
     let wallet_adapter_source = read("src/wallet/lifecycle.rs");
+    let secure_filesystem_source = read("src/wallet/secure_filesystem.rs");
+    let storage_security_source = read("src/wallet/storage_security.rs");
+    let vault_source = read("src/wallet/vault.rs");
     let secret_input_source = read("src/wallet/secret_input.rs");
     let capability_source = read("capabilities/main-desktop.json");
 
@@ -283,6 +286,17 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(lifecycle_source.contains("runtime.invalidate_all()"));
     assert!(!recovery_selection_source.contains("#[tauri::command]"));
     assert!(!wallet_adapter_source.contains("#[tauri::command]"));
+    assert!(!secure_filesystem_source.contains("#[tauri::command]"));
+    assert!(secure_filesystem_source.contains("FILE_FLAG_OPEN_REPARSE_POINT"));
+    assert!(secure_filesystem_source.contains("SetFileInformationByHandle"));
+    assert!(secure_filesystem_source.contains("FileRenameInfo"));
+    assert!(secure_filesystem_source.contains(".share_mode(FILE_SHARE_READ)"));
+    assert!(secure_filesystem_source.contains("share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)"));
+    assert!(storage_security_source.contains("SetSecurityInfo"));
+    assert!(storage_security_source.contains("GetSecurityInfo"));
+    assert!(vault_source.contains("storage_security::protect_open_file(&temporary)"));
+    assert!(vault_source.contains("publish_open_file(&temporary, path)"));
+    assert!(!vault_source.contains("fs::rename(&temporary_path, path)"));
     assert!(!wallet_adapter_source.contains("tauri::Window"));
     assert!(!wallet_adapter_source.contains("AppHandle"));
     assert!(wallet_adapter_source.contains("begin_operation"));

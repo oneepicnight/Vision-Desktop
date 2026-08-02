@@ -19,6 +19,8 @@ mod recovery_selection;
 mod runtime;
 mod secret_input;
 mod secrets;
+#[cfg(windows)]
+mod secure_filesystem;
 mod session;
 mod storage_security;
 mod submission;

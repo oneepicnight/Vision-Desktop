@@ -29,6 +29,25 @@ The portable recovery file is different. Its destination or source must come fro
 main-window-parented native dialog flow and be redeemed by a matching two-minute, single-use,
 purpose-bound token. The lifecycle never receives a raw frontend path.
 
+On Windows, vault and recovery operations now hold every ancestor directory open without delete
+sharing for the duration of the operation. Each final file is opened with reparse traversal
+disabled, validated from its handle, and read or written through that same handle. Vault
+publication uses a random encrypted temporary file whose handle denies delete and write sharing.
+The restrictive DACL, atomic non-replacing rename, and exact encrypted-byte read-back all operate
+through that same handle. A pathname cannot redirect which staging file is published, and an
+existing vault destination cannot be replaced.
+
+If a vault write fails before publication, a randomly named encrypted staging file may remain in
+the protected wallet directory. The writer deliberately does not delete it by pathname after
+releasing its validated handle. It is never treated as the canonical vault and contains only the
+already-encrypted vault envelope.
+
+If a recovery write fails or the process stops during it, a partial encrypted destination may
+remain. The writer deliberately does not delete that file by path after releasing its validated
+handle because doing so would create a substitution/deletion race. Existing destinations are never
+reused; the operator must choose a different new destination or deliberately remove the failed
+artifact outside the wallet flow.
+
 ## Create ordering
 
 Create performs these steps inside one main-window-owned exclusive runtime operation:
@@ -44,8 +63,8 @@ Create performs these steps inside one main-window-owned exclusive runtime opera
 
 The adapter checks its operation generation around every sensitive stage and every filesystem
 write. Session lock, suspend, main-window loss, explicit invalidation, or stale work prevents later
-stages from being accepted. A narrow race may allow an already-entered atomic file write to finish,
-but create-new storage prevents replacement and the result remains locked and inaccessible.
+stages from being accepted. A narrow race may allow an already-entered handle-bound write to
+finish, but create-new storage prevents replacement and the result remains locked and inaccessible.
 
 ## Restore ordering
 

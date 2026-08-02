@@ -66,14 +66,16 @@ The activity journal is append-only, versioned, wallet-bound, sequence-checked, 
 
 No wallet creation, recovery, unlock, user-facing signing, or send command is registered with Tauri yet. Before custody is enabled for users, the remaining vault work includes:
 
-- reviewed native-dialog path selection and private create/restore/unlock/lock adapters;
+- private create/restore/unlock/lock adapters behind the existing activation gates;
 - versioned migration with backup-before-upgrade behavior;
 - user-facing save-location selection and explicit offline-storage guidance without clipboard or automatic cloud behavior;
 - an independent cryptographic review.
 
 The private Rust runtime now exists without registered commands. It owns the existing session, an
 independent Windows kernel wallet mutex, main-window operation exclusion, generation-safe permits,
-and one short-lived recovery authorization. Page load/reload, main-window close/destruction,
+one generation-bound pending native selection, and one short-lived recovery authorization. The
+Rust-only native save/open adapters validate local non-reparse Windows paths and never return paths
+to React; no wallet command exposes them. Page load/reload, main-window close/destruction,
 Windows session lock, suspend/standby, logoff/shutdown, teardown, and mutex poison synchronously
 revoke authority. Unlock and resume never restore authority automatically. `SecretInput` provides a
 bounded, zeroizing future Rust request representation. `docs/WALLET_RUNTIME_SECURITY.md` records

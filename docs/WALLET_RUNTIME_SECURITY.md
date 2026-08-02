@@ -4,8 +4,9 @@
 
 Vision Desktop now creates a private Rust `WalletRuntimeState` during Windows application setup.
 It is not a wallet feature activation: no wallet command is registered, no capability grants wallet
-access, no frontend service calls it, no password form exists, and the native dialog plugin remains
-uninitialized.
+access, no frontend service calls it, and no password form exists. The pinned native dialog plugin
+is initialized on Windows for private Rust use, but no dialog or wallet permission is granted to
+the WebView and no wallet command can invoke it yet.
 
 The runtime exists so lifecycle and exclusion controls are established before any secret-bearing
 command is designed or exposed.
@@ -64,16 +65,32 @@ This bounds the Rust-owned command value but cannot erase copies created by Java
 or the upstream JSON parser. Frontend custody remains disabled until isolated password forms and
 immediate clearing receive independent review.
 
-## Recovery authorization framework
+## Recovery selection and authorization
 
-The runtime can hold one Rust-only recovery path authorization in preparation for native dialogs.
-It uses a random 256-bit opaque token, a two-minute monotonic expiry, exact main-window and
-destination/source purpose binding, single-use removal, fixed-size token validation, and zeroizing
-token buffers. Issuing a replacement revokes the prior authorization.
+The pinned native dialog plugin is initialized after single-instance enforcement and before
+application setup. Private Rust adapters create parented save/open dialogs for the exact `main`
+window. The dialog JavaScript package is absent, the main-window capability grants no dialog
+permission, `coreApi.ts` has no wallet wrapper, and no recovery-selection or wallet command is
+registered. React therefore cannot open these dialogs or receive a selected path in this release.
 
-No dialog or path-selection command exists in this change. No path or token crosses Tauri. The next
-native-dialog slice must validate the selected local path before storing it here and must return
-only the opaque token to the reviewed main-window command.
+Destination and source adapters accept only the plugin's native `FilePath::Path` result. URI forms,
+UNC paths, verbatim/device paths, relative paths, parent traversal, alternate data streams, and any
+directory chain containing a Windows reparse point are rejected. Destinations are normalized to
+the exact `.vision-recovery.json` suffix and must not exist. Sources must already be nonempty,
+bounded regular files with that exact suffix. The final recovery writer still uses create-new
+storage, and the parser repeats its own bounded regular-file validation, so dialog validation is
+not the sole filesystem defense.
+
+Opening a selection revokes any older path authorization and reserves one generation-bound pending
+selection. Wallet operations and overlapping dialogs are excluded until completion or cancellation.
+Late callbacks, window/session invalidation, and stale permits cannot authorize a path or clear a
+newer selection.
+
+After validation, the runtime stores the path only in Rust and produces a random 256-bit opaque
+token with a two-minute monotonic expiry, exact main-window and destination/source purpose binding,
+single-use removal, fixed-size validation, and zeroizing token buffers. Cancellation clears pending
+authority and returns a fixed error. No selected path or token crosses Tauri yet; a future reviewed
+main-window command may return only the opaque token, never the path.
 
 ## Lifecycle invalidation
 
@@ -112,6 +129,10 @@ The internal runtime uses fixed codes and operator-safe messages only:
 - `secure_random_unavailable`
 - `path_authorization_invalid`
 - `path_authorization_expired`
+- `recovery_selection_cancelled`
+- `recovery_destination_invalid`
+- `recovery_destination_exists`
+- `recovery_source_invalid`
 
 Errors contain no path, token, password, wallet material, operating-system detail, or backoff state.
 

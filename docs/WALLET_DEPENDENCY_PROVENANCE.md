@@ -2,7 +2,7 @@
 
 ## Status
 
-This record began as dependency admission. The single-instance crate is now initialized on Windows as the first plugin, while the dialog crate remains uninitialized. No JavaScript package, Tauri capability, wallet command, file dialog, or frontend wallet behavior is enabled.
+This record began as dependency admission. The single-instance crate is initialized on Windows as the first plugin, followed by the dialog crate for private Rust-only recovery selection. No JavaScript package, Tauri capability permission, wallet command, frontend-accessible file dialog, or frontend wallet behavior is enabled.
 
 ## Admission record
 
@@ -34,9 +34,9 @@ Official references:
 - The dialog crate disables its default Linux GTK feature because the admitted target is Windows.
 - The dialog JavaScript package is absent from `package.json` and `package-lock.json`.
 - The single-instance plugin is initialized first in `src-tauri/src/lib.rs`; duplicate-launch arguments and working directories are discarded, and only the existing `main` window is restored and focused.
-- The dialog plugin remains uninitialized.
+- The dialog plugin is initialized only after single-instance enforcement. Private Rust adapters use it for main-window-parented recovery destination/source selection.
 - No dialog or single-instance permission is granted to a WebView.
-- No application capability file, wallet Tauri command, or frontend service wrapper is added.
+- No application capability is expanded, and no wallet Tauri command or frontend service wrapper is added.
 - Cargo registry checksums are committed in `src-tauri/Cargo.lock` and must remain part of release verification.
 
 Cargo added 47 lockfile entries for the plugins' complete cross-platform resolution graph. The Windows build uses a smaller target-specific subset, but all locked packages remain part of the reviewed supply-chain surface.
@@ -45,14 +45,14 @@ The `Rust dependency audit` GitHub Actions workflow installs exact `cargo-audit 
 
 The admission-time scan on 2026-08-01 loaded 1,178 RustSec advisories and reported no known vulnerability or yanked crate. It reported 18 warnings: 16 unmaintained GTK/Unicode/macro dependencies, the direct unmaintained `bincode 1.3.3`, and `RUSTSEC-2024-0429` for Linux GTK `glib 0.18.5`. The GTK warning applies to cross-platform packages retained in the lockfile and not built into the Windows target. `bincode 1.3.3` is currently pinned to the verified Vision-Core RC2 transaction serialization contract; replacing it requires a separate Core compatibility decision and exact-vector validation. No warning is hidden or placed on an ignore list.
 
-## Deferred review
+## Initialization review
 
 Single-instance initialization completed with source-contract, lifecycle, ordinary duplicate-launch,
 forced-termination recovery, and 12-process burst tests. Source review also identified a narrow
 Windows mutex/receiver startup interval, so the plugin is not accepted as the sole future custody
-lock. Before native dialog initialization occurs, review must still prove:
+lock. Native dialog initialization now proves:
 
-1. The native dialog plugin is invoked only from Rust application commands; its JavaScript package and WebView permissions remain absent.
-2. Selected recovery paths remain in Rust and are represented to the WebView only by short-lived, single-use, window-bound opaque tokens.
-3. Application shutdown, window destruction, cancellation, and dialog-plugin failure preserve fail-closed wallet locking.
+1. The native dialog plugin is reachable only from private Rust adapters; its JavaScript package and WebView permissions remain absent, and no wallet command is registered.
+2. Selected recovery paths remain in Rust; any future reviewed WebView response is limited to a short-lived, single-use, window-bound opaque token.
+3. Application shutdown, window destruction, cancellation, and stale dialog completion preserve fail-closed wallet locking. A plugin callback that never returns can retain only a pending, non-signing selection until lifecycle invalidation; it grants no path authority.
 4. The complete dependency tree and registry checksums receive release-time vulnerability and provenance review in addition to the automated CI gate.

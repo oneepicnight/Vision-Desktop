@@ -26,7 +26,7 @@ const SEED_BYTES: usize = 32;
 const AUTH_TAG_BYTES: usize = 16;
 const MIN_RECOVERY_PASSWORD_BYTES: usize = 16;
 const MAX_RECOVERY_PASSWORD_BYTES: usize = 1024;
-const MAX_RECOVERY_JSON_BYTES: usize = 16 * 1024;
+pub(in crate::wallet) const MAX_RECOVERY_JSON_BYTES: usize = 16 * 1024;
 
 /// Password-encrypted backup of a wallet seed that is intentionally independent
 /// of the local DPAPI-bound vault.

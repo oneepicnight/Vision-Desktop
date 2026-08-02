@@ -177,14 +177,16 @@ fn tauri_config_selects_only_the_explicit_main_window_capability() {
 }
 
 #[test]
-fn single_instance_is_first_and_plugins_remain_unpermissioned() {
+fn single_instance_is_first_and_native_plugins_remain_unpermissioned() {
     let lib_source = read("src/lib.rs");
     let capability_source = read("capabilities/main-desktop.json");
 
-    assert!(!lib_source.contains("tauri_plugin_dialog"));
     let single_instance = lib_source
         .find(".plugin(tauri_plugin_single_instance::init(")
         .expect("single-instance plugin is initialized");
+    let dialog = lib_source
+        .find(".plugin(tauri_plugin_dialog::init())")
+        .expect("native dialog plugin is initialized");
     let managed_state = lib_source
         .find(".manage(SupervisorState::default())")
         .expect("supervisor state is managed");
@@ -196,11 +198,21 @@ fn single_instance_is_first_and_plugins_remain_unpermissioned() {
         .expect("invoke handler exists");
 
     assert!(single_instance < managed_state);
+    assert!(single_instance < dialog);
     assert!(single_instance < setup);
     assert!(single_instance < invoke_handler);
+    assert!(dialog < managed_state);
+    assert!(dialog < setup);
+    assert!(dialog < invoke_handler);
     assert_eq!(
         lib_source
             .match_indices(".plugin(tauri_plugin_single_instance::init(")
+            .count(),
+        1
+    );
+    assert_eq!(
+        lib_source
+            .match_indices(".plugin(tauri_plugin_dialog::init())")
             .count(),
         1
     );
@@ -233,6 +245,7 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let lib_source = read("src/lib.rs");
     let runtime_source = read("src/wallet/runtime.rs");
     let lifecycle_source = read("src/wallet/windows_lifecycle.rs");
+    let recovery_selection_source = read("src/wallet/recovery_selection.rs");
     let secret_input_source = read("src/wallet/secret_input.rs");
     let capability_source = read("capabilities/main-desktop.json");
 
@@ -251,11 +264,21 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(lifecycle_source.contains("WM_POWERBROADCAST"));
     assert!(lifecycle_source.contains("WM_QUERYENDSESSION"));
     assert!(lifecycle_source.contains("runtime.invalidate_all()"));
+    assert!(!recovery_selection_source.contains("#[tauri::command]"));
+    assert!(!recovery_selection_source.contains("into_path()"));
+    assert!(recovery_selection_source.contains("Some(FilePath::Path(path))"));
+    assert!(recovery_selection_source.contains(".set_parent(window)"));
+    assert!(recovery_selection_source.contains("FILE_ATTRIBUTE_REPARSE_POINT"));
+    assert!(recovery_selection_source.contains("begin_recovery_path_selection"));
+    assert!(recovery_selection_source.contains("complete_recovery_path_selection"));
+    assert!(recovery_selection_source.contains("cancel_recovery_path_selection"));
     assert!(!secret_input_source.contains("#[tauri::command]"));
     assert!(!secret_input_source.contains("impl Serialize"));
     assert!(!secret_input_source.contains("#[derive("));
     assert!(!secret_input_source.contains("impl Clone"));
     assert!(!secret_input_source.contains("impl fmt::Debug"));
     assert!(!capability_source.contains("wallet"));
+    assert!(!capability_source.contains("dialog:"));
     assert!(!read("../src/services/coreApi.ts").contains("wallet_"));
+    assert!(!read("../package.json").contains("@tauri-apps/plugin-dialog"));
 }

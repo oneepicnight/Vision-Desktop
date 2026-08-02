@@ -310,10 +310,12 @@ mod tests {
             runtime.invalidate_all().unwrap();
         }
 
+        let permit = runtime
+            .begin_recovery_path_selection("main", RecoveryPathPurpose::Source)
+            .unwrap();
         let token = runtime
-            .authorize_recovery_path(
-                "main",
-                RecoveryPathPurpose::Source,
+            .complete_recovery_path_selection(
+                permit,
                 PathBuf::from(r"C:\wallet\backup.vision-recovery.json"),
             )
             .unwrap();

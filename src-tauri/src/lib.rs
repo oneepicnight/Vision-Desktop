@@ -28,6 +28,11 @@ pub fn run() {
         },
     ));
 
+    // Native recovery selection is invoked only by private Rust adapters. The main-window
+    // capability grants no dialog plugin command to the WebView.
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_dialog::init());
+
     builder
         .manage(SupervisorState::default())
         .setup(|app| {

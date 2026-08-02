@@ -34,6 +34,7 @@ struct WalletRuntimeInner {
     started_at: Instant,
     session: WalletSession,
     active_operation: Option<ActiveOperation>,
+    pending_path_selection: Option<PendingPathSelection>,
     path_authorization: Option<PathAuthorization>,
     next_generation: u64,
 }
@@ -42,6 +43,12 @@ struct ActiveOperation {
     generation: u64,
     owner_window: String,
     _kind: WalletOperationKind,
+}
+
+struct PendingPathSelection {
+    generation: u64,
+    owner_window: String,
+    purpose: RecoveryPathPurpose,
 }
 
 struct PathAuthorization {
@@ -63,6 +70,12 @@ pub(in crate::wallet) struct WalletOperationPermit<'a> {
 }
 
 pub(in crate::wallet) struct RecoveryPathToken(Zeroizing<String>);
+
+pub(in crate::wallet) struct RecoverySelectionPermit {
+    generation: u64,
+    owner_window: String,
+    purpose: RecoveryPathPurpose,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::wallet) enum WalletOperationKind {
@@ -88,6 +101,10 @@ pub(crate) enum WalletRuntimeError {
     SecureRandomUnavailable,
     PathAuthorizationInvalid,
     PathAuthorizationExpired,
+    RecoverySelectionCancelled,
+    RecoveryDestinationInvalid,
+    RecoveryDestinationExists,
+    RecoverySourceInvalid,
 }
 
 impl WalletRuntimeError {
@@ -101,6 +118,10 @@ impl WalletRuntimeError {
             Self::SecureRandomUnavailable => "secure_random_unavailable",
             Self::PathAuthorizationInvalid => "path_authorization_invalid",
             Self::PathAuthorizationExpired => "path_authorization_expired",
+            Self::RecoverySelectionCancelled => "recovery_selection_cancelled",
+            Self::RecoveryDestinationInvalid => "recovery_destination_invalid",
+            Self::RecoveryDestinationExists => "recovery_destination_exists",
+            Self::RecoverySourceInvalid => "recovery_source_invalid",
         }
     }
 }
@@ -116,6 +137,10 @@ impl fmt::Display for WalletRuntimeError {
             Self::SecureRandomUnavailable => "secure operating-system randomness is unavailable",
             Self::PathAuthorizationInvalid => "recovery selection is invalid",
             Self::PathAuthorizationExpired => "recovery selection has expired",
+            Self::RecoverySelectionCancelled => "recovery selection was cancelled",
+            Self::RecoveryDestinationInvalid => "recovery destination is invalid",
+            Self::RecoveryDestinationExists => "recovery destination already exists",
+            Self::RecoverySourceInvalid => "recovery source is invalid",
         })
     }
 }
@@ -133,6 +158,7 @@ impl WalletRuntimeState {
                 started_at: Instant::now(),
                 session: WalletSession::new(),
                 active_operation: None,
+                pending_path_selection: None,
                 path_authorization: None,
                 next_generation: 0,
             }),
@@ -147,7 +173,7 @@ impl WalletRuntimeState {
     ) -> Result<WalletOperationPermit<'_>, WalletRuntimeError> {
         require_main_window(owner_window)?;
         let mut inner = self.lock_inner()?;
-        if inner.active_operation.is_some() {
+        if inner.active_operation.is_some() || inner.pending_path_selection.is_some() {
             return Err(WalletRuntimeError::OperationInProgress);
         }
         inner.next_generation = inner.next_generation.wrapping_add(1).max(1);
@@ -164,44 +190,97 @@ impl WalletRuntimeState {
         })
     }
 
-    pub(in crate::wallet) fn authorize_recovery_path(
+    pub(in crate::wallet) fn begin_recovery_path_selection(
         &self,
         owner_window: &str,
         purpose: RecoveryPathPurpose,
+    ) -> Result<RecoverySelectionPermit, WalletRuntimeError> {
+        require_main_window(owner_window)?;
+        let mut inner = self.lock_inner()?;
+        if inner.active_operation.is_some() || inner.pending_path_selection.is_some() {
+            return Err(WalletRuntimeError::OperationInProgress);
+        }
+        inner.next_generation = inner.next_generation.wrapping_add(1).max(1);
+        let generation = inner.next_generation;
+        inner.path_authorization = None;
+        inner.pending_path_selection = Some(PendingPathSelection {
+            generation,
+            owner_window: owner_window.to_string(),
+            purpose,
+        });
+        Ok(RecoverySelectionPermit {
+            generation,
+            owner_window: owner_window.to_string(),
+            purpose,
+        })
+    }
+
+    pub(in crate::wallet) fn complete_recovery_path_selection(
+        &self,
+        permit: RecoverySelectionPermit,
         selected_path: PathBuf,
     ) -> Result<RecoveryPathToken, WalletRuntimeError> {
         let mut token_bytes = Zeroizing::new([0_u8; PATH_TOKEN_BYTES]);
-        getrandom::fill(&mut *token_bytes)
-            .map_err(|_| WalletRuntimeError::SecureRandomUnavailable)?;
-        let now_ms = self.now_ms()?;
-        self.authorize_recovery_path_at(owner_window, purpose, selected_path, &token_bytes, now_ms)
+        if getrandom::fill(&mut *token_bytes).is_err() {
+            let _ = self.cancel_recovery_path_selection(&permit);
+            return Err(WalletRuntimeError::SecureRandomUnavailable);
+        }
+        let now_ms = match self.now_ms() {
+            Ok(now_ms) => now_ms,
+            Err(error) => {
+                let _ = self.cancel_recovery_path_selection(&permit);
+                return Err(error);
+            }
+        };
+        self.complete_recovery_path_selection_at(permit, selected_path, &token_bytes, now_ms)
     }
 
-    fn authorize_recovery_path_at(
+    fn complete_recovery_path_selection_at(
         &self,
-        owner_window: &str,
-        purpose: RecoveryPathPurpose,
+        permit: RecoverySelectionPermit,
         selected_path: PathBuf,
         token_bytes: &[u8; PATH_TOKEN_BYTES],
         now_ms: u64,
     ) -> Result<RecoveryPathToken, WalletRuntimeError> {
-        require_main_window(owner_window)?;
         if selected_path.as_os_str().is_empty() {
+            let _ = self.cancel_recovery_path_selection(&permit);
             return Err(WalletRuntimeError::InvalidRequest);
         }
         let mut inner = self.lock_inner()?;
-        if inner.active_operation.is_some() {
-            return Err(WalletRuntimeError::OperationInProgress);
+        if !inner
+            .pending_path_selection
+            .as_ref()
+            .is_some_and(|pending| pending.matches(&permit))
+        {
+            return Err(WalletRuntimeError::PathAuthorizationInvalid);
         }
+        inner.pending_path_selection = None;
         let token = hex::encode(token_bytes);
         inner.path_authorization = Some(PathAuthorization {
             token: Zeroizing::new(token.clone()),
-            owner_window: owner_window.to_string(),
-            purpose,
+            owner_window: permit.owner_window,
+            purpose: permit.purpose,
             selected_path,
             issued_at_ms: now_ms,
         });
         Ok(RecoveryPathToken(Zeroizing::new(token)))
+    }
+
+    pub(in crate::wallet) fn cancel_recovery_path_selection(
+        &self,
+        permit: &RecoverySelectionPermit,
+    ) -> Result<(), WalletRuntimeError> {
+        let mut inner = self.lock_inner()?;
+        if !inner
+            .pending_path_selection
+            .as_ref()
+            .is_some_and(|pending| pending.matches(permit))
+        {
+            return Err(WalletRuntimeError::PathAuthorizationInvalid);
+        }
+        inner.pending_path_selection = None;
+        inner.path_authorization = None;
+        Ok(())
     }
 
     pub(in crate::wallet) fn consume_recovery_path(
@@ -287,7 +366,16 @@ impl WalletRuntimeInner {
     fn invalidate_all(&mut self) {
         self.session.lock();
         self.active_operation = None;
+        self.pending_path_selection = None;
         self.path_authorization = None;
+    }
+}
+
+impl PendingPathSelection {
+    fn matches(&self, permit: &RecoverySelectionPermit) -> bool {
+        self.generation == permit.generation
+            && self.owner_window == permit.owner_window
+            && self.purpose == permit.purpose
     }
 }
 
@@ -474,10 +562,12 @@ mod tests {
     fn recovery_path_tokens_are_window_bound_single_use_and_expiring() {
         let runtime = WalletRuntimeState::for_test();
         let selected = PathBuf::from(r"C:\safe\wallet.vision-recovery.json");
+        let permit = runtime
+            .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
+            .unwrap();
         let token = runtime
-            .authorize_recovery_path_at(
-                MAIN_WINDOW_LABEL,
-                RecoveryPathPurpose::Destination,
+            .complete_recovery_path_selection_at(
+                permit,
                 selected.clone(),
                 &[7; PATH_TOKEN_BYTES],
                 100,
@@ -518,10 +608,12 @@ mod tests {
             WalletRuntimeError::PathAuthorizationInvalid
         );
 
+        let permit = runtime
+            .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Source)
+            .unwrap();
         let expired = runtime
-            .authorize_recovery_path_at(
-                MAIN_WINDOW_LABEL,
-                RecoveryPathPurpose::Source,
+            .complete_recovery_path_selection_at(
+                permit,
                 PathBuf::from(r"C:\safe\backup.vision-recovery.json"),
                 &[8; PATH_TOKEN_BYTES],
                 200,
@@ -543,10 +635,12 @@ mod tests {
     #[test]
     fn window_invalidation_revokes_every_path_authorization() {
         let runtime = WalletRuntimeState::for_test();
+        let permit = runtime
+            .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Source)
+            .unwrap();
         let token = runtime
-            .authorize_recovery_path_at(
-                MAIN_WINDOW_LABEL,
-                RecoveryPathPurpose::Source,
+            .complete_recovery_path_selection_at(
+                permit,
                 PathBuf::from(r"C:\safe\backup.vision-recovery.json"),
                 &[9; PATH_TOKEN_BYTES],
                 1,
@@ -570,12 +664,11 @@ mod tests {
     fn random_path_token_round_trip_uses_the_monotonic_runtime_clock() {
         let runtime = WalletRuntimeState::for_test();
         let selected = PathBuf::from(r"C:\safe\generated.vision-recovery.json");
+        let permit = runtime
+            .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
+            .unwrap();
         let token = runtime
-            .authorize_recovery_path(
-                MAIN_WINDOW_LABEL,
-                RecoveryPathPurpose::Destination,
-                selected.clone(),
-            )
+            .complete_recovery_path_selection(permit, selected.clone())
             .unwrap();
 
         assert_eq!(
@@ -588,6 +681,44 @@ mod tests {
                 .unwrap(),
             selected
         );
+    }
+
+    #[test]
+    fn pending_selection_excludes_operations_and_stale_completion_cannot_win() {
+        let runtime = WalletRuntimeState::for_test();
+        let stale = runtime
+            .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
+            .unwrap();
+        assert_eq!(
+            runtime
+                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Create)
+                .err(),
+            Some(WalletRuntimeError::OperationInProgress)
+        );
+        assert_eq!(
+            runtime
+                .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Source)
+                .err(),
+            Some(WalletRuntimeError::OperationInProgress)
+        );
+
+        runtime.invalidate_all().unwrap();
+        let current = runtime
+            .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Source)
+            .unwrap();
+        assert_eq!(
+            runtime
+                .complete_recovery_path_selection(
+                    stale,
+                    PathBuf::from(r"C:\safe\stale.vision-recovery.json"),
+                )
+                .err(),
+            Some(WalletRuntimeError::PathAuthorizationInvalid)
+        );
+        runtime.cancel_recovery_path_selection(&current).unwrap();
+        runtime
+            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Restore)
+            .unwrap();
     }
 
     #[test]
@@ -629,6 +760,7 @@ mod tests {
         };
         assert!(inner.session.is_locked());
         assert!(inner.active_operation.is_none());
+        assert!(inner.pending_path_selection.is_none());
         assert!(inner.path_authorization.is_none());
     }
 
@@ -643,6 +775,10 @@ mod tests {
             WalletRuntimeError::SecureRandomUnavailable,
             WalletRuntimeError::PathAuthorizationInvalid,
             WalletRuntimeError::PathAuthorizationExpired,
+            WalletRuntimeError::RecoverySelectionCancelled,
+            WalletRuntimeError::RecoveryDestinationInvalid,
+            WalletRuntimeError::RecoveryDestinationExists,
+            WalletRuntimeError::RecoverySourceInvalid,
         ];
         for error in errors {
             assert!(error

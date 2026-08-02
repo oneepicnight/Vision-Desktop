@@ -12,6 +12,8 @@ mod journal;
 mod onboarding;
 mod receipt;
 mod recovery;
+#[cfg(windows)]
+mod recovery_selection;
 mod runtime;
 mod secret_input;
 mod secrets;

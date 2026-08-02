@@ -2,7 +2,7 @@
 
 ## Status
 
-This document specifies a future interface. No wallet command is registered with Tauri, no wallet service wrapper exists in React, the pinned dialog dependency is not initialized, and wallet creation, restore, unlock, signing, and submission remain unavailable. The pinned single-instance plugin is now active on Windows as a process-exclusion prerequisite.
+This document specifies a future interface. No wallet command is registered with Tauri, no wallet service wrapper exists in React, and wallet creation, restore, unlock, signing, and submission remain unavailable. The pinned single-instance plugin is active first on Windows, followed by the pinned native dialog plugin for private Rust use. Neither plugin has a WebView permission.
 
 The specification is fail-closed. An implementation must not register a partial subset that weakens the ordering, origin, path, lifecycle, or compatibility gates below.
 
@@ -15,7 +15,7 @@ Before the command ACL migration, the Desktop application:
 - does not load remote scripts or remote application pages;
 - currently permits `ipc:` and loopback HTTP connections in its production CSP;
 - keeps all frontend Tauri calls in `src/services/coreApi.ts`;
-- has no wallet command, frontend password form, file dialog plugin, clipboard wallet path, or wallet state in the general Desktop reducer;
+- has no wallet command, frontend password form, frontend-accessible file dialog, clipboard wallet path, or wallet state in the general Desktop reducer;
 - keeps vault, recovery, session, signing, submission, receipt, journal, and onboarding code inside the private Rust wallet module.
 
 The current Desktop application now also registers its exact 19-command inventory through `tauri_build::AppManifest` and grants only those generated permissions to the explicitly labelled `main` window on Windows. `docs/TAURI_COMMAND_ACCESS_CONTROL.md` records the active command inventory and its automated drift tests. No wallet permission or plugin permission was added.
@@ -91,7 +91,7 @@ Planned application permissions:
 
 Transaction review, signing, and submission permissions are intentionally absent. They require a later threat model after private loopback integration.
 
-The dialog plugin is initialized in Rust, but its `dialog:allow-save` and `dialog:allow-open` commands are not granted to the WebView. Rust application commands call `DialogExt` directly. React never receives or submits a raw filesystem path.
+The dialog plugin is initialized in Rust, but its `dialog:allow-save` and `dialog:allow-open` commands are not granted to the WebView. Private Rust adapters call `DialogExt` directly; no wallet application command invokes them yet. React never receives or submits a raw filesystem path.
 
 ## Dedicated Rust runtime state
 
@@ -307,11 +307,11 @@ Before activation:
 
 1. Obtain independent review of this interface and the existing Rust custody modules.
 2. Add and pin the official Tauri dialog and single-instance plugins in a dependency-only commit with provenance review. Completed.
-3. Add `AppManifest`, explicit application permissions, and one main-window capability; migrate existing commands without changing behavior. Completed; the 19-command inventory is protected by automated parity tests, while native dialogs and wallet commands remain inactive.
+3. Add `AppManifest`, explicit application permissions, and one main-window capability; migrate existing commands without changing behavior. Completed; the 19-command inventory is protected by automated parity tests, while dialog permissions and wallet commands remain inactive.
 4. Split production CSP from `devCsp` and prove no frontend direct-Core requests are required. Completed; production permits only Tauri IPC transports and the frontend source boundary is tested.
 5. Initialize the single-instance plugin first, discard duplicate launch data, restore the primary main window, and prove ordinary duplicate-launch and process-lock recovery behavior. Completed on Windows; source review retains a dedicated custody-lock requirement for step 6.
 6. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands. Completed for process ownership, main-window page/close/destruction events, Windows session lock, suspend/standby, logoff/shutdown, teardown, and poison. Unlock and resume do not restore authority.
-7. Implement and test destination/source token selection in Rust.
+7. Implement and test destination/source token selection in Rust. Completed privately: native dialogs are main-window-parented; local paths are validated against URI, UNC/device, traversal, alternate-stream, reparse, overwrite, suffix, type, and size hazards; generation-bound cancellation and stale completion are tested; no wallet command or WebView permission is active.
 8. Implement create/restore/unlock/lock commands but keep them unregistered behind the activation policy.
 9. Add the isolated frontend onboarding UI and service wrappers; perform secret-leak and accessibility review.
 10. Integrate a supported loopback-only Core release through the separate compatibility workflow.
@@ -335,5 +335,4 @@ Approved on 2026-08-01:
 
 Still requiring explicit review before implementation:
 
-- initializing the official dialog plugin and defining its lifecycle behavior;
 - independent cryptographic and application-security approval.

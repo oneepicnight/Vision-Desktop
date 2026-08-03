@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn cash_transfer_signature_matches_independent_fixed_vector() {
         let transaction =
-            sign_cash_transfer(&WalletSeed::from_bytes([7; 32]), &signed_vector_draft()).unwrap();
+            sign_cash_transfer(&WalletSeed::for_test(7), &signed_vector_draft()).unwrap();
 
         assert_eq!(transaction.sender_pubkey, SIGNED_VECTOR_PUBLIC_KEY);
         assert_eq!(
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn cash_transfer_builder_rejects_unsafe_shapes_before_signing() {
-        let seed = WalletSeed::from_bytes([7; 32]);
+        let seed = WalletSeed::for_test(7);
         let mut draft = signed_vector_draft();
         draft.recipient = "AA".repeat(32);
         assert_eq!(
@@ -329,13 +329,13 @@ mod tests {
         assert_eq!(draft.nonce, 7);
         assert_eq!(draft.tip_raw_units, 0);
         assert_eq!(draft.fee_limit_raw_units, 201);
-        sign_cash_transfer(&WalletSeed::from_bytes([7; 32]), &draft).unwrap();
+        sign_cash_transfer(&WalletSeed::for_test(7), &draft).unwrap();
     }
 
     #[test]
     fn signed_transaction_json_contains_no_secret_material() {
         let transaction =
-            sign_cash_transfer(&WalletSeed::from_bytes([7; 32]), &signed_vector_draft()).unwrap();
+            sign_cash_transfer(&WalletSeed::for_test(7), &signed_vector_draft()).unwrap();
         let json = serde_json::to_string(&transaction).unwrap();
 
         for forbidden in [

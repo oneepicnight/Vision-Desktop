@@ -231,7 +231,7 @@ mod tests {
         EncryptedWalletVault::encrypt_for_test(
             wallet_id,
             1_700_000_000_000,
-            &WalletSeed::from_bytes([seed_byte; 32]),
+            &WalletSeed::for_test(seed_byte),
             &password(CORRECT_PASSWORD),
         )
         .unwrap()

@@ -841,7 +841,7 @@ mod tests {
         let vault = EncryptedWalletVault::encrypt_for_test(
             "poison_test",
             1,
-            &WalletSeed::from_bytes([42; 32]),
+            &WalletSeed::for_test(42),
             &password,
         )
         .unwrap();

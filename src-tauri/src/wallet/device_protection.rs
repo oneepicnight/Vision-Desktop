@@ -1,6 +1,7 @@
 use super::vault::WalletVaultError;
 use secrecy::{ExposeSecret, SecretBox};
 use std::fmt;
+use zeroize::Zeroizing;
 
 pub(in crate::wallet) const DEVICE_KEY_BYTES: usize = 32;
 pub(in crate::wallet) const WINDOWS_DPAPI_ALGORITHM: &str = "windows_dpapi_current_user";
@@ -8,8 +9,24 @@ pub(in crate::wallet) const WINDOWS_DPAPI_ALGORITHM: &str = "windows_dpapi_curre
 pub(in crate::wallet) struct DeviceKey(SecretBox<[u8; DEVICE_KEY_BYTES]>);
 
 impl DeviceKey {
-    fn from_bytes(bytes: [u8; DEVICE_KEY_BYTES]) -> Self {
-        Self(SecretBox::new(Box::new(bytes)))
+    fn generate() -> Result<Self, getrandom::Error> {
+        let mut random_result = Ok(());
+        let key = SecretBox::<[u8; DEVICE_KEY_BYTES]>::init_with_mut(|bytes| {
+            random_result = getrandom::fill(bytes);
+        });
+        random_result?;
+        Ok(Self(key))
+    }
+
+    fn from_zeroizing_vec(bytes: Zeroizing<Vec<u8>>) -> Option<Self> {
+        if bytes.len() != DEVICE_KEY_BYTES {
+            return None;
+        }
+        Some(Self(SecretBox::<[u8; DEVICE_KEY_BYTES]>::init_with_mut(
+            |key| {
+                key.copy_from_slice(&bytes);
+            },
+        )))
     }
 
     pub(in crate::wallet) fn with_exposed<R>(
@@ -52,9 +69,8 @@ pub(in crate::wallet) fn unprotect(
 fn generate_and_protect_with<P: DeviceProtector>(
     entropy: &[u8],
 ) -> Result<ProtectedDeviceKey, WalletVaultError> {
-    let mut bytes = [0_u8; DEVICE_KEY_BYTES];
-    getrandom::fill(&mut bytes).map_err(|_| WalletVaultError::RandomSourceUnavailable)?;
-    let device_key = DeviceKey::from_bytes(bytes);
+    let device_key =
+        DeviceKey::generate().map_err(|_| WalletVaultError::RandomSourceUnavailable)?;
     let protected_bytes = device_key.with_exposed(|key| P::protect(key, entropy))?;
     if protected_bytes.is_empty() || protected_bytes.len() > P::MAX_PROTECTED_BYTES {
         return Err(WalletVaultError::DeviceProtectionUnavailable);
@@ -149,7 +165,7 @@ mod windows_dpapi {
         if protected == 0 {
             return Err(WalletVaultError::DeviceProtectionUnavailable);
         }
-        copy_output_blob(&mut output, false)
+        copy_public_output_blob(&mut output)
     }
 
     pub(super) fn unprotect(
@@ -178,13 +194,8 @@ mod windows_dpapi {
         if unprotected == 0 {
             return Err(WalletVaultError::DeviceProtectionUnavailable);
         }
-        let plaintext = Zeroizing::new(copy_output_blob(&mut output, true)?);
-        if plaintext.len() != DEVICE_KEY_BYTES {
-            return Err(WalletVaultError::DeviceProtectionUnavailable);
-        }
-        let mut bytes = [0_u8; DEVICE_KEY_BYTES];
-        bytes.copy_from_slice(&plaintext);
-        Ok(DeviceKey::from_bytes(bytes))
+        DeviceKey::from_zeroizing_vec(copy_secret_output_blob(&mut output)?)
+            .ok_or(WalletVaultError::DeviceProtectionUnavailable)
     }
 
     fn blob_from_slice(bytes: &[u8]) -> Result<CRYPT_INTEGER_BLOB, WalletVaultError> {
@@ -203,9 +214,8 @@ mod windows_dpapi {
         }
     }
 
-    fn copy_output_blob(
+    fn copy_public_output_blob(
         output: &mut CRYPT_INTEGER_BLOB,
-        secret: bool,
     ) -> Result<Vec<u8>, WalletVaultError> {
         if output.pbData.is_null() || output.cbData == 0 {
             return Err(WalletVaultError::DeviceProtectionUnavailable);
@@ -224,23 +234,45 @@ mod windows_dpapi {
             return Err(WalletVaultError::DeviceProtectionUnavailable);
         }
         // SAFETY: DPAPI returned an allocation of `cbData` bytes.
-        let mut copied = unsafe { std::slice::from_raw_parts(output.pbData, length).to_vec() };
-        if secret {
-            // SAFETY: the mutable slice covers the DPAPI output allocation.
-            unsafe {
-                std::slice::from_raw_parts_mut(output.pbData, length).zeroize();
-            }
-        }
+        let copied = unsafe { std::slice::from_raw_parts(output.pbData, length).to_vec() };
         // SAFETY: DPAPI documents that its output must be freed by LocalFree.
         unsafe {
             let _ = LocalFree(output.pbData.cast::<c_void>() as HLOCAL);
         }
         output.pbData = ptr::null_mut();
         output.cbData = 0;
-        if secret && copied.len() != DEVICE_KEY_BYTES {
-            copied.zeroize();
+        Ok(copied)
+    }
+
+    fn copy_secret_output_blob(
+        output: &mut CRYPT_INTEGER_BLOB,
+    ) -> Result<Zeroizing<Vec<u8>>, WalletVaultError> {
+        if output.pbData.is_null() || output.cbData == 0 {
             return Err(WalletVaultError::DeviceProtectionUnavailable);
         }
+        let length = usize::try_from(output.cbData)
+            .map_err(|_| WalletVaultError::DeviceProtectionUnavailable)?;
+        if length > PlatformProtector::MAX_PROTECTED_BYTES {
+            // SAFETY: DPAPI returned this allocation and length. It is wiped
+            // before being returned to the Windows local allocator.
+            unsafe {
+                std::slice::from_raw_parts_mut(output.pbData, length).zeroize();
+                let _ = LocalFree(output.pbData.cast::<c_void>() as HLOCAL);
+            }
+            output.pbData = ptr::null_mut();
+            output.cbData = 0;
+            return Err(WalletVaultError::DeviceProtectionUnavailable);
+        }
+        // The only copy out of DPAPI lands directly in zeroizing heap storage.
+        let copied =
+            Zeroizing::new(unsafe { std::slice::from_raw_parts(output.pbData, length).to_vec() });
+        // SAFETY: the mutable slice covers the DPAPI output allocation.
+        unsafe {
+            std::slice::from_raw_parts_mut(output.pbData, length).zeroize();
+            let _ = LocalFree(output.pbData.cast::<c_void>() as HLOCAL);
+        }
+        output.pbData = ptr::null_mut();
+        output.cbData = 0;
         Ok(copied)
     }
 }
@@ -273,11 +305,14 @@ impl DeviceProtector for TestProtector {
         if protected.len() != DEVICE_KEY_BYTES || entropy.is_empty() {
             return Err(WalletVaultError::DeviceProtectionUnavailable);
         }
-        let mut bytes = [0_u8; DEVICE_KEY_BYTES];
-        for (index, byte) in protected.iter().enumerate() {
-            bytes[index] = byte ^ entropy[index % entropy.len()];
-        }
-        Ok(DeviceKey::from_bytes(bytes))
+        let bytes = Zeroizing::new(
+            protected
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ entropy[index % entropy.len()])
+                .collect(),
+        );
+        DeviceKey::from_zeroizing_vec(bytes).ok_or(WalletVaultError::DeviceProtectionUnavailable)
     }
 }
 
@@ -294,6 +329,25 @@ pub(in crate::wallet) fn unprotect_for_test(
     entropy: &[u8],
 ) -> Result<DeviceKey, WalletVaultError> {
     TestProtector::unprotect(protected, entropy)
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn unwrapped_device_key_enters_secret_box_without_an_ordinary_array() {
+        let key =
+            DeviceKey::from_zeroizing_vec(Zeroizing::new(vec![0x4d; DEVICE_KEY_BYTES])).unwrap();
+
+        assert!(key.with_exposed(|restored| restored == &[0x4d; DEVICE_KEY_BYTES]));
+    }
+
+    #[test]
+    fn unwrapped_device_key_requires_the_exact_key_length() {
+        assert!(DeviceKey::from_zeroizing_vec(Zeroizing::new(vec![7; 31])).is_none());
+        assert!(DeviceKey::from_zeroizing_vec(Zeroizing::new(vec![7; 33])).is_none());
+    }
 }
 
 #[cfg(all(test, windows))]

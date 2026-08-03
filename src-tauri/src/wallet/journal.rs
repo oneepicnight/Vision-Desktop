@@ -536,7 +536,7 @@ mod tests {
     const WALLET_ID: &str = "primary";
 
     fn accepted_transaction() -> (VisionTransaction, WalletSubmissionOutcome) {
-        let seed = WalletSeed::from_bytes([7_u8; 32]);
+        let seed = WalletSeed::for_test(7);
         let draft = CashTransferDraft::for_current_nonce(3, "22".repeat(32), 42);
         let transaction = sign_cash_transfer(&seed, &draft).unwrap();
         let tx_id = canonical_transaction_id(&transaction).unwrap();

@@ -18,6 +18,7 @@ use super::{
 };
 use std::{fmt, path::Path};
 
+#[cfg(test)]
 const SEED_BYTES: usize = 32;
 const MAX_LABEL_BYTES: usize = 64;
 
@@ -93,9 +94,8 @@ pub(in crate::wallet) fn prepare_new_wallet(
 ) -> Result<PreparedWalletOnboarding, WalletOnboardingError> {
     validate_label(label)?;
     require_distinct_passwords(wallet_password, recovery_password)?;
-    let mut seed_bytes = [0_u8; SEED_BYTES];
-    getrandom::fill(&mut seed_bytes).map_err(|_| WalletOnboardingError::SecureRandomUnavailable)?;
-    let seed = WalletSeed::from_bytes(seed_bytes);
+    let seed =
+        WalletSeed::generate().map_err(|_| WalletOnboardingError::SecureRandomUnavailable)?;
     prepare_with_vault(
         wallet_id,
         label,
@@ -327,7 +327,7 @@ mod tests {
     }
 
     fn prepared() -> PreparedWalletOnboarding {
-        let seed = WalletSeed::from_bytes([7_u8; SEED_BYTES]);
+        let seed = WalletSeed::for_test(7);
         let wallet_password = password(WALLET_PASSWORD);
         let recovery_password = password(RECOVERY_PASSWORD);
         let vault = EncryptedWalletVault::encrypt_for_test(

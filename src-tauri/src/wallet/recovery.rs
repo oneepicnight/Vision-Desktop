@@ -319,11 +319,8 @@ impl PortableRecoveryArtifact {
                 )
                 .map_err(|_| RecoveryArtifactError::InvalidPasswordOrDamagedArtifact)?,
         );
-        let seed_bytes: [u8; SEED_BYTES] = plaintext
-            .as_slice()
-            .try_into()
-            .map_err(|_| RecoveryArtifactError::InvalidPasswordOrDamagedArtifact)?;
-        Ok(WalletSeed::from_bytes(seed_bytes))
+        WalletSeed::from_zeroizing_vec(plaintext)
+            .ok_or(RecoveryArtifactError::InvalidPasswordOrDamagedArtifact)
     }
 
     pub(in crate::wallet) fn from_json(input: &[u8]) -> Result<Self, RecoveryArtifactError> {
@@ -442,7 +439,7 @@ mod tests {
         PortableRecoveryArtifact::encrypt(
             "primary_wallet",
             1_700_000_000_000,
-            &WalletSeed::from_bytes([0x6b; SEED_BYTES]),
+            &WalletSeed::for_test(0x6b),
             &password(TEST_PASSWORD),
         )
         .unwrap()
@@ -533,7 +530,7 @@ mod tests {
 
     #[test]
     fn recovery_password_policy_rejects_short_and_oversized_values() {
-        let seed = WalletSeed::from_bytes([1; SEED_BYTES]);
+        let seed = WalletSeed::for_test(1);
         assert_eq!(
             PortableRecoveryArtifact::encrypt("wallet", 1, &seed, &password("too-short"))
                 .unwrap_err(),
@@ -578,7 +575,7 @@ mod tests {
 
     #[test]
     fn invalid_wallet_identifiers_are_rejected() {
-        let seed = WalletSeed::from_bytes([1; SEED_BYTES]);
+        let seed = WalletSeed::for_test(1);
         for invalid in ["", "../escape", "space wallet", "wallet|metadata"] {
             assert_eq!(
                 PortableRecoveryArtifact::encrypt(invalid, 1, &seed, &password(TEST_PASSWORD),)

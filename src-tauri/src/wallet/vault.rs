@@ -255,11 +255,8 @@ impl EncryptedWalletVault {
                 )
                 .map_err(|_| WalletVaultError::InvalidPasswordOrCorruptVault)?,
         );
-        let seed_bytes: [u8; SEED_BYTES] = plaintext
-            .as_slice()
-            .try_into()
-            .map_err(|_| WalletVaultError::InvalidPasswordOrCorruptVault)?;
-        Ok(WalletSeed::from_bytes(seed_bytes))
+        WalletSeed::from_zeroizing_vec(plaintext)
+            .ok_or(WalletVaultError::InvalidPasswordOrCorruptVault)
     }
 
     pub(in crate::wallet) fn from_json(input: &[u8]) -> Result<Self, WalletVaultError> {
@@ -584,7 +581,7 @@ mod tests {
         EncryptedWalletVault::encrypt_for_test(
             "primary_wallet",
             1_700_000_000_000,
-            &WalletSeed::from_bytes([0x5a; SEED_BYTES]),
+            &WalletSeed::for_test(0x5a),
             &password("correct horse battery staple"),
         )
         .unwrap()
@@ -676,7 +673,7 @@ mod tests {
 
     #[test]
     fn password_policy_rejects_short_and_oversized_values() {
-        let seed = WalletSeed::from_bytes([1; SEED_BYTES]);
+        let seed = WalletSeed::for_test(1);
         assert_eq!(
             validate_password(&password(&"x".repeat(MIN_PASSWORD_BYTES - 1))).unwrap_err(),
             WalletVaultError::PasswordPolicy
@@ -732,7 +729,7 @@ mod tests {
 
     #[test]
     fn invalid_wallet_identifiers_are_rejected() {
-        let seed = WalletSeed::from_bytes([1; SEED_BYTES]);
+        let seed = WalletSeed::for_test(1);
         for invalid in ["", "../escape", "space wallet", "wallet|metadata"] {
             assert_eq!(
                 EncryptedWalletVault::encrypt(
@@ -750,7 +747,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_current_user_dpapi_vault_round_trips() {
-        let seed = WalletSeed::from_bytes([0x3c; SEED_BYTES]);
+        let seed = WalletSeed::for_test(0x3c);
         let password = password("correct horse battery staple");
         let vault = EncryptedWalletVault::encrypt("windows_wallet", 1, &seed, &password).unwrap();
 

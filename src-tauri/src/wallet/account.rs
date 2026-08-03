@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn seed_to_public_key_and_address_matches_core_rc2_vector() {
-        let identity = derive_account_identity(&WalletSeed::from_bytes([7; 32]));
+        let identity = derive_account_identity(&WalletSeed::for_test(7));
 
         assert_eq!(identity.public_key, CORE_RC2_SEED_07_PUBLIC_KEY);
         assert_eq!(identity.address, CORE_RC2_SEED_07_PUBLIC_KEY);
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn portable_recovery_restores_the_identical_account_identity() {
-        let seed = WalletSeed::from_bytes([7; 32]);
+        let seed = WalletSeed::for_test(7);
         let original = derive_account_identity(&seed);
         let artifact = PortableRecoveryArtifact::encrypt(
             "vector_wallet",
@@ -72,15 +72,15 @@ mod tests {
 
     #[test]
     fn different_seeds_produce_different_account_identities() {
-        let first = derive_account_identity(&WalletSeed::from_bytes([7; 32]));
-        let second = derive_account_identity(&WalletSeed::from_bytes([8; 32]));
+        let first = derive_account_identity(&WalletSeed::for_test(7));
+        let second = derive_account_identity(&WalletSeed::for_test(8));
 
         assert_ne!(first, second);
     }
 
     #[test]
     fn serialized_public_identity_contains_no_secret_fields() {
-        let identity = derive_account_identity(&WalletSeed::from_bytes([7; 32]));
+        let identity = derive_account_identity(&WalletSeed::for_test(7));
         let serialized = serde_json::to_string(&identity).unwrap();
 
         assert!(serialized.contains(CORE_RC2_SEED_07_PUBLIC_KEY));

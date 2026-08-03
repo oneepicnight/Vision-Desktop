@@ -1,4 +1,7 @@
-use super::secrets::{WalletPassword, WalletSeed};
+use super::{
+    runtime::WalletActivationProof,
+    secrets::{WalletPassword, WalletSeed},
+};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
@@ -232,6 +235,7 @@ impl PortableRecoveryArtifact {
     /// Creates an in-memory portable artifact without writing a file or exposing
     /// a command to the frontend.
     pub(in crate::wallet) fn encrypt(
+        _activation: &WalletActivationProof,
         wallet_id: &str,
         created_at_unix_ms: u64,
         seed: &WalletSeed,
@@ -292,6 +296,7 @@ impl PortableRecoveryArtifact {
     /// remains gated by the separately approved Core compatibility contract.
     pub(in crate::wallet) fn restore(
         &self,
+        _activation: &WalletActivationProof,
         recovery_password: &WalletPassword,
     ) -> Result<WalletSeed, RecoveryArtifactError> {
         self.validate()?;
@@ -321,6 +326,38 @@ impl PortableRecoveryArtifact {
         );
         WalletSeed::from_zeroizing_vec(plaintext)
             .ok_or(RecoveryArtifactError::InvalidPasswordOrDamagedArtifact)
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn encrypt_for_test(
+        wallet_id: &str,
+        created_at_unix_ms: u64,
+        seed: &WalletSeed,
+        recovery_password: &WalletPassword,
+    ) -> Result<Self, RecoveryArtifactError> {
+        super::runtime::WalletRuntimeState::with_activation_proof_for_test(
+            super::runtime::WalletOperationKind::Create,
+            |activation| {
+                Self::encrypt(
+                    activation,
+                    wallet_id,
+                    created_at_unix_ms,
+                    seed,
+                    recovery_password,
+                )
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn restore_for_test(
+        &self,
+        recovery_password: &WalletPassword,
+    ) -> Result<WalletSeed, RecoveryArtifactError> {
+        super::runtime::WalletRuntimeState::with_activation_proof_for_test(
+            super::runtime::WalletOperationKind::Restore,
+            |activation| self.restore(activation, recovery_password),
+        )
     }
 
     pub(in crate::wallet) fn from_json(input: &[u8]) -> Result<Self, RecoveryArtifactError> {
@@ -436,7 +473,7 @@ mod tests {
     }
 
     fn test_artifact() -> PortableRecoveryArtifact {
-        PortableRecoveryArtifact::encrypt(
+        PortableRecoveryArtifact::encrypt_for_test(
             "primary_wallet",
             1_700_000_000_000,
             &WalletSeed::for_test(0x6b),
@@ -450,7 +487,7 @@ mod tests {
         let artifact = test_artifact();
         let serialized = artifact.to_json().unwrap();
         let parsed = PortableRecoveryArtifact::from_json(&serialized).unwrap();
-        let restored = parsed.restore(&password(TEST_PASSWORD)).unwrap();
+        let restored = parsed.restore_for_test(&password(TEST_PASSWORD)).unwrap();
 
         assert!(restored.with_exposed(|bytes| bytes == &[0x6b; SEED_BYTES]));
     }
@@ -486,7 +523,7 @@ mod tests {
     fn wrong_password_and_ciphertext_damage_share_one_error() {
         let artifact = test_artifact();
         let wrong_password_error = artifact
-            .restore(&password("a different recovery password"))
+            .restore_for_test(&password("a different recovery password"))
             .unwrap_err();
         let mut damaged = artifact;
         let replacement = if damaged.cipher.ciphertext_hex.starts_with("00") {
@@ -498,7 +535,9 @@ mod tests {
             .cipher
             .ciphertext_hex
             .replace_range(0..2, replacement);
-        let damage_error = damaged.restore(&password(TEST_PASSWORD)).unwrap_err();
+        let damage_error = damaged
+            .restore_for_test(&password(TEST_PASSWORD))
+            .unwrap_err();
 
         assert_eq!(
             wrong_password_error,
@@ -513,7 +552,9 @@ mod tests {
         artifact.created_at_unix_ms += 1;
 
         assert_eq!(
-            artifact.restore(&password(TEST_PASSWORD)).unwrap_err(),
+            artifact
+                .restore_for_test(&password(TEST_PASSWORD))
+                .unwrap_err(),
             RecoveryArtifactError::InvalidPasswordOrDamagedArtifact
         );
     }
@@ -532,12 +573,12 @@ mod tests {
     fn recovery_password_policy_rejects_short_and_oversized_values() {
         let seed = WalletSeed::for_test(1);
         assert_eq!(
-            PortableRecoveryArtifact::encrypt("wallet", 1, &seed, &password("too-short"))
+            PortableRecoveryArtifact::encrypt_for_test("wallet", 1, &seed, &password("too-short"),)
                 .unwrap_err(),
             RecoveryArtifactError::PasswordPolicy
         );
         assert_eq!(
-            PortableRecoveryArtifact::encrypt(
+            PortableRecoveryArtifact::encrypt_for_test(
                 "wallet",
                 1,
                 &seed,
@@ -578,8 +619,13 @@ mod tests {
         let seed = WalletSeed::for_test(1);
         for invalid in ["", "../escape", "space wallet", "wallet|metadata"] {
             assert_eq!(
-                PortableRecoveryArtifact::encrypt(invalid, 1, &seed, &password(TEST_PASSWORD),)
-                    .unwrap_err(),
+                PortableRecoveryArtifact::encrypt_for_test(
+                    invalid,
+                    1,
+                    &seed,
+                    &password(TEST_PASSWORD),
+                )
+                .unwrap_err(),
                 RecoveryArtifactError::InvalidWalletId
             );
         }

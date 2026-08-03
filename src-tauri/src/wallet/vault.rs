@@ -1,5 +1,6 @@
 use super::{
     device_protection::{self, DeviceKey, ProtectedDeviceKey},
+    runtime::WalletActivationProof,
     secrets::{WalletPassword, WalletSeed},
     storage_security,
 };
@@ -118,6 +119,7 @@ impl EncryptedWalletVault {
 
     /// Encrypts a seed without exposing a creation command to the frontend.
     pub(in crate::wallet) fn encrypt(
+        _activation: &WalletActivationProof,
         wallet_id: &str,
         created_at_unix_ms: u64,
         seed: &WalletSeed,
@@ -133,6 +135,19 @@ impl EncryptedWalletVault {
             seed,
             password,
             protected_device_key,
+        )
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn encrypt_with_platform_for_test(
+        wallet_id: &str,
+        created_at_unix_ms: u64,
+        seed: &WalletSeed,
+        password: &WalletPassword,
+    ) -> Result<Self, WalletVaultError> {
+        super::runtime::WalletRuntimeState::with_activation_proof_for_test(
+            super::runtime::WalletOperationKind::Create,
+            |activation| Self::encrypt(activation, wallet_id, created_at_unix_ms, seed, password),
         )
     }
 
@@ -220,6 +235,7 @@ impl EncryptedWalletVault {
     /// Unlocks a vault inside Rust. Callers receive a redacted, zeroizing seed wrapper.
     pub(in crate::wallet) fn unlock(
         &self,
+        _activation: &WalletActivationProof,
         password: &WalletPassword,
     ) -> Result<WalletSeed, WalletVaultError> {
         self.validate()?;
@@ -257,6 +273,17 @@ impl EncryptedWalletVault {
         );
         WalletSeed::from_zeroizing_vec(plaintext)
             .ok_or(WalletVaultError::InvalidPasswordOrCorruptVault)
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn unlock_for_test(
+        &self,
+        password: &WalletPassword,
+    ) -> Result<WalletSeed, WalletVaultError> {
+        super::runtime::WalletRuntimeState::with_activation_proof_for_test(
+            super::runtime::WalletOperationKind::Unlock,
+            |activation| self.unlock(activation, password),
+        )
     }
 
     pub(in crate::wallet) fn from_json(input: &[u8]) -> Result<Self, WalletVaultError> {
@@ -591,7 +618,7 @@ mod tests {
     fn encrypted_vault_round_trips_seed() {
         let vault = test_vault();
         let unlocked = vault
-            .unlock(&password("correct horse battery staple"))
+            .unlock_for_test(&password("correct horse battery staple"))
             .unwrap();
 
         assert!(unlocked.with_exposed(|bytes| bytes == &[0x5a; SEED_BYTES]));
@@ -612,12 +639,12 @@ mod tests {
     fn wrong_password_and_ciphertext_damage_share_one_error() {
         let vault = test_vault();
         let wrong_password_error = vault
-            .unlock(&password("this is definitely the wrong password"))
+            .unlock_for_test(&password("this is definitely the wrong password"))
             .unwrap_err();
         let mut damaged = vault;
         damaged.cipher.ciphertext_hex.replace_range(0..2, "00");
         let damage_error = damaged
-            .unlock(&password("correct horse battery staple"))
+            .unlock_for_test(&password("correct horse battery staple"))
             .unwrap_err();
 
         assert_eq!(
@@ -634,7 +661,7 @@ mod tests {
 
         assert_eq!(
             vault
-                .unlock(&password("correct horse battery staple"))
+                .unlock_for_test(&password("correct horse battery staple"))
                 .unwrap_err(),
             WalletVaultError::InvalidPasswordOrCorruptVault
         );
@@ -655,7 +682,7 @@ mod tests {
 
         assert_eq!(
             vault
-                .unlock(&password("correct horse battery staple"))
+                .unlock_for_test(&password("correct horse battery staple"))
                 .unwrap_err(),
             WalletVaultError::InvalidPasswordOrCorruptVault
         );
@@ -683,8 +710,13 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            EncryptedWalletVault::encrypt("wallet", 1, &seed, &password(&"x".repeat(1025)))
-                .unwrap_err(),
+            EncryptedWalletVault::encrypt_with_platform_for_test(
+                "wallet",
+                1,
+                &seed,
+                &password(&"x".repeat(1025)),
+            )
+            .unwrap_err(),
             WalletVaultError::PasswordPolicy
         );
     }
@@ -732,7 +764,7 @@ mod tests {
         let seed = WalletSeed::for_test(1);
         for invalid in ["", "../escape", "space wallet", "wallet|metadata"] {
             assert_eq!(
-                EncryptedWalletVault::encrypt(
+                EncryptedWalletVault::encrypt_with_platform_for_test(
                     invalid,
                     1,
                     &seed,
@@ -749,13 +781,19 @@ mod tests {
     fn windows_current_user_dpapi_vault_round_trips() {
         let seed = WalletSeed::for_test(0x3c);
         let password = password("correct horse battery staple");
-        let vault = EncryptedWalletVault::encrypt("windows_wallet", 1, &seed, &password).unwrap();
+        let vault = EncryptedWalletVault::encrypt_with_platform_for_test(
+            "windows_wallet",
+            1,
+            &seed,
+            &password,
+        )
+        .unwrap();
 
         assert_eq!(
             vault.device_protection.algorithm,
             device_protection::WINDOWS_DPAPI_ALGORITHM
         );
-        let unlocked = vault.unlock(&password).unwrap();
+        let unlocked = vault.unlock_for_test(&password).unwrap();
         assert!(unlocked.with_exposed(|bytes| bytes == &[0x3c; SEED_BYTES]));
     }
 }

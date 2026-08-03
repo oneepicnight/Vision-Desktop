@@ -13,6 +13,7 @@ use super::{
         load_recovery_artifact, store_new_recovery_artifact, PortableRecoveryArtifact,
         RecoveryArtifactError,
     },
+    runtime::WalletActivationProof,
     secrets::{WalletPassword, WalletSeed},
     vault::{store_new_vault, EncryptedWalletVault, WalletVaultError},
 };
@@ -86,6 +87,7 @@ impl std::error::Error for WalletOnboardingError {}
 /// is deliberately unable to store the local vault until its portable backup
 /// has been read back, decrypted, and matched to the same public identity.
 pub(in crate::wallet) fn prepare_new_wallet(
+    activation: &WalletActivationProof,
     wallet_id: &str,
     label: &str,
     created_at_unix_ms: u64,
@@ -94,23 +96,30 @@ pub(in crate::wallet) fn prepare_new_wallet(
 ) -> Result<PreparedWalletOnboarding, WalletOnboardingError> {
     validate_label(label)?;
     require_distinct_passwords(wallet_password, recovery_password)?;
-    let seed =
-        WalletSeed::generate().map_err(|_| WalletOnboardingError::SecureRandomUnavailable)?;
+    let seed = WalletSeed::generate(activation)
+        .map_err(|_| WalletOnboardingError::SecureRandomUnavailable)?;
     prepare_with_vault(
+        activation,
         wallet_id,
         label,
         created_at_unix_ms,
         &seed,
-        wallet_password,
         recovery_password,
-        EncryptedWalletVault::encrypt(wallet_id, created_at_unix_ms, &seed, wallet_password)
-            .map_err(map_vault_protection_error)?,
+        EncryptedWalletVault::encrypt(
+            activation,
+            wallet_id,
+            created_at_unix_ms,
+            &seed,
+            wallet_password,
+        )
+        .map_err(map_vault_protection_error)?,
     )
 }
 
 /// Restores an existing portable recovery artifact into a new current-user-protected local vault.
 /// The original recovery file is read only and is never replaced or deleted.
 pub(in crate::wallet) fn prepare_restored_wallet(
+    activation: &WalletActivationProof,
     recovery_path: &Path,
     wallet_id: &str,
     label: &str,
@@ -122,12 +131,17 @@ pub(in crate::wallet) fn prepare_restored_wallet(
     require_distinct_passwords(wallet_password, recovery_password)?;
     let artifact = load_recovery_artifact(recovery_path).map_err(map_recovery_read_error)?;
     let seed = artifact
-        .restore(recovery_password)
+        .restore(activation, recovery_password)
         .map_err(map_recovery_restore_error)?;
     let identity = derive_account_identity(&seed);
-    let vault =
-        EncryptedWalletVault::encrypt(wallet_id, created_at_unix_ms, &seed, wallet_password)
-            .map_err(map_vault_protection_error)?;
+    let vault = EncryptedWalletVault::encrypt(
+        activation,
+        wallet_id,
+        created_at_unix_ms,
+        &seed,
+        wallet_password,
+    )
+    .map_err(map_vault_protection_error)?;
     Ok(VerifiedWalletOnboarding {
         metadata: WalletPublicMetadata {
             wallet_id: wallet_id.to_string(),
@@ -140,6 +154,31 @@ pub(in crate::wallet) fn prepare_restored_wallet(
         },
         vault: Some(vault),
     })
+}
+
+#[cfg(test)]
+fn prepare_restored_wallet_for_test(
+    recovery_path: &Path,
+    wallet_id: &str,
+    label: &str,
+    created_at_unix_ms: u64,
+    wallet_password: &WalletPassword,
+    recovery_password: &WalletPassword,
+) -> Result<VerifiedWalletOnboarding, WalletOnboardingError> {
+    super::runtime::WalletRuntimeState::with_activation_proof_for_test(
+        super::runtime::WalletOperationKind::Restore,
+        |activation| {
+            prepare_restored_wallet(
+                activation,
+                recovery_path,
+                wallet_id,
+                label,
+                created_at_unix_ms,
+                wallet_password,
+                recovery_password,
+            )
+        },
+    )
 }
 
 impl PreparedWalletOnboarding {
@@ -162,6 +201,7 @@ impl PreparedWalletOnboarding {
     /// storage. The recovery password never enters metadata or persistence.
     pub(in crate::wallet) fn verify_stored_recovery(
         &mut self,
+        activation: &WalletActivationProof,
         selected_path: &Path,
         recovery_password: &WalletPassword,
     ) -> Result<VerifiedWalletOnboarding, WalletOnboardingError> {
@@ -170,7 +210,7 @@ impl PreparedWalletOnboarding {
             return Err(WalletOnboardingError::RecoveryBackupMismatch);
         }
         let restored_seed = stored
-            .restore(recovery_password)
+            .restore(activation, recovery_password)
             .map_err(map_recovery_restore_error)?;
         if derive_account_identity(&restored_seed).address != self.metadata.address {
             return Err(WalletOnboardingError::RecoveryBackupMismatch);
@@ -185,6 +225,18 @@ impl PreparedWalletOnboarding {
             metadata,
             vault: Some(vault),
         })
+    }
+
+    #[cfg(test)]
+    fn verify_stored_recovery_for_test(
+        &mut self,
+        selected_path: &Path,
+        recovery_password: &WalletPassword,
+    ) -> Result<VerifiedWalletOnboarding, WalletOnboardingError> {
+        crate::wallet::runtime::WalletRuntimeState::with_activation_proof_for_test(
+            crate::wallet::runtime::WalletOperationKind::Create,
+            |activation| self.verify_stored_recovery(activation, selected_path, recovery_password),
+        )
     }
 }
 
@@ -210,18 +262,23 @@ impl VerifiedWalletOnboarding {
 }
 
 fn prepare_with_vault(
+    activation: &WalletActivationProof,
     wallet_id: &str,
     label: &str,
     created_at_unix_ms: u64,
     seed: &WalletSeed,
-    _wallet_password: &WalletPassword,
     recovery_password: &WalletPassword,
     vault: EncryptedWalletVault,
 ) -> Result<PreparedWalletOnboarding, WalletOnboardingError> {
     let identity = derive_account_identity(seed);
-    let recovery_artifact =
-        PortableRecoveryArtifact::encrypt(wallet_id, created_at_unix_ms, seed, recovery_password)
-            .map_err(map_recovery_protection_error)?;
+    let recovery_artifact = PortableRecoveryArtifact::encrypt(
+        activation,
+        wallet_id,
+        created_at_unix_ms,
+        seed,
+        recovery_password,
+    )
+    .map_err(map_recovery_protection_error)?;
     Ok(PreparedWalletOnboarding {
         metadata: WalletPublicMetadata {
             wallet_id: wallet_id.to_string(),
@@ -316,14 +373,7 @@ mod tests {
 
     #[test]
     fn production_entry_point_remains_part_of_the_internal_contract() {
-        let entry: fn(
-            &str,
-            &str,
-            u64,
-            &WalletPassword,
-            &WalletPassword,
-        ) -> Result<PreparedWalletOnboarding, WalletOnboardingError> = prepare_new_wallet;
-        std::hint::black_box(entry);
+        std::hint::black_box(prepare_new_wallet);
     }
 
     fn prepared() -> PreparedWalletOnboarding {
@@ -337,16 +387,21 @@ mod tests {
             &wallet_password,
         )
         .unwrap();
-        prepare_with_vault(
-            "primary",
-            "Primary Wallet",
-            1_700_000_000_000,
-            &seed,
-            &wallet_password,
-            &recovery_password,
-            vault,
+        crate::wallet::runtime::WalletRuntimeState::with_activation_proof_for_test(
+            crate::wallet::runtime::WalletOperationKind::Create,
+            |activation| {
+                prepare_with_vault(
+                    activation,
+                    "primary",
+                    "Primary Wallet",
+                    1_700_000_000_000,
+                    &seed,
+                    &recovery_password,
+                    vault,
+                )
+                .unwrap()
+            },
         )
-        .unwrap()
     }
 
     #[test]
@@ -386,7 +441,7 @@ mod tests {
         }
 
         let mut verified = prepared
-            .verify_stored_recovery(&backup_path, &password(RECOVERY_PASSWORD))
+            .verify_stored_recovery_for_test(&backup_path, &password(RECOVERY_PASSWORD))
             .unwrap();
         assert!(verified.public_metadata().backup_verified);
         assert!(verified.public_metadata().locked);
@@ -395,7 +450,7 @@ mod tests {
         assert!(metadata.locked);
 
         let vault = load_vault(&vault_path).unwrap();
-        let restored = vault.unlock(&password(WALLET_PASSWORD)).unwrap();
+        let restored = vault.unlock_for_test(&password(WALLET_PASSWORD)).unwrap();
         assert_eq!(derive_account_identity(&restored).address, metadata.address);
     }
 
@@ -411,7 +466,7 @@ mod tests {
             original_backup = fs::read(&backup_path).unwrap();
         }
 
-        let mut restored = prepare_restored_wallet(
+        let mut restored = prepare_restored_wallet_for_test(
             &backup_path,
             "restored",
             "Restored Wallet",
@@ -427,7 +482,7 @@ mod tests {
 
         let vault = load_vault(&restored_vault_path).unwrap();
         let seed = vault
-            .unlock(&password("new local wallet password"))
+            .unlock_for_test(&password("new local wallet password"))
             .unwrap();
         assert_eq!(
             derive_account_identity(&seed).address,
@@ -443,7 +498,7 @@ mod tests {
         prepared.store_recovery_backup(&backup_path).unwrap();
         assert_eq!(
             prepared
-                .verify_stored_recovery(
+                .verify_stored_recovery_for_test(
                     &backup_path,
                     &password("wrong but sufficiently long recovery password"),
                 )
@@ -457,7 +512,7 @@ mod tests {
         fs::write(&backup_path, bytes).unwrap();
         assert_eq!(
             prepared
-                .verify_stored_recovery(&backup_path, &password(RECOVERY_PASSWORD))
+                .verify_stored_recovery_for_test(&backup_path, &password(RECOVERY_PASSWORD),)
                 .unwrap_err(),
             WalletOnboardingError::RecoveryBackupMismatch
         );
@@ -475,7 +530,7 @@ mod tests {
             WalletOnboardingError::RecoveryDestinationExists
         );
         let mut verified = prepared
-            .verify_stored_recovery(&backup_path, &password(RECOVERY_PASSWORD))
+            .verify_stored_recovery_for_test(&backup_path, &password(RECOVERY_PASSWORD))
             .unwrap();
         verified.store_local_vault(&vault_path).unwrap();
         assert_eq!(

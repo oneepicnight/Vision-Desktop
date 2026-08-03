@@ -530,7 +530,7 @@ mod tests {
     use super::*;
     use crate::wallet::{
         secrets::WalletSeed,
-        transaction::{sign_cash_transfer, CashTransferDraft},
+        transaction::{sign_cash_transfer_for_test, CashTransferDraft},
     };
 
     const WALLET_ID: &str = "primary";
@@ -538,7 +538,7 @@ mod tests {
     fn accepted_transaction() -> (VisionTransaction, WalletSubmissionOutcome) {
         let seed = WalletSeed::for_test(7);
         let draft = CashTransferDraft::for_current_nonce(3, "22".repeat(32), 42);
-        let transaction = sign_cash_transfer(&seed, &draft).unwrap();
+        let transaction = sign_cash_transfer_for_test(&seed, &draft).unwrap();
         let tx_id = canonical_transaction_id(&transaction).unwrap();
         let outcome = WalletSubmissionOutcome::Accepted {
             tx_id,

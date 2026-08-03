@@ -1,3 +1,4 @@
+use super::runtime::WalletActivationProof;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use std::fmt;
 use zeroize::Zeroizing;
@@ -21,7 +22,9 @@ impl WalletSeed {
         operation(self.0.expose_secret())
     }
 
-    pub(in crate::wallet) fn generate() -> Result<Self, getrandom::Error> {
+    pub(in crate::wallet) fn generate(
+        _activation: &WalletActivationProof,
+    ) -> Result<Self, getrandom::Error> {
         let mut random_result = Ok(());
         let seed = SecretBox::<[u8; WALLET_SEED_BYTES]>::init_with_mut(|bytes| {
             random_result = getrandom::fill(bytes);

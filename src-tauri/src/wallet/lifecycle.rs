@@ -56,6 +56,7 @@ enum WalletLifecycleCheckpoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WalletLifecycleError {
     RuntimeUnavailable,
+    ActivationUnavailable,
     InvalidWindow,
     OperationInProgress,
     InvalidRequest,
@@ -82,6 +83,7 @@ impl WalletLifecycleError {
     pub(in crate::wallet) const fn code(self) -> &'static str {
         match self {
             Self::RuntimeUnavailable => "wallet_runtime_unavailable",
+            Self::ActivationUnavailable => "wallet_activation_unavailable",
             Self::InvalidWindow => "invalid_window",
             Self::OperationInProgress => "operation_in_progress",
             Self::InvalidRequest => "invalid_request",
@@ -110,6 +112,7 @@ impl fmt::Display for WalletLifecycleError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::RuntimeUnavailable => "secure wallet runtime is unavailable",
+            Self::ActivationUnavailable => "secure wallet activation is unavailable",
             Self::InvalidWindow => "wallet access is unavailable from this window",
             Self::OperationInProgress => "another wallet operation is already in progress",
             Self::InvalidRequest => "wallet request is invalid",
@@ -216,6 +219,7 @@ impl WalletLifecycleAdapters {
             .runtime
             .begin_operation(owner_window, WalletOperationKind::Create)
             .map_err(map_runtime_error)?;
+        let activation = operation.activation_proof();
         let recovery_path = self
             .runtime
             .consume_recovery_path(
@@ -230,6 +234,7 @@ impl WalletLifecycleAdapters {
         let wallet_password = wallet_secret.into_wallet_password();
         let recovery_password = recovery_secret.into_wallet_password();
         let mut prepared = prepare_new_wallet(
+            activation,
             wallet_id,
             label,
             created_at_unix_ms,
@@ -247,7 +252,7 @@ impl WalletLifecycleAdapters {
         self.interrupt_at(WalletLifecycleCheckpoint::CreateRecoveryStored)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         let mut verified = prepared
-            .verify_stored_recovery(&recovery_path, &recovery_password)
+            .verify_stored_recovery(activation, &recovery_path, &recovery_password)
             .map_err(map_onboarding_error)?;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreateRecoveryVerified)?;
@@ -299,6 +304,7 @@ impl WalletLifecycleAdapters {
             .runtime
             .begin_operation(owner_window, WalletOperationKind::Restore)
             .map_err(map_runtime_error)?;
+        let activation = operation.activation_proof();
         let recovery_path = self
             .runtime
             .consume_recovery_path(
@@ -313,6 +319,7 @@ impl WalletLifecycleAdapters {
         let wallet_password = new_wallet_secret.into_wallet_password();
         let recovery_password = recovery_secret.into_wallet_password();
         let mut restored = prepare_restored_wallet(
+            activation,
             &recovery_path,
             wallet_id,
             label,
@@ -344,12 +351,13 @@ impl WalletLifecycleAdapters {
             .runtime
             .begin_operation(owner_window, WalletOperationKind::Unlock)
             .map_err(map_runtime_error)?;
+        let activation = operation.activation_proof();
         let vault = load_vault(&self.vault_path).map_err(map_vault_load_error)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         let wallet_password = wallet_secret.into_wallet_password();
         let status = self
             .runtime
-            .unlock_vault(&vault, &wallet_password)
+            .unlock_vault(activation, &vault, &wallet_password)
             .map_err(map_session_error)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         Ok(status)
@@ -463,6 +471,7 @@ fn now_unix_ms() -> Result<u64, WalletLifecycleError> {
 fn map_runtime_error(error: WalletRuntimeError) -> WalletLifecycleError {
     match error {
         WalletRuntimeError::InvalidWindow => WalletLifecycleError::InvalidWindow,
+        WalletRuntimeError::ActivationUnavailable => WalletLifecycleError::ActivationUnavailable,
         WalletRuntimeError::OperationInProgress => WalletLifecycleError::OperationInProgress,
         WalletRuntimeError::InvalidRequest => WalletLifecycleError::InvalidRequest,
         WalletRuntimeError::PathAuthorizationInvalid => {
@@ -550,7 +559,10 @@ fn map_session_error(error: WalletSessionError) -> WalletLifecycleError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wallet::runtime::{RecoveryPathToken, RecoverySelectionPermit};
+    use crate::wallet::{
+        activation::all_activation_requirements_for_test,
+        runtime::{RecoveryPathToken, RecoverySelectionPermit},
+    };
     use std::fs;
 
     const MAIN: &str = "main";
@@ -573,6 +585,51 @@ mod tests {
         runtime
             .complete_recovery_path_selection(permit, path.to_path_buf())
             .unwrap()
+    }
+
+    #[test]
+    fn lifecycle_adapters_refuse_every_individually_unmet_activation_gate() {
+        let directory = tempfile::tempdir().unwrap();
+        for requirement in all_activation_requirements_for_test() {
+            let runtime = Arc::new(WalletRuntimeState::for_test_missing_activation(requirement));
+            let vault_path = directory
+                .path()
+                .join(format!("blocked-{requirement:?}"))
+                .join(WALLET_VAULT_FILE);
+            let adapters = WalletLifecycleAdapters::for_test(runtime, &vault_path);
+
+            assert_eq!(
+                adapters
+                    .create(
+                        MAIN,
+                        "blocked",
+                        "Blocked",
+                        "unused",
+                        secret(WALLET_PASSWORD),
+                        secret(RECOVERY_PASSWORD),
+                    )
+                    .unwrap_err(),
+                WalletLifecycleError::ActivationUnavailable,
+            );
+            assert_eq!(
+                adapters
+                    .restore(
+                        MAIN,
+                        "blocked",
+                        "Blocked",
+                        "unused",
+                        secret(RESTORED_PASSWORD),
+                        secret(RECOVERY_PASSWORD),
+                    )
+                    .unwrap_err(),
+                WalletLifecycleError::ActivationUnavailable,
+            );
+            assert_eq!(
+                adapters.unlock(MAIN, secret(WALLET_PASSWORD)).unwrap_err(),
+                WalletLifecycleError::ActivationUnavailable,
+            );
+            assert_eq!(adapters.lock().unwrap(), WalletLockResult { locked: true },);
+        }
     }
 
     #[test]
@@ -915,6 +972,7 @@ mod tests {
     fn lifecycle_errors_are_fixed_and_never_disclose_paths_or_retry_timing() {
         let errors = [
             WalletLifecycleError::RuntimeUnavailable,
+            WalletLifecycleError::ActivationUnavailable,
             WalletLifecycleError::InvalidWindow,
             WalletLifecycleError::OperationInProgress,
             WalletLifecycleError::InvalidRequest,

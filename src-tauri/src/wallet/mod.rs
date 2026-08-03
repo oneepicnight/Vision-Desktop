@@ -5,6 +5,7 @@
 //! derive Serde traits, or enter the general Desktop event/state pipeline.
 
 mod account;
+mod activation;
 mod amount;
 mod contract;
 mod device_protection;

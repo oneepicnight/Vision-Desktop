@@ -1,4 +1,5 @@
 use super::{
+    runtime::WalletActivationProof,
     secrets::{WalletPassword, WalletSeed},
     vault::{EncryptedWalletVault, WalletVaultError},
 };
@@ -67,14 +68,16 @@ impl WalletSession {
 
     pub(in crate::wallet) fn unlock(
         &mut self,
+        activation: &WalletActivationProof,
         vault: &EncryptedWalletVault,
         password: &WalletPassword,
     ) -> Result<(), WalletSessionError> {
-        self.unlock_at(vault, password, self.now_ms())
+        self.unlock_at_authorized(activation, vault, password, self.now_ms())
     }
 
-    fn unlock_at(
+    fn unlock_at_authorized(
         &mut self,
+        activation: &WalletActivationProof,
         vault: &EncryptedWalletVault,
         password: &WalletPassword,
         now_ms: u64,
@@ -83,7 +86,7 @@ impl WalletSession {
         // unlocked seed before any new password attempt is evaluated.
         self.lock();
         self.throttle.check(now_ms)?;
-        match vault.unlock(password) {
+        match vault.unlock(activation, password) {
             Ok(seed) => {
                 self.throttle.reset();
                 self.state = SessionState::Unlocked {
@@ -101,6 +104,28 @@ impl WalletSession {
                 Err(mapped)
             }
         }
+    }
+
+    #[cfg(test)]
+    fn unlock_at(
+        &mut self,
+        vault: &EncryptedWalletVault,
+        password: &WalletPassword,
+        now_ms: u64,
+    ) -> Result<(), WalletSessionError> {
+        super::runtime::WalletRuntimeState::with_activation_proof_for_test(
+            super::runtime::WalletOperationKind::Unlock,
+            |activation| self.unlock_at_authorized(activation, vault, password, now_ms),
+        )
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn unlock_for_test(
+        &mut self,
+        vault: &EncryptedWalletVault,
+        password: &WalletPassword,
+    ) -> Result<(), WalletSessionError> {
+        self.unlock_at(vault, password, self.now_ms())
     }
 
     pub(in crate::wallet) fn lock(&mut self) {
@@ -243,7 +268,9 @@ mod tests {
         let mut session = WalletSession::new();
         assert!(session.is_locked());
 
-        session.unlock(&vault, &password(CORRECT_PASSWORD)).unwrap();
+        session
+            .unlock_for_test(&vault, &password(CORRECT_PASSWORD))
+            .unwrap();
         assert_eq!(
             session
                 .with_seed(|wallet_id, seed| {

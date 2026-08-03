@@ -365,3 +365,47 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(!read("../src/services/coreApi.ts").contains("wallet_"));
     assert!(!read("../package.json").contains("@tauri-apps/plugin-dialog"));
 }
+
+#[test]
+fn wallet_sensitive_authority_requires_runtime_activation_proof() {
+    let activation_source = read("src/wallet/activation.rs");
+    let runtime_source = read("src/wallet/runtime.rs");
+    let onboarding_source = read("src/wallet/onboarding.rs");
+    let recovery_source = read("src/wallet/recovery.rs");
+    let secrets_source = read("src/wallet/secrets.rs");
+    let session_source = read("src/wallet/session.rs");
+    let transaction_source = read("src/wallet/transaction.rs");
+    let vault_source = read("src/wallet/vault.rs");
+
+    assert!(activation_source.contains("INDEPENDENT_SECURITY_REVIEW_APPROVED: bool = false"));
+    assert!(activation_source.contains("WalletActivationRequirement::IndependentSecurityReview"));
+    assert!(runtime_source.contains("activation: WalletActivationPolicy"));
+    assert_eq!(
+        runtime_source
+            .match_indices("self.require_activation()?;")
+            .count(),
+        2
+    );
+    assert!(runtime_source.contains("pub(in crate::wallet) struct WalletActivationProof"));
+    assert_eq!(
+        runtime_source
+            .match_indices("WalletActivationProof { _private: () }")
+            .count(),
+        1
+    );
+    assert!(runtime_source.contains("activation_proof: WalletActivationProof"));
+    assert!(runtime_source.contains("WalletRuntimeError::ActivationUnavailable"));
+
+    for source in [
+        onboarding_source,
+        recovery_source,
+        secrets_source,
+        session_source,
+        transaction_source,
+        vault_source,
+    ] {
+        assert!(source.contains("&WalletActivationProof"));
+        assert!(!source.contains("WalletActivationProof { _private: () }"));
+        assert!(!source.contains("#[tauri::command]"));
+    }
+}

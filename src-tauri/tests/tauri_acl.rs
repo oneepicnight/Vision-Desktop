@@ -334,6 +334,15 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(runtime_production.contains("D:P(A;;GA;;;{user_sid})"));
     assert!(runtime_production.contains("ERROR_ALREADY_EXISTS"));
     assert!(!runtime_production.contains("ReleaseMutex"));
+    assert!(runtime_production.contains("revocation_epoch: AtomicU64"));
+    assert!(runtime_production.contains("pending_revocations: AtomicU64"));
+    assert!(runtime_production.contains("fn revocation_is_pending"));
+    assert!(runtime_production.contains("pending_revocations.fetch_add(1, Ordering::AcqRel)"));
+    assert!(runtime_production.contains("pending_revocations.fetch_sub(1, Ordering::AcqRel)"));
+    assert!(runtime_production.contains("fetch_add(1, Ordering::AcqRel)"));
+    assert!(runtime_production.contains("fn run_authorized<T, E>"));
+    assert!(runtime_production.contains("fn complete<T>"));
+    assert!(!runtime_production.contains("fn activation_proof"));
     assert!(!runtime_source.contains("#[tauri::command]"));
     assert!(!lifecycle_source.contains("#[tauri::command]"));
     assert!(!lifecycle_source.contains("AppHandle"));
@@ -361,7 +370,19 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(!wallet_adapter_source.contains("AppHandle"));
     assert!(wallet_adapter_source.contains("begin_operation"));
     assert!(wallet_adapter_source.contains("consume_recovery_path"));
-    assert!(wallet_adapter_source.contains("ensure_current"));
+    assert_eq!(
+        wallet_adapter_production
+            .match_indices(".run_authorized(")
+            .count(),
+        10
+    );
+    assert_eq!(
+        wallet_adapter_production
+            .match_indices("operation.complete(status)")
+            .count(),
+        3
+    );
+    assert!(!wallet_adapter_production.contains("activation_proof()"));
     assert!(!recovery_selection_source.contains("into_path()"));
     assert!(recovery_selection_source.contains("Some(FilePath::Path(path))"));
     assert!(recovery_selection_source.contains(".set_parent(window)"));

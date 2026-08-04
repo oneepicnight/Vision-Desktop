@@ -51,10 +51,14 @@ events, browser storage, logs, or support packages.
 
 Only the exact `main` window label can begin a wallet operation. Create, restore, unlock, and future
 sign operations share one exclusion slot. A generation-bound permit clears only its own operation,
-so a stale completion cannot clear newer work. The private lifecycle adapters now prove that their
-permit remains current around cryptographic and filesystem stages. Runtime mutex poisoning
-invalidates the session, operation, and recovery authorization and then permanently returns
-`wallet_runtime_unavailable`.
+so a stale completion cannot clear newer work. Each permit also captures an atomic revocation
+epoch. Invalidation increments a pending counter and advances that epoch before waiting for the runtime
+mutex, then clears the session, operation, and path authority. Sensitive lifecycle stages validate
+the epoch before execution and again before their result can escape; final success consumes the
+operation slot while rechecking the same epoch under the runtime mutex. A completed atomic file
+publication may remain after revocation, but no credential, decrypted result, status, or success
+response from that operation is accepted afterward. Runtime mutex poisoning performs the same
+fail-closed revocation and returns `wallet_runtime_unavailable`.
 
 The adapters are managed only as private Rust state. No Tauri command exposes them.
 
@@ -151,7 +155,9 @@ failure contracts.
 
 Automated tests cover per-user global naming, restrictive object security, process-lock exclusion,
 forced-child-termination reacquisition, main-window ownership, mutual
-exclusion, stale permit behavior, mutex poisoning, random and fixed token paths, expiry, single use,
+exclusion, stale permit behavior, atomic epoch revocation while a sensitive stage is running,
+queued and overlapping invalidation while the runtime mutex is held, rejection of authority while revocation is
+pending, final-success suppression, mutex poisoning, random and fixed token paths, expiry, single use,
 lifecycle invalidation, native session/power/end-session message classification and dispatch, fixed
 errors, bounded secret deserialization, Tauri command absence, capability absence, and frontend
 service absence. Unlock and resume are tested as non-restoring events. The complete existing wallet

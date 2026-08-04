@@ -228,7 +228,6 @@ impl WalletLifecycleAdapters {
             .runtime
             .begin_operation(owner_window, WalletOperationKind::Create)
             .map_err(map_runtime_error)?;
-        let activation = operation.activation_proof();
         let recovery_path = self
             .runtime
             .consume_recovery_path(
@@ -239,44 +238,60 @@ impl WalletLifecycleAdapters {
             .map_err(map_runtime_error)?;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreateDestinationConsumed)?;
-        operation.ensure_current().map_err(map_runtime_error)?;
         let wallet_password = wallet_secret.into_wallet_password();
-        let mut prepared = prepare_new_wallet(
-            activation,
-            wallet_id,
-            label,
-            created_at_unix_ms,
-            &wallet_password,
-        )
-        .map_err(map_onboarding_error)?;
-        let recovery_credential = prepared
-            .recovery_credential_for_native_presentation()
-            .map_err(map_onboarding_error)?;
+        let (mut prepared, recovery_credential) = operation
+            .run_authorized(|activation| {
+                let prepared = prepare_new_wallet(
+                    activation,
+                    wallet_id,
+                    label,
+                    created_at_unix_ms,
+                    &wallet_password,
+                )
+                .map_err(map_onboarding_error)?;
+                let recovery_credential = prepared
+                    .recovery_credential_for_native_presentation()
+                    .map_err(map_onboarding_error)?;
+                Ok((prepared, recovery_credential))
+            })
+            .map_err(map_runtime_error)??;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreatePrepared)?;
-        operation.ensure_current().map_err(map_runtime_error)?;
-        prepared
-            .store_recovery_backup(&recovery_path)
-            .map_err(map_onboarding_error)?;
+        operation
+            .run_authorized(|_| {
+                prepared
+                    .store_recovery_backup(&recovery_path)
+                    .map_err(map_onboarding_error)
+            })
+            .map_err(map_runtime_error)??;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreateRecoveryStored)?;
-        operation.ensure_current().map_err(map_runtime_error)?;
-        let mut verified = prepared
-            .verify_stored_recovery(activation, &recovery_path)
-            .map_err(map_onboarding_error)?;
+        let mut verified = operation
+            .run_authorized(|activation| {
+                prepared
+                    .verify_stored_recovery(activation, &recovery_path)
+                    .map_err(map_onboarding_error)
+            })
+            .map_err(map_runtime_error)??;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreateRecoveryVerified)?;
-        operation.ensure_current().map_err(map_runtime_error)?;
-        let metadata = verified
-            .store_local_vault(&self.vault_path)
-            .map_err(map_onboarding_error)?;
+        let metadata = operation
+            .run_authorized(|_| {
+                verified
+                    .store_local_vault(&self.vault_path)
+                    .map_err(map_onboarding_error)
+            })
+            .map_err(map_runtime_error)??;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreateVaultStored)?;
-        operation.ensure_current().map_err(map_runtime_error)?;
-        let status = self
-            .runtime
-            .remember_public_metadata(metadata)
-            .map_err(map_runtime_error)?;
+        let status = operation
+            .run_authorized(|_| {
+                self.runtime
+                    .remember_public_metadata(metadata)
+                    .map_err(map_runtime_error)
+            })
+            .map_err(map_runtime_error)??;
+        let status = operation.complete(status).map_err(map_runtime_error)?;
         Ok(WalletCreationResult {
             status,
             recovery_credential,
@@ -319,7 +334,6 @@ impl WalletLifecycleAdapters {
             .runtime
             .begin_operation(owner_window, WalletOperationKind::Restore)
             .map_err(map_runtime_error)?;
-        let activation = operation.activation_proof();
         let recovery_path = self
             .runtime
             .consume_recovery_path(
@@ -330,33 +344,43 @@ impl WalletLifecycleAdapters {
             .map_err(map_runtime_error)?;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::RestoreSourceConsumed)?;
-        operation.ensure_current().map_err(map_runtime_error)?;
         let wallet_password = new_wallet_secret.into_wallet_password();
         let recovery_credential = recovery_secret
             .into_recovery_credential()
             .map_err(map_recovery_credential_error)?;
-        let mut restored = prepare_restored_wallet(
-            activation,
-            &recovery_path,
-            wallet_id,
-            label,
-            created_at_unix_ms,
-            &wallet_password,
-            &recovery_credential,
-        )
-        .map_err(map_onboarding_error)?;
+        let mut restored = operation
+            .run_authorized(|activation| {
+                prepare_restored_wallet(
+                    activation,
+                    &recovery_path,
+                    wallet_id,
+                    label,
+                    created_at_unix_ms,
+                    &wallet_password,
+                    &recovery_credential,
+                )
+                .map_err(map_onboarding_error)
+            })
+            .map_err(map_runtime_error)??;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::RestorePrepared)?;
-        operation.ensure_current().map_err(map_runtime_error)?;
-        let metadata = restored
-            .store_local_vault(&self.vault_path)
-            .map_err(map_onboarding_error)?;
+        let metadata = operation
+            .run_authorized(|_| {
+                restored
+                    .store_local_vault(&self.vault_path)
+                    .map_err(map_onboarding_error)
+            })
+            .map_err(map_runtime_error)??;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::RestoreVaultStored)?;
-        operation.ensure_current().map_err(map_runtime_error)?;
-        self.runtime
-            .remember_public_metadata(metadata)
-            .map_err(map_runtime_error)
+        let status = operation
+            .run_authorized(|_| {
+                self.runtime
+                    .remember_public_metadata(metadata)
+                    .map_err(map_runtime_error)
+            })
+            .map_err(map_runtime_error)??;
+        operation.complete(status).map_err(map_runtime_error)
     }
 
     pub(in crate::wallet) fn unlock(
@@ -368,16 +392,18 @@ impl WalletLifecycleAdapters {
             .runtime
             .begin_operation(owner_window, WalletOperationKind::Unlock)
             .map_err(map_runtime_error)?;
-        let activation = operation.activation_proof();
-        let vault = load_vault(&self.vault_path).map_err(map_vault_load_error)?;
-        operation.ensure_current().map_err(map_runtime_error)?;
+        let vault = operation
+            .run_authorized(|_| load_vault(&self.vault_path).map_err(map_vault_load_error))
+            .map_err(map_runtime_error)??;
         let wallet_password = wallet_secret.into_wallet_password();
-        let status = self
-            .runtime
-            .unlock_vault(activation, &vault, &wallet_password)
-            .map_err(map_session_error)?;
-        operation.ensure_current().map_err(map_runtime_error)?;
-        Ok(status)
+        let status = operation
+            .run_authorized(|activation| {
+                self.runtime
+                    .unlock_vault(activation, &vault, &wallet_password)
+                    .map_err(map_session_error)
+            })
+            .map_err(map_runtime_error)??;
+        operation.complete(status).map_err(map_runtime_error)
     }
 
     pub(in crate::wallet) fn lock(&self) -> Result<WalletLockResult, WalletLifecycleError> {

@@ -77,9 +77,12 @@ one generation-bound pending native selection, and one short-lived recovery auth
 Rust-only native save/open adapters validate local non-reparse Windows paths and never return paths
 to React; no wallet command exposes them. Page load/reload, main-window close/destruction,
 Windows session lock, suspend/standby, logoff/shutdown, teardown, and mutex poison synchronously
-revoke authority. Unlock and resume never restore authority automatically. `SecretInput` provides a
-bounded, zeroizing future Rust request representation. `docs/WALLET_RUNTIME_SECURITY.md` records
-the exact boundary.
+revoke authority. An atomic pending-revocation counter stays nonzero until all overlapping
+invalidations finish, and the revocation epoch is advanced before each invalidation waits for the runtime
+mutex; sensitive lifecycle stages check it both before execution and before releasing results, and
+final completion is linearized against revocation. Unlock and resume never restore authority
+automatically. `SecretInput` provides a bounded, zeroizing future Rust request representation.
+`docs/WALLET_LIFECYCLE_REVOCATION.md` and `docs/WALLET_RUNTIME_SECURITY.md` record the exact boundary.
 
 The internal vault schema is version 2 and records the existing `windows_dpapi_current_user` protection algorithm. Copying the local vault file alone is insufficient for recovery: decryption also requires the wallet password and the DPAPI-protected local factor. The internal portable recovery schema is version 1 and deliberately excludes that factor. Its tests prove that the encrypted artifact restores the exact original opaque seed and Vision account identity using a Rust-generated 256-bit recovery credential. Arbitrary user-chosen recovery passwords are rejected. The credential has an exact lowercase, versioned format and a 32-bit BLAKE3-derived checksum for transcription-error detection; the checksum adds no entropy. The onboarding flow never overwrites the selected destination, never creates arbitrary parent directories, reloads the stored artifact through a bounded regular-file parser, and withholds local-vault storage until the restored identity matches. The artifact and credential have no Tauri command, frontend state, automatic export, or clipboard path. Portable backups rely on encryption rather than local filesystem permissions so that offline recovery remains possible on another machine. The future native presentation must require an explicit offline destination and successful operator verification without routing the credential through React.
 

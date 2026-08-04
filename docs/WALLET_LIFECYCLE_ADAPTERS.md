@@ -97,6 +97,15 @@ turn a completed lock into a reported failure. Current account and storage infor
 requested separately through status. The existing five-minute idle lock and Windows lifecycle
 invalidation continue to apply.
 
+Create, restore, and unlock now execute each cryptographic, recovery, vault, metadata, and unlock
+stage through the runtime's generation- and epoch-bound authority closure. Invalidation advances
+the epoch before it waits for the runtime mutex. Every stage checks authority before execution and
+again before returning its result, and each lifecycle result passes a final atomic completion check.
+This prevents a lock, suspend, session change, teardown, or concurrent invalidation from being
+followed by an accepted stale credential, unlocked status, metadata update result, or success
+response. Irreversible create-new or atomic publication that completed before cancellation may
+remain on disk, but the operation fails closed and must be reconciled explicitly on the next run.
+
 ## Public metadata and restart behavior
 
 Lifecycle responses contain only:
@@ -120,6 +129,10 @@ The lifecycle translates lower-level failures into fixed codes and operator-safe
 not return paths, operating-system errors, passwords, ciphertext, wallet material, raw retry
 durations, or recovery contents. Incorrect wallet passwords and damaged encrypted data remain
 indistinguishable at the boundary.
+
+The lifecycle adapters cannot obtain a reusable activation-proof reference. The proof is exposed
+only inside the runtime-controlled stage closure, preventing future internal wiring from separating
+authority validation from the sensitive operation it authorizes.
 
 ## Activation gates
 

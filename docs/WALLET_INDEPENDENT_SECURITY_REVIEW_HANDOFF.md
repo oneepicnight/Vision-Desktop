@@ -115,10 +115,10 @@ review. It must not be introduced as an unversioned implementation detail.
 
 ## Deterministic evidence
 
-At the target commit, the Windows validation baseline is:
+At the corrected target commit, the Windows validation baseline is:
 
-- 121 Rust unit tests pass.
-- 5 Tauri authority tests pass.
+- 147 Rust unit tests pass.
+- 7 Tauri authority tests pass.
 - 2 production WebView security tests pass.
 - strict Clippy passes with warnings denied.
 - Rust formatting check passes.
@@ -129,6 +129,14 @@ preparation, recovery storage, recovery verification, and vault storage, and aft
 consumption, encrypted preparation, and vault storage. They assert that later stages do not run,
 the runtime remains locked without accepted account metadata, source recovery bytes never change,
 destinations are never overwritten, and only completed encrypted writes may remain.
+
+The corrected runtime additionally uses an atomic revocation epoch and pending-revocation counter. Invalidation
+advances the epoch before waiting for the runtime mutex. Lifecycle adapters can access activation
+proof only inside a runtime-controlled stage closure that validates authority before and after the
+stage; final completion revalidates and consumes the operation slot under the mutex. Real concurrent
+tests hold an authorized stage and the runtime mutex while invalidation is requested, prove the epoch
+advances without waiting, and prove neither the stage result nor final success can escape. This is a
+correction offered for re-review, not a self-approval of the original M-04 finding.
 
 Run at minimum:
 
@@ -149,7 +157,7 @@ fully compromised Windows user session.
 
 ## Known blockers and limitations
 
-1. Independent review is not yet complete.
+1. Independent re-review of the corrected findings is not yet complete.
 2. Wallet commands and wallet permissions remain deliberately unregistered.
 3. The supported Core release still must prove private loopback-only binding end to end.
 4. Signing primitives are not connected to the unlocked session or a reviewed command boundary.
@@ -157,8 +165,10 @@ fully compromised Windows user session.
 6. Strict hardware binding is not provided or claimed by vault version 2.
 7. Portable recovery is an offline password-guessing target if stolen; UI guidance and real-device
    recovery drills remain required.
-8. Deterministic checkpoints model lifecycle invalidation between sensitive stages; sudden process
-   termination during a Windows system call still requires external fault testing.
+8. Deterministic checkpoints and real concurrent epoch tests cover lifecycle invalidation between
+   and during sensitive stages. The runtime suppresses results after revocation, but a completed
+   atomic/create-new filesystem side effect may remain and sudden process termination during a
+   Windows system call still requires external fault testing.
 9. The local activity journal is incomplete by design. Version 2 adds wallet-seed authentication, an authenticated event chain, handle-bound reads, copy-on-write atomic Windows publication, and a per-user global process lease across Windows sessions. Complete-prefix rollback, real console/RDP qualification, and abandoned protected staging-file policy still require review
    before send activation.
 

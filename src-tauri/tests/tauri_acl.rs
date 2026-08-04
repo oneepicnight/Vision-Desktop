@@ -320,6 +320,20 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(wallet_adapter_source.contains("FILE_ATTRIBUTE_REPARSE_POINT"));
     assert!(lib_source.contains("app.manage(wallet_adapters)"));
     assert!(lib_source.contains("runtime.invalidate_all()"));
+    let runtime_production = runtime_source
+        .split("#[cfg(test)]\nmod tests")
+        .next()
+        .expect("wallet runtime has production source");
+    assert!(runtime_production.contains(
+        "const WALLET_PROCESS_MUTEX_BASE: &str = \"com.vision.desktop.wallet-runtime.v2\""
+    ));
+    assert!(runtime_production.contains("\"Global\\\\{base_name}.{}\""));
+    assert!(runtime_production.contains("storage_security::current_user_sid_string()"));
+    assert!(runtime_production.contains("SECURITY_ATTRIBUTES"));
+    assert!(runtime_production.contains("bInheritHandle: 0"));
+    assert!(runtime_production.contains("D:P(A;;GA;;;{user_sid})"));
+    assert!(runtime_production.contains("ERROR_ALREADY_EXISTS"));
+    assert!(!runtime_production.contains("ReleaseMutex"));
     assert!(!runtime_source.contains("#[tauri::command]"));
     assert!(!lifecycle_source.contains("#[tauri::command]"));
     assert!(!lifecycle_source.contains("AppHandle"));

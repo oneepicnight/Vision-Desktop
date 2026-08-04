@@ -33,8 +33,10 @@ receiver window. Although the simultaneous-launch test did not reproduce a failu
 shows a narrow startup interval in which a duplicate can observe the mutex before that window is
 discoverable. The plugin is therefore a strong Desktop-level duplicate-launch control, but it is
 not the sole future custody lock. `WalletRuntimeState` now acquires an independent, fail-closed
-Windows mutex during application setup, before Core resource setup, and holds it until teardown.
-No wallet command can access the runtime yet.
+per-user `Global\` Windows mutex during application setup, before Core resource setup, and holds
+the non-inheritable process lease until teardown. The name is shared across console, fast-user-
+switching, and RDP sessions for the same user, while its DACL excludes other ordinary users. No
+wallet command can access the runtime yet.
 
 The private runtime also owns a hidden Rust-only Windows notification window. Windows session lock,
 suspend/standby, logoff/shutdown, and native listener teardown synchronously lock the wallet session

@@ -89,10 +89,10 @@ the source for current canonical observations.
 
 An interruption before atomic publication can leave a randomly named, access-controlled staging
 file containing public journal metadata. It is never selected as the live journal and can be
-cleaned by a future bounded maintenance routine. Cross-process and cross-Windows-session ownership
-is intentionally assigned to the next hardening tranche; without that exclusion, two legitimate
-Desktop processes could each replace the journal using different previously valid snapshots. The
-process-local mutex remains defense against in-process overlap only.
+cleaned by a future bounded maintenance routine. A separate restrictive per-user `Global\` Windows
+process lease now prevents two legitimate Desktop processes across console, fast-user-switching,
+or RDP sessions from replacing the journal from different snapshots. The journal's process-local
+mutex remains defense against overlapping operations within that sole owning process.
 
 Version 1 journals fail closed; no migration is enabled while custody commands remain
 unregistered.

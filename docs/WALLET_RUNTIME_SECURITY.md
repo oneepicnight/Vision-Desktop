@@ -13,20 +13,25 @@ command is designed or exposed.
 
 ## Independent process ownership
 
-The runtime atomically acquires the Windows kernel mutex
-`Local\com.vision.desktop.wallet-runtime.v1`. It retains the owning handle for the runtime's entire
-lifetime. A second process that reaches application setup cannot create wallet runtime state and
-fails closed with a fixed, non-sensitive startup error.
+The runtime atomically creates a per-user Windows kernel mutex in the global namespace:
+`Global\com.vision.desktop.wallet-runtime.v2.<BLAKE3-user-SID>`. It retains the non-inheritable
+handle for the runtime's entire lifetime. The SID is hashed before it enters the name, and the
+object DACL grants access only to the current user, Local System, and built-in administrators. A
+second process for the same Windows user in any console, fast-user-switching, or RDP session cannot
+create wallet runtime state and fails closed with a fixed, non-sensitive startup error.
 
 This lock is independent of the Tauri single-instance plugin and closes the reviewed interval
 between that plugin's Windows mutex creation and hidden receiver-window creation. Normal duplicates
 still use the plugin's friendly main-window activation path; the wallet mutex is the final custody
 exclusion boundary.
 
-Windows releases the process-owned kernel object after process termination. The lock carries no
-secret data and grants no filesystem or wallet access. The default Windows object security can let
-another same-session process deny startup by pre-claiming the name; that is a fail-closed denial of
-service, not a path to signing authority.
+The mutex is a process-held named-object lease and is deliberately not thread-owned. Normal drop or
+Windows process termination closes the handle and releases the name without relying on teardown
+from the creating thread. The lock carries no secret data and grants no filesystem or wallet
+access. Another same-user process, System, or an administrator can still deny startup by
+pre-claiming or retaining the name; that is a fail-closed denial of service, not a path to signing
+authority. `docs/WALLET_CROSS_SESSION_OWNERSHIP.md` records the exact contract and remaining manual
+Windows-session qualification.
 
 ## Runtime contents
 
@@ -144,7 +149,8 @@ failure contracts.
 
 ## Validation
 
-Automated tests cover process-lock exclusion and reacquisition, main-window ownership, mutual
+Automated tests cover per-user global naming, restrictive object security, process-lock exclusion,
+forced-child-termination reacquisition, main-window ownership, mutual
 exclusion, stale permit behavior, mutex poisoning, random and fixed token paths, expiry, single use,
 lifecycle invalidation, native session/power/end-session message classification and dispatch, fixed
 errors, bounded secret deserialization, Tauri command absence, capability absence, and frontend
@@ -160,3 +166,9 @@ Executable validation on 2026-08-01 also proved that a normal duplicate exits su
 disturbing the primary runtime; a launch made while an external process owns the exact wallet mutex
 fails closed with a nonzero exit and leaves no Desktop process alive; and a fresh launch becomes the
 sole runtime owner after that mutex is released.
+
+Automated validation on 2026-08-03 replaced the session-local mutex with the per-user global
+process lease. A spawned child process acquired the real protected object, the parent failed closed
+while that child was alive, the child was forcibly terminated, and the parent then acquired the
+same name successfully. Release qualification still requires console/RDP and fast-user-switching
+exercises on supported Windows installations.

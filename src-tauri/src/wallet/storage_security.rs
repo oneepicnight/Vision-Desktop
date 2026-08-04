@@ -32,6 +32,11 @@ pub(in crate::wallet) fn verify_open_file(file: &File) -> Result<(), WalletVault
 }
 
 #[cfg(windows)]
+pub(in crate::wallet) fn current_user_sid_string() -> Result<String, WalletVaultError> {
+    platform::current_user_sid_string()
+}
+
+#[cfg(windows)]
 mod platform {
     use super::*;
     use std::{
@@ -316,7 +321,7 @@ mod platform {
         Ok(sid)
     }
 
-    fn current_user_sid_string() -> Result<String, WalletVaultError> {
+    pub(super) fn current_user_sid_string() -> Result<String, WalletVaultError> {
         let mut token: HANDLE = ptr::null_mut();
         // SAFETY: `GetCurrentProcess` returns a pseudo-handle valid for this
         // process; `token` is an initialized output pointer.

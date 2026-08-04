@@ -29,7 +29,7 @@ const MAIN_WINDOW_LABEL: &str = "main";
 const PATH_TOKEN_BYTES: usize = 32;
 const PATH_TOKEN_HEX_BYTES: usize = PATH_TOKEN_BYTES * 2;
 const PATH_TOKEN_TTL_MS: u64 = 2 * 60 * 1000;
-const WALLET_PROCESS_MUTEX: &str = "Local\\com.vision.desktop.wallet-runtime.v1";
+const WALLET_PROCESS_MUTEX_BASE: &str = "com.vision.desktop.wallet-runtime.v2";
 
 /// Rust-only wallet authority owned by the application process.
 ///
@@ -170,7 +170,7 @@ impl std::error::Error for WalletRuntimeError {}
 impl WalletRuntimeState {
     pub(crate) fn initialize() -> Result<Self, WalletRuntimeError> {
         Self::with_process_lock(
-            WalletProcessLock::acquire(WALLET_PROCESS_MUTEX)?,
+            WalletProcessLock::acquire(WALLET_PROCESS_MUTEX_BASE)?,
             WalletActivationPolicy::production(),
         )
     }
@@ -499,7 +499,7 @@ impl WalletRuntimeState {
         static NEXT_TEST_LOCK: AtomicU64 = AtomicU64::new(1);
         let suffix = NEXT_TEST_LOCK.fetch_add(1, Ordering::Relaxed);
         let name = format!(
-            "Local\\com.vision.desktop.wallet-runtime.test.{}.{}",
+            "com.vision.desktop.wallet-runtime.test.{}.{}",
             std::process::id(),
             suffix
         );
@@ -597,31 +597,46 @@ fn require_main_window(window_label: &str) -> Result<(), WalletRuntimeError> {
 #[cfg(windows)]
 mod platform {
     use super::WalletRuntimeError;
-    use std::{os::windows::ffi::OsStrExt, ptr};
+    use crate::wallet::storage_security;
+    use std::{mem::size_of, os::windows::ffi::OsStrExt, ptr};
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS},
-        System::Threading::{CreateMutexW, ReleaseMutex},
+        Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, HLOCAL},
+        Security::{
+            Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            },
+            PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+        },
+        System::Threading::CreateMutexW,
     };
 
     pub(super) struct ProcessLock(isize);
 
-    pub(super) fn acquire(name: &str) -> Result<ProcessLock, WalletRuntimeError> {
-        if name.is_empty() || name.encode_utf16().any(|unit| unit == 0) {
-            return Err(WalletRuntimeError::ProcessLockUnavailable);
-        }
-        let wide: Vec<u16> = std::ffi::OsStr::new(name)
+    pub(super) fn acquire(base_name: &str) -> Result<ProcessLock, WalletRuntimeError> {
+        let user_sid = storage_security::current_user_sid_string()
+            .map_err(|_| WalletRuntimeError::ProcessLockUnavailable)?;
+        let name = lock_name(base_name, &user_sid)?;
+        let descriptor = SecurityDescriptor::for_current_user(&user_sid)?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
+                .map_err(|_| WalletRuntimeError::ProcessLockUnavailable)?,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        let wide: Vec<u16> = std::ffi::OsStr::new(&name)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        // SAFETY: the security descriptor is null (Windows default), initial ownership is
-        // requested atomically, and `wide` is a valid null-terminated UTF-16 name.
-        let handle = unsafe { CreateMutexW(ptr::null(), 1, wide.as_ptr()) };
+        // SAFETY: `attributes` references the valid descriptor allocation for this call and the
+        // handle is explicitly non-inheritable. The mutex is deliberately not thread-owned: the
+        // retained kernel-object name, rather than mutex ownership state, is the process lease.
+        let handle = unsafe { CreateMutexW(&attributes, 0, wide.as_ptr()) };
         if handle.is_null() {
             return Err(WalletRuntimeError::ProcessLockUnavailable);
         }
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-            // SAFETY: this process owns the real handle returned by `CreateMutexW` but did not
-            // acquire initial ownership of the existing mutex.
+            // SAFETY: this process owns the real handle returned by `CreateMutexW`. Closing the
+            // duplicate reference preserves the other process's lease and leaks no handle.
             unsafe {
                 let _ = CloseHandle(handle);
             }
@@ -630,15 +645,85 @@ mod platform {
         Ok(ProcessLock(handle as isize))
     }
 
+    fn lock_name(base_name: &str, user_sid: &str) -> Result<String, WalletRuntimeError> {
+        if base_name.is_empty()
+            || base_name.len() > 128
+            || !base_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+            || user_sid.is_empty()
+        {
+            return Err(WalletRuntimeError::ProcessLockUnavailable);
+        }
+        let user_scope = blake3::hash(user_sid.as_bytes());
+        Ok(format!(
+            "Global\\{base_name}.{}",
+            hex::encode(user_scope.as_bytes())
+        ))
+    }
+
+    fn security_descriptor_sddl(user_sid: &str) -> String {
+        format!("D:P(A;;GA;;;{user_sid})(A;;GA;;;SY)(A;;GA;;;BA)")
+    }
+
+    struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+    impl SecurityDescriptor {
+        fn for_current_user(user_sid: &str) -> Result<Self, WalletRuntimeError> {
+            let mut sddl: Vec<u16> = security_descriptor_sddl(user_sid).encode_utf16().collect();
+            sddl.push(0);
+            let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+            // SAFETY: `sddl` is a valid null-terminated SDDL string and `descriptor` is an
+            // initialized output pointer. The returned allocation is immediately owned by the
+            // guard and released with LocalFree.
+            let converted = unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    ptr::null_mut(),
+                )
+            };
+            if converted == 0 || descriptor.is_null() {
+                return Err(WalletRuntimeError::ProcessLockUnavailable);
+            }
+            Ok(Self(descriptor))
+        }
+    }
+
+    impl Drop for SecurityDescriptor {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: SDDL conversion returns an allocation documented for LocalFree.
+                unsafe {
+                    let _ = LocalFree(self.0 as HLOCAL);
+                }
+                self.0 = ptr::null_mut();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn lock_name_for_test(
+        base_name: &str,
+        user_sid: &str,
+    ) -> Result<String, WalletRuntimeError> {
+        lock_name(base_name, user_sid)
+    }
+
+    #[cfg(test)]
+    pub(super) fn security_descriptor_sddl_for_test(user_sid: &str) -> String {
+        security_descriptor_sddl(user_sid)
+    }
+
     impl Drop for ProcessLock {
         fn drop(&mut self) {
             let handle = self.0 as *mut std::ffi::c_void;
             if !handle.is_null() {
-                // SAFETY: this wrapper owns the initially acquired mutex handle. Releasing can
-                // fail if teardown occurs on another thread, but closing the process-owned handle
-                // still prevents it from leaking and process termination releases ownership.
+                // SAFETY: this wrapper owns the kernel-object handle. It is not thread-owned, so
+                // closing from any teardown thread releases this process's reference. Windows
+                // also closes it automatically after abnormal process termination.
                 unsafe {
-                    let _ = ReleaseMutex(handle);
                     let _ = CloseHandle(handle);
                 }
                 self.0 = 0;
@@ -666,11 +751,12 @@ mod tests {
         secrets::{WalletPassword, WalletSeed},
         vault::EncryptedWalletVault,
     };
+    use std::fs;
 
     #[test]
     fn independent_process_lock_is_exclusive_and_recoverable() {
         let name = format!(
-            "Local\\com.vision.desktop.wallet-runtime.lock-test.{}",
+            "com.vision.desktop.wallet-runtime.lock-test.{}",
             std::process::id()
         );
         let first = WalletProcessLock::acquire(&name).unwrap();
@@ -680,6 +766,93 @@ mod tests {
         );
         drop(first);
         WalletProcessLock::acquire(&name).unwrap();
+    }
+
+    #[test]
+    fn global_process_lock_name_is_per_user_and_does_not_disclose_the_sid() {
+        let base = "com.vision.desktop.wallet-runtime.name-test";
+        let first_sid = "S-1-5-21-100-200-300-400";
+        let second_sid = "S-1-5-21-100-200-300-401";
+        let first = platform::lock_name_for_test(base, first_sid).unwrap();
+        let second = platform::lock_name_for_test(base, second_sid).unwrap();
+
+        assert!(first.starts_with(&format!("Global\\{base}.")));
+        assert_ne!(first, second);
+        assert!(!first.contains(first_sid));
+        assert_eq!(first.len(), "Global\\".len() + base.len() + 1 + 64);
+        assert!(platform::lock_name_for_test("Local\\unsafe", first_sid).is_err());
+    }
+
+    #[test]
+    fn global_process_lock_security_is_restricted_to_user_system_and_admins() {
+        let user_sid = "S-1-5-21-100-200-300-400";
+        let sddl = platform::security_descriptor_sddl_for_test(user_sid);
+        assert!(sddl.starts_with("D:P"));
+        assert_eq!(sddl.matches('(').count(), 3);
+        assert!(sddl.contains(&format!("(A;;GA;;;{user_sid})")));
+        assert!(sddl.contains("(A;;GA;;;SY)"));
+        assert!(sddl.contains("(A;;GA;;;BA)"));
+        assert!(!sddl.contains(";;;WD"));
+        assert!(!sddl.contains(";;;AU"));
+    }
+
+    const CHILD_LOCK_BASE_ENV: &str = "VISION_WALLET_LOCK_TEST_BASE";
+    const CHILD_LOCK_READY_ENV: &str = "VISION_WALLET_LOCK_TEST_READY";
+
+    #[test]
+    fn cross_process_lock_child_helper() {
+        let Ok(base) = std::env::var(CHILD_LOCK_BASE_ENV) else {
+            return;
+        };
+        let ready = std::env::var_os(CHILD_LOCK_READY_ENV).unwrap();
+        let _lock = WalletProcessLock::acquire(&base).unwrap();
+        fs::write(ready, b"ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn abnormal_process_termination_releases_cross_process_ownership() {
+        use std::{process::Stdio, time::Duration};
+
+        let directory = tempfile::tempdir().unwrap();
+        let ready = directory.path().join("ready");
+        let base = format!(
+            "com.vision.desktop.wallet-runtime.child-test.{}",
+            std::process::id()
+        );
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "wallet::runtime::tests::cross_process_lock_child_helper",
+                "--nocapture",
+            ])
+            .env(CHILD_LOCK_BASE_ENV, &base)
+            .env(CHILD_LOCK_READY_ENV, &ready)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "lock helper exited before acquiring ownership"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lock helper did not acquire ownership"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            WalletProcessLock::acquire(&base).err(),
+            Some(WalletRuntimeError::ProcessLockUnavailable)
+        );
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        WalletProcessLock::acquire(&base).unwrap();
     }
 
     #[test]

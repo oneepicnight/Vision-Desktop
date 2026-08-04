@@ -159,7 +159,7 @@ fully compromised Windows user session.
    recovery drills remain required.
 8. Deterministic checkpoints model lifecycle invalidation between sensitive stages; sudden process
    termination during a Windows system call still requires external fault testing.
-9. The local activity journal is incomplete by design. Version 2 adds wallet-seed authentication, an authenticated event chain, handle-bound reads, and copy-on-write atomic Windows publication. Complete-prefix rollback, cross-session ownership, and abandoned protected staging-file policy still require review
+9. The local activity journal is incomplete by design. Version 2 adds wallet-seed authentication, an authenticated event chain, handle-bound reads, copy-on-write atomic Windows publication, and a per-user global process lease across Windows sessions. Complete-prefix rollback, real console/RDP qualification, and abandoned protected staging-file policy still require review
    before send activation.
 
 ## Required reviewer output

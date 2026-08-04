@@ -117,7 +117,7 @@ review. It must not be introduced as an unversioned implementation detail.
 
 At the corrected target commit, the Windows validation baseline is:
 
-- 147 Rust unit tests pass.
+- 151 Rust unit tests pass.
 - 7 Tauri authority tests pass.
 - 2 production WebView security tests pass.
 - strict Clippy passes with warnings denied.
@@ -171,6 +171,13 @@ fully compromised Windows user session.
    Windows system call still requires external fault testing.
 9. The local activity journal is incomplete by design. Version 2 adds wallet-seed authentication, an authenticated event chain, handle-bound reads, copy-on-write atomic Windows publication, and a per-user global process lease across Windows sessions. Complete-prefix rollback, real console/RDP qualification, and abandoned protected staging-file policy still require review
    before send activation.
+10. The corrected support-package generator no longer reads raw Core logs or walks the report
+    directory. It constructs an exact ten-file allowlist in memory, reduces configuration to
+    non-identifying booleans/counts, uses fixed omission documents for logs/status/peers, rejects
+    unknown or custody-marked content before writing, and creates the ZIP only from classified
+    buffers. Secret-canary tests cover every directory and ZIP member and force contamination of
+    every allowed file. This is a correction offered for independent re-review, not self-approval
+    of the original M-05 finding.
 
 ## Required reviewer output
 

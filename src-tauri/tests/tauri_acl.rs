@@ -286,6 +286,8 @@ fn duplicate_launch_data_cannot_reach_the_window_activation_handler() {
 #[test]
 fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let lib_source = read("src/lib.rs");
+    let command_source = read("src/commands.rs");
+    let report_source = read("src/reports.rs");
     let runtime_source = read("src/wallet/runtime.rs");
     let lifecycle_source = read("src/wallet/windows_lifecycle.rs");
     let recovery_selection_source = read("src/wallet/recovery_selection.rs");
@@ -399,6 +401,20 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(!capability_source.contains("dialog:"));
     assert!(!read("../src/services/coreApi.ts").contains("wallet_"));
     assert!(!read("../package.json").contains("@tauri-apps/plugin-dialog"));
+
+    let support_command = command_source
+        .split("fn generate_support_package_command")
+        .nth(1)
+        .and_then(|source| source.split("#[tauri::command]").next())
+        .expect("support package helper has production source");
+    assert!(!support_command.contains("tail_file"));
+    assert!(!report_source.contains("WalkDir"));
+    assert!(!report_source.contains("stdout_tail"));
+    assert!(!report_source.contains("stderr_tail"));
+    assert!(report_source.contains("EXPECTED_SUPPORT_FILES"));
+    assert!(report_source.contains("FORBIDDEN_CONTENT_MARKERS"));
+    assert!(report_source.contains("validate_support_files(&files)?"));
+    assert!(report_source.contains("for support_file in &files"));
 }
 
 #[test]

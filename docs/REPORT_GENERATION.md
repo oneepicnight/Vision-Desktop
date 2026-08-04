@@ -1,6 +1,8 @@
-﻿# Report Generation
+# Report Generation
 
-The desktop support package follows the closed-alpha report schema.
+The Desktop support package uses schema `1.1` and a closed, in-memory content allowlist. Package
+generation never walks a log, data, report, or wallet directory, and the ZIP is written directly
+from the same classified byte buffers that produce the visible report directory.
 
 Generated content:
 
@@ -15,14 +17,29 @@ Generated content:
 - `stderr.log`
 - `file-manifest-sha256.txt`
 
-Redacted by default:
+Excluded rather than redacted:
 
+- raw Core stdout and stderr content
 - private keys
 - seed phrases
-- wallet recovery material
+- wallet vaults, recovery material, activity records, and DPAPI data
+- wallet passwords, session tokens, path tokens, and activation authority
+- public account addresses, transaction activity, and nonces
+- node names, exact peers, advertised hosts, payout addresses, and filesystem paths
 - router credentials
 - Wi-Fi passwords
-- public advertised host values
 - unrelated personal files
+
+`stdout.log` and `stderr.log` remain in the schema but contain only a fixed omission notice. Status
+samples and peer summaries are currently fixed omitted markers. `config-redacted.json` contains
+only mode, ports, feature booleans, configured/not-configured booleans, and peer count; it never
+contains exact identifiers, hosts, addresses, peers, or paths.
+
+Before any file is written, generation verifies the exact ten-file allowlist, UTF-8/JSON shape,
+size limits, fixed log notices, binary-hash format, and forbidden custody markers. Unknown,
+duplicate, oversized, malformed, or security-sensitive content aborts generation with a fixed
+classification error. Tests place distinct secret canaries in every excluded configuration source,
+scan every report and ZIP member, contaminate every allowed file in turn, and verify fail-closed
+rejection.
 
 Reports are stored under `%LOCALAPPDATA%\Vision\Desktop\reports`.

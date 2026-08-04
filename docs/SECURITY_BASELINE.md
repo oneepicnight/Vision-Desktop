@@ -10,7 +10,7 @@ Security rules implemented from the first milestone:
 - Desktop records the exact child PID it owns.
 - Desktop never kills a process solely because it occupies a port.
 - Desktop does not read or modify Core database files.
-- Logs and reports redact public endpoints and secrets by default.
+- Diagnostics may display bounded local Core log tails, but support packages never ingest those raw logs. Packages use an exact ten-file in-memory allowlist, omit private operational values and all wallet material, reduce configuration to non-identifying shape, reject unclassified content before writing, and ZIP only the already classified buffers.
 - Desktop runs as a normal user.
 - No automatic firewall or router changes are performed.
 - Rust dependencies are audited against RustSec on relevant changes, weekly, and on manual request.

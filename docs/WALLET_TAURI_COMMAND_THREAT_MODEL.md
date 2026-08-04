@@ -291,7 +291,7 @@ Before activation:
 - explicit capabilities select only the main window and contain no remote URL grants;
 - all dependencies are locked, audited, and included in the release provenance;
 - the official dialog and single-instance plugins are Rust-side only unless an independently reviewed need proves otherwise;
-- support packages continue to exclude wallet directories, activity files, paths, and secret-bearing errors.
+- support packages use an exact in-memory file allowlist, omit raw logs and complete state/configuration objects, exclude wallet directories, activity files, public account activity, paths, and secret-bearing errors, and fail before writing when content cannot be classified.
 
 ## Rejected alternatives
 

@@ -186,13 +186,9 @@ pub fn get_node_config_snapshot() -> Result<NodeConfigSnapshot, String> {
 fn generate_support_package_command(
     state: State<SupervisorState>,
 ) -> Result<SupportPackageResult, String> {
-    let process = state.current_state()?;
-    let stdout = tail_file(&process.stdout_log, 128 * 1024).unwrap_or_default();
-    let stderr = tail_file(&process.stderr_log, 128 * 1024).unwrap_or_default();
-    let config = load_or_create_default_config()
-        .ok()
-        .and_then(|c| serde_json::to_string_pretty(&c).ok());
-    build_support_package(None, None, config, stdout, stderr)
+    state.current_state()?;
+    let config = load_or_create_default_config().ok();
+    build_support_package(config)
 }
 
 #[tauri::command]

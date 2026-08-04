@@ -43,6 +43,14 @@ Vision Core receives public queries and fully signed transactions only. Desktop 
 - No automatic signing, submission, retry, password capture, recovery export, clipboard copy, or unlock is allowed.
 - Support packages must never include wallet directories, vault contents, public-to-secret mappings, or secret-bearing errors.
 
+Support-package generation now enforces this boundary structurally. It does not read Core log tails,
+does not traverse report or data directories, and does not serialize complete Desktop state or node
+configuration. An exact file allowlist is built in memory, scanned for forbidden custody markers,
+and written to both the report directory and ZIP from the same classified buffers. Public wallet
+addresses, transaction activity, nonces, local wallet paths, vaults, recovery files, activity
+journals, DPAPI material, passwords, session/path tokens, and activation authority are absent by
+construction. See `docs/WALLET_SUPPORT_PACKAGE_SECURITY.md`.
+
 ## Encrypted vault status
 
 The first encrypted vault foundation is implemented inside the Rust wallet module but is not exposed through Tauri commands. It includes:

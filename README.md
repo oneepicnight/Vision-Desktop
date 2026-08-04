@@ -26,7 +26,7 @@ The native Desktop accessibility baseline provides one page-level view heading, 
 
 The Dashboard includes a dependency-free Vision World network overview adapted from the legacy globe motif. Its globe and orbit artwork are decorative CSS, while the displayed Core state, chain height, peer count, and recovery state come only from the existing Desktop snapshot. It does not claim or infer geographic peer locations.
 
-The Dashboard operations grid adapts the legacy mission-control card hierarchy around the existing process, chain, network, mining/recovery, resource, and support data. It does not import legacy wallet approval, reward linking, guardian status, inferred peer-health grades, hashrate, block timing, block-production claims, or hard-coded dashboard links. Support actions remain limited to the existing redacted support package and fixed Desktop-managed log/data directories.
+The Dashboard operations grid adapts the legacy mission-control card hierarchy around the existing process, chain, network, mining/recovery, resource, and support data. It does not import legacy wallet approval, reward linking, guardian status, inferred peer-health grades, hashrate, block timing, block-production claims, or hard-coded dashboard links. Support actions remain limited to the existing privacy-hardened support package and fixed Desktop-managed log/data directories.
 
 The Explorer uses a Vision World chain-intelligence presentation around the existing typed address and transaction lookup actions. Chain context is taken from the shared Desktop snapshot, returned address and amount strings are preserved exactly, and no legacy polling, hard-coded endpoint, transaction submission, or protocol interpretation is included.
 
@@ -146,6 +146,8 @@ Known Diagnostics limitations:
 - stdout and stderr are fixed snapshot tails, not a live streaming console
 - Desktop does not infer severity, category, or node health from arbitrary log text
 - support-package generation and directory opening remain the only support actions; they use existing Desktop-managed paths
+- raw stdout and stderr are deliberately excluded from generated support packages even though their bounded tails remain visible locally in Diagnostics
+- support packages use an exact file allowlist and include only non-identifying configuration shape; node names, peer endpoints, advertised hosts, payout addresses, filesystem paths, private activity, and all custody material are excluded
 - the page does not add write controls for mining or Core runtime behavior
 
 Bundled Core baseline for local development:

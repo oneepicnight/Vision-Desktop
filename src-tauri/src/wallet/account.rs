@@ -31,15 +31,15 @@ pub(in crate::wallet) fn derive_account_identity(seed: &WalletSeed) -> VisionAcc
 mod tests {
     use super::*;
     use crate::wallet::{
-        recovery::PortableRecoveryArtifact,
-        secrets::{WalletPassword, WalletSeed},
+        recovery::{PortableRecoveryArtifact, PortableRecoveryCredential},
+        secrets::WalletSeed,
     };
 
     const CORE_RC2_SEED_07_PUBLIC_KEY: &str =
         "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
 
-    fn recovery_password() -> WalletPassword {
-        WalletPassword::new("independent offline recovery password".to_string())
+    fn recovery_credential() -> PortableRecoveryCredential {
+        PortableRecoveryCredential::for_test(0x42)
     }
 
     #[test]
@@ -58,13 +58,13 @@ mod tests {
             "vector_wallet",
             1_700_000_000_000,
             &seed,
-            &recovery_password(),
+            &recovery_credential(),
         )
         .unwrap();
         let encoded = artifact.to_json().unwrap();
         let restored_artifact = PortableRecoveryArtifact::from_json(&encoded).unwrap();
         let restored_seed = restored_artifact
-            .restore_for_test(&recovery_password())
+            .restore_for_test(&recovery_credential())
             .unwrap();
         let restored = derive_account_identity(&restored_seed);
 

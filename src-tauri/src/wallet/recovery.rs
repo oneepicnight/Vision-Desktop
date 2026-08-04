@@ -1,12 +1,10 @@
-use super::{
-    runtime::WalletActivationProof,
-    secrets::{WalletPassword, WalletSeed},
-};
+use super::{runtime::WalletActivationProof, secrets::WalletSeed};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     Key, XChaCha20Poly1305, XNonce,
 };
+use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 #[cfg(not(windows))]
 use std::fs;
@@ -29,11 +27,126 @@ const SALT_BYTES: usize = 16;
 const NONCE_BYTES: usize = 24;
 const SEED_BYTES: usize = 32;
 const AUTH_TAG_BYTES: usize = 16;
-const MIN_RECOVERY_PASSWORD_BYTES: usize = 16;
-const MAX_RECOVERY_PASSWORD_BYTES: usize = 1024;
+const RECOVERY_CREDENTIAL_BYTES: usize = 32;
+const RECOVERY_CREDENTIAL_PREFIX: &str = "vision-recovery-v1-";
+const RECOVERY_CREDENTIAL_CHECKSUM_BYTES: usize = 4;
+const RECOVERY_CREDENTIAL_DOMAIN: &[u8] = b"vision-desktop-portable-recovery-credential-v1";
 pub(in crate::wallet) const MAX_RECOVERY_JSON_BYTES: usize = 16 * 1024;
 
-/// Password-encrypted backup of a wallet seed that is intentionally independent
+/// A Rust-generated 256-bit credential protecting one portable recovery artifact.
+///
+/// This type intentionally implements neither `Clone`, Serde traits, `Display`,
+/// nor unrestricted `Debug`. Its encoded form is secret-bearing and must remain
+/// inside the native Rust recovery presentation boundary.
+pub(in crate::wallet) struct PortableRecoveryCredential(SecretBox<[u8; RECOVERY_CREDENTIAL_BYTES]>);
+
+impl PortableRecoveryCredential {
+    pub(in crate::wallet) fn generate(
+        _activation: &WalletActivationProof,
+    ) -> Result<Self, RecoveryArtifactError> {
+        let mut random_result = Ok(());
+        let secret = SecretBox::<[u8; RECOVERY_CREDENTIAL_BYTES]>::init_with_mut(|bytes| {
+            random_result = getrandom::fill(bytes);
+        });
+        random_result.map_err(|_| RecoveryArtifactError::RandomSourceUnavailable)?;
+        Ok(Self(secret))
+    }
+
+    pub(in crate::wallet) fn parse(encoded: &str) -> Result<Self, RecoveryArtifactError> {
+        let expected_len = RECOVERY_CREDENTIAL_PREFIX.len()
+            + RECOVERY_CREDENTIAL_BYTES * 2
+            + 1
+            + RECOVERY_CREDENTIAL_CHECKSUM_BYTES * 2;
+        if encoded.len() != expected_len || !encoded.starts_with(RECOVERY_CREDENTIAL_PREFIX) {
+            return Err(RecoveryArtifactError::InvalidRecoveryCredential);
+        }
+        let secret_start = RECOVERY_CREDENTIAL_PREFIX.len();
+        let secret_end = secret_start + RECOVERY_CREDENTIAL_BYTES * 2;
+        if encoded.as_bytes()[secret_end] != b'-'
+            || !encoded[secret_start..]
+                .bytes()
+                .all(|byte| byte == b'-' || byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(RecoveryArtifactError::InvalidRecoveryCredential);
+        }
+
+        let mut decode_result = Ok(());
+        let secret = SecretBox::<[u8; RECOVERY_CREDENTIAL_BYTES]>::init_with_mut(|bytes| {
+            decode_result = hex::decode_to_slice(&encoded[secret_start..secret_end], bytes);
+        });
+        decode_result.map_err(|_| RecoveryArtifactError::InvalidRecoveryCredential)?;
+        let credential = Self(secret);
+        let expected_checksum = credential.checksum();
+        let mut supplied_checksum = [0_u8; RECOVERY_CREDENTIAL_CHECKSUM_BYTES];
+        hex::decode_to_slice(&encoded[secret_end + 1..], &mut supplied_checksum)
+            .map_err(|_| RecoveryArtifactError::InvalidRecoveryCredential)?;
+        let differs = expected_checksum
+            .iter()
+            .zip(supplied_checksum)
+            .fold(0_u8, |difference, (expected, supplied)| {
+                difference | (expected ^ supplied)
+            });
+        supplied_checksum.zeroize();
+        if differs != 0 {
+            return Err(RecoveryArtifactError::InvalidRecoveryCredential);
+        }
+        Ok(credential)
+    }
+
+    pub(in crate::wallet) fn encode(&self) -> Result<Zeroizing<String>, RecoveryArtifactError> {
+        let mut encoded = Zeroizing::new(Vec::with_capacity(
+            RECOVERY_CREDENTIAL_PREFIX.len()
+                + RECOVERY_CREDENTIAL_BYTES * 2
+                + 1
+                + RECOVERY_CREDENTIAL_CHECKSUM_BYTES * 2,
+        ));
+        encoded.extend_from_slice(RECOVERY_CREDENTIAL_PREFIX.as_bytes());
+        self.with_exposed(|bytes| append_lower_hex(&mut encoded, bytes));
+        encoded.push(b'-');
+        append_lower_hex(&mut encoded, &self.checksum());
+        String::from_utf8(std::mem::take(&mut *encoded))
+            .map(Zeroizing::new)
+            .map_err(|_| RecoveryArtifactError::SerializationUnavailable)
+    }
+
+    pub(in crate::wallet) fn with_exposed<R>(
+        &self,
+        operation: impl FnOnce(&[u8; RECOVERY_CREDENTIAL_BYTES]) -> R,
+    ) -> R {
+        operation(self.0.expose_secret())
+    }
+
+    fn checksum(&self) -> [u8; RECOVERY_CREDENTIAL_CHECKSUM_BYTES] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(RECOVERY_CREDENTIAL_DOMAIN);
+        self.with_exposed(|bytes| hasher.update(bytes));
+        let mut checksum = [0_u8; RECOVERY_CREDENTIAL_CHECKSUM_BYTES];
+        checksum
+            .copy_from_slice(&hasher.finalize().as_bytes()[..RECOVERY_CREDENTIAL_CHECKSUM_BYTES]);
+        checksum
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn for_test(fill: u8) -> Self {
+        Self(SecretBox::new(Box::new([fill; RECOVERY_CREDENTIAL_BYTES])))
+    }
+}
+
+fn append_lower_hex(output: &mut Vec<u8>, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        output.push(HEX[usize::from(byte >> 4)]);
+        output.push(HEX[usize::from(byte & 0x0f)]);
+    }
+}
+
+impl fmt::Debug for PortableRecoveryCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PortableRecoveryCredential([REDACTED])")
+    }
+}
+
+/// Credential-encrypted backup of a wallet seed that is intentionally independent
 /// of the local current-user DPAPI-protected vault.
 ///
 /// This type remains private to the Rust wallet module. It does not establish a
@@ -77,7 +190,7 @@ struct RecoveryCipher {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::wallet) enum RecoveryArtifactError {
     InvalidWalletId,
-    PasswordPolicy,
+    InvalidRecoveryCredential,
     InvalidOrUnsupportedFormat,
     InvalidPasswordOrDamagedArtifact,
     RandomSourceUnavailable,
@@ -90,12 +203,12 @@ impl fmt::Display for RecoveryArtifactError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidWalletId => "wallet identifier is invalid",
-            Self::PasswordPolicy => "recovery password does not meet the local security policy",
+            Self::InvalidRecoveryCredential => "recovery credential is invalid",
             Self::InvalidOrUnsupportedFormat => {
                 "portable recovery artifact format is invalid or unsupported"
             }
             Self::InvalidPasswordOrDamagedArtifact => {
-                "recovery password is incorrect or the artifact is damaged"
+                "recovery credential is incorrect or the artifact is damaged"
             }
             Self::RandomSourceUnavailable => "secure operating-system randomness is unavailable",
             Self::SerializationUnavailable => "portable recovery serialization is unavailable",
@@ -239,10 +352,9 @@ impl PortableRecoveryArtifact {
         wallet_id: &str,
         created_at_unix_ms: u64,
         seed: &WalletSeed,
-        recovery_password: &WalletPassword,
+        recovery_credential: &PortableRecoveryCredential,
     ) -> Result<Self, RecoveryArtifactError> {
         validate_wallet_id(wallet_id)?;
-        validate_recovery_password(recovery_password)?;
 
         let mut salt = [0_u8; SALT_BYTES];
         let mut nonce = [0_u8; NONCE_BYTES];
@@ -269,7 +381,7 @@ impl PortableRecoveryArtifact {
             },
         };
 
-        let key = derive_recovery_key(recovery_password, &salt)?;
+        let key = derive_recovery_key(recovery_credential, &salt)?;
         let mut cipher_key = Key::try_from(key.as_ref())
             .map_err(|_| RecoveryArtifactError::InvalidOrUnsupportedFormat)?;
         let cipher_nonce = XNonce::try_from(nonce.as_slice())
@@ -297,16 +409,15 @@ impl PortableRecoveryArtifact {
     pub(in crate::wallet) fn restore(
         &self,
         _activation: &WalletActivationProof,
-        recovery_password: &WalletPassword,
+        recovery_credential: &PortableRecoveryCredential,
     ) -> Result<WalletSeed, RecoveryArtifactError> {
         self.validate()?;
-        validate_recovery_password(recovery_password)?;
 
         let salt = decode_fixed::<SALT_BYTES>(&self.kdf.salt_hex)?;
         let nonce = decode_fixed::<NONCE_BYTES>(&self.cipher.nonce_hex)?;
         let ciphertext =
             decode_fixed::<{ SEED_BYTES + AUTH_TAG_BYTES }>(&self.cipher.ciphertext_hex)?;
-        let key = derive_recovery_key(recovery_password, &salt)?;
+        let key = derive_recovery_key(recovery_credential, &salt)?;
         let mut cipher_key = Key::try_from(key.as_ref())
             .map_err(|_| RecoveryArtifactError::InvalidOrUnsupportedFormat)?;
         let cipher_nonce = XNonce::try_from(nonce.as_slice())
@@ -333,7 +444,7 @@ impl PortableRecoveryArtifact {
         wallet_id: &str,
         created_at_unix_ms: u64,
         seed: &WalletSeed,
-        recovery_password: &WalletPassword,
+        recovery_credential: &PortableRecoveryCredential,
     ) -> Result<Self, RecoveryArtifactError> {
         super::runtime::WalletRuntimeState::with_activation_proof_for_test(
             super::runtime::WalletOperationKind::Create,
@@ -343,7 +454,7 @@ impl PortableRecoveryArtifact {
                     wallet_id,
                     created_at_unix_ms,
                     seed,
-                    recovery_password,
+                    recovery_credential,
                 )
             },
         )
@@ -352,11 +463,11 @@ impl PortableRecoveryArtifact {
     #[cfg(test)]
     pub(in crate::wallet) fn restore_for_test(
         &self,
-        recovery_password: &WalletPassword,
+        recovery_credential: &PortableRecoveryCredential,
     ) -> Result<WalletSeed, RecoveryArtifactError> {
         super::runtime::WalletRuntimeState::with_activation_proof_for_test(
             super::runtime::WalletOperationKind::Restore,
-            |activation| self.restore(activation, recovery_password),
+            |activation| self.restore(activation, recovery_credential),
         )
     }
 
@@ -418,14 +529,14 @@ impl PortableRecoveryArtifact {
 }
 
 fn derive_recovery_key(
-    password: &WalletPassword,
+    credential: &PortableRecoveryCredential,
     salt: &[u8; SALT_BYTES],
 ) -> Result<Zeroizing<[u8; 32]>, RecoveryArtifactError> {
     let params = Params::new(KDF_MEMORY_KIB, KDF_ITERATIONS, KDF_LANES, Some(32))
         .map_err(|_| RecoveryArtifactError::InvalidOrUnsupportedFormat)?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = Zeroizing::new([0_u8; 32]);
-    password
+    credential
         .with_exposed(|bytes| argon2.hash_password_into(bytes, salt, key.as_mut()))
         .map_err(|_| RecoveryArtifactError::InvalidPasswordOrDamagedArtifact)?;
     Ok(key)
@@ -443,17 +554,6 @@ fn validate_wallet_id(wallet_id: &str) -> Result<(), RecoveryArtifactError> {
     Ok(())
 }
 
-fn validate_recovery_password(password: &WalletPassword) -> Result<(), RecoveryArtifactError> {
-    let valid = password.with_exposed(|bytes| {
-        (MIN_RECOVERY_PASSWORD_BYTES..=MAX_RECOVERY_PASSWORD_BYTES).contains(&bytes.len())
-    });
-    if valid {
-        Ok(())
-    } else {
-        Err(RecoveryArtifactError::PasswordPolicy)
-    }
-}
-
 fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N], RecoveryArtifactError> {
     let decoded =
         hex::decode(value).map_err(|_| RecoveryArtifactError::InvalidOrUnsupportedFormat)?;
@@ -466,10 +566,8 @@ fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N], RecoveryArtifact
 mod tests {
     use super::*;
 
-    const TEST_PASSWORD: &str = "independent offline recovery password";
-
-    fn password(value: &str) -> WalletPassword {
-        WalletPassword::new(value.to_string())
+    fn credential() -> PortableRecoveryCredential {
+        PortableRecoveryCredential::for_test(0x91)
     }
 
     fn test_artifact() -> PortableRecoveryArtifact {
@@ -477,7 +575,7 @@ mod tests {
             "primary_wallet",
             1_700_000_000_000,
             &WalletSeed::for_test(0x6b),
-            &password(TEST_PASSWORD),
+            &credential(),
         )
         .unwrap()
     }
@@ -487,7 +585,7 @@ mod tests {
         let artifact = test_artifact();
         let serialized = artifact.to_json().unwrap();
         let parsed = PortableRecoveryArtifact::from_json(&serialized).unwrap();
-        let restored = parsed.restore_for_test(&password(TEST_PASSWORD)).unwrap();
+        let restored = parsed.restore_for_test(&credential()).unwrap();
 
         assert!(restored.with_exposed(|bytes| bytes == &[0x6b; SEED_BYTES]));
     }
@@ -501,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_is_password_only_and_contains_no_device_binding() {
+    fn artifact_is_portable_credential_only_and_contains_no_device_binding() {
         let json = String::from_utf8(test_artifact().to_json().unwrap()).unwrap();
 
         assert!(!json.contains("device_protection"));
@@ -510,20 +608,21 @@ mod tests {
     }
 
     #[test]
-    fn artifact_never_serializes_plaintext_seed_or_password() {
+    fn artifact_never_serializes_plaintext_seed_or_credential() {
         let json = String::from_utf8(test_artifact().to_json().unwrap()).unwrap();
+        let encoded_credential = credential().encode().unwrap();
 
         assert!(!json.contains(&"6b".repeat(SEED_BYTES)));
-        assert!(!json.contains(TEST_PASSWORD));
+        assert!(!json.contains(encoded_credential.as_str()));
         assert!(!json.contains("password"));
         assert!(!json.contains("seed"));
     }
 
     #[test]
-    fn wrong_password_and_ciphertext_damage_share_one_error() {
+    fn wrong_credential_and_ciphertext_damage_share_one_error() {
         let artifact = test_artifact();
-        let wrong_password_error = artifact
-            .restore_for_test(&password("a different recovery password"))
+        let wrong_credential_error = artifact
+            .restore_for_test(&PortableRecoveryCredential::for_test(0x92))
             .unwrap_err();
         let mut damaged = artifact;
         let replacement = if damaged.cipher.ciphertext_hex.starts_with("00") {
@@ -535,15 +634,13 @@ mod tests {
             .cipher
             .ciphertext_hex
             .replace_range(0..2, replacement);
-        let damage_error = damaged
-            .restore_for_test(&password(TEST_PASSWORD))
-            .unwrap_err();
+        let damage_error = damaged.restore_for_test(&credential()).unwrap_err();
 
         assert_eq!(
-            wrong_password_error,
+            wrong_credential_error,
             RecoveryArtifactError::InvalidPasswordOrDamagedArtifact
         );
-        assert_eq!(damage_error, wrong_password_error);
+        assert_eq!(damage_error, wrong_credential_error);
     }
 
     #[test]
@@ -552,9 +649,7 @@ mod tests {
         artifact.created_at_unix_ms += 1;
 
         assert_eq!(
-            artifact
-                .restore_for_test(&password(TEST_PASSWORD))
-                .unwrap_err(),
+            artifact.restore_for_test(&credential()).unwrap_err(),
             RecoveryArtifactError::InvalidPasswordOrDamagedArtifact
         );
     }
@@ -570,22 +665,56 @@ mod tests {
     }
 
     #[test]
-    fn recovery_password_policy_rejects_short_and_oversized_values() {
-        let seed = WalletSeed::for_test(1);
+    fn credential_parser_rejects_legacy_weak_malformed_and_corrupted_values() {
+        for invalid in [
+            "aaaaaaaaaaaaaaaa",
+            "different offline recovery password",
+            "vision-recovery-v1-00",
+        ] {
+            assert_eq!(
+                PortableRecoveryCredential::parse(invalid).unwrap_err(),
+                RecoveryArtifactError::InvalidRecoveryCredential
+            );
+        }
+
+        let encoded = credential().encode().unwrap();
+        let mut corrupted = Zeroizing::new(encoded.to_string());
+        let last = corrupted.len() - 1;
+        let replacement = if corrupted.ends_with('0') { "1" } else { "0" };
+        corrupted.replace_range(last.., replacement);
         assert_eq!(
-            PortableRecoveryArtifact::encrypt_for_test("wallet", 1, &seed, &password("too-short"),)
-                .unwrap_err(),
-            RecoveryArtifactError::PasswordPolicy
+            PortableRecoveryCredential::parse(corrupted.as_str()).unwrap_err(),
+            RecoveryArtifactError::InvalidRecoveryCredential
         );
+
+        let uppercase = Zeroizing::new(encoded.to_uppercase());
         assert_eq!(
-            PortableRecoveryArtifact::encrypt_for_test(
-                "wallet",
-                1,
-                &seed,
-                &password(&"x".repeat(MAX_RECOVERY_PASSWORD_BYTES + 1)),
-            )
-            .unwrap_err(),
-            RecoveryArtifactError::PasswordPolicy
+            PortableRecoveryCredential::parse(uppercase.as_str()).unwrap_err(),
+            RecoveryArtifactError::InvalidRecoveryCredential
+        );
+    }
+
+    #[test]
+    fn generated_credentials_are_versioned_checksummed_and_unique() {
+        let first = crate::wallet::runtime::WalletRuntimeState::with_activation_proof_for_test(
+            crate::wallet::runtime::WalletOperationKind::Create,
+            PortableRecoveryCredential::generate,
+        )
+        .unwrap();
+        let second = crate::wallet::runtime::WalletRuntimeState::with_activation_proof_for_test(
+            crate::wallet::runtime::WalletOperationKind::Create,
+            PortableRecoveryCredential::generate,
+        )
+        .unwrap();
+        let first_encoded = first.encode().unwrap();
+        let second_encoded = second.encode().unwrap();
+        assert!(first_encoded.starts_with(RECOVERY_CREDENTIAL_PREFIX));
+        assert_ne!(first_encoded.as_str(), second_encoded.as_str());
+        let parsed = PortableRecoveryCredential::parse(first_encoded.as_str()).unwrap();
+        assert!(parsed.with_exposed(|bytes| first.with_exposed(|original| bytes == original)));
+        assert_eq!(
+            format!("{parsed:?}"),
+            "PortableRecoveryCredential([REDACTED])"
         );
     }
 
@@ -619,13 +748,8 @@ mod tests {
         let seed = WalletSeed::for_test(1);
         for invalid in ["", "../escape", "space wallet", "wallet|metadata"] {
             assert_eq!(
-                PortableRecoveryArtifact::encrypt_for_test(
-                    invalid,
-                    1,
-                    &seed,
-                    &password(TEST_PASSWORD),
-                )
-                .unwrap_err(),
+                PortableRecoveryArtifact::encrypt_for_test(invalid, 1, &seed, &credential(),)
+                    .unwrap_err(),
                 RecoveryArtifactError::InvalidWalletId
             );
         }

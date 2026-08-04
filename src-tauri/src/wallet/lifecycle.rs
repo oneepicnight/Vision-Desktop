@@ -9,6 +9,7 @@
 use super::{
     contract::{WalletLifecycleStatus, WalletLockResult},
     onboarding::{prepare_new_wallet, prepare_restored_wallet, WalletOnboardingError},
+    recovery::RecoveryArtifactError,
     runtime::{RecoveryPathPurpose, WalletOperationKind, WalletRuntimeError, WalletRuntimeState},
     secret_input::SecretInput,
     session::WalletSessionError,
@@ -25,6 +26,7 @@ use windows_sys::Win32::{
     Storage::FileSystem::{GetDriveTypeW, FILE_ATTRIBUTE_REPARSE_POINT},
     System::WindowsProgramming::DRIVE_FIXED,
 };
+use zeroize::Zeroizing;
 
 const WALLET_DIRECTORY: &str = "wallet";
 const WALLET_VAULT_FILE: &str = "wallet.vault.json";
@@ -38,6 +40,19 @@ pub(crate) struct WalletLifecycleAdapters {
     vault_path: PathBuf,
     #[cfg(test)]
     interruption_checkpoint: Option<WalletLifecycleCheckpoint>,
+}
+
+/// Private result of wallet creation. The recovery credential is intentionally
+/// not serializable and is reserved for a future Rust-native presentation flow.
+pub(crate) struct WalletCreationResult {
+    status: WalletLifecycleStatus,
+    recovery_credential: Zeroizing<String>,
+}
+
+impl fmt::Debug for WalletCreationResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("WalletCreationResult([REDACTED])")
+    }
 }
 
 #[cfg(test)]
@@ -66,7 +81,6 @@ pub(crate) enum WalletLifecycleError {
     WalletUnavailable,
     InvalidLabel,
     PasswordPolicy,
-    PasswordsMustDiffer,
     InvalidPasswordOrDamage,
     UnlockTemporarilyBlocked,
     SecureRandomUnavailable,
@@ -93,7 +107,6 @@ impl WalletLifecycleError {
             Self::WalletUnavailable => "wallet_unavailable",
             Self::InvalidLabel => "invalid_label",
             Self::PasswordPolicy => "password_policy",
-            Self::PasswordsMustDiffer => "passwords_must_differ",
             Self::InvalidPasswordOrDamage => "invalid_password_or_damage",
             Self::UnlockTemporarilyBlocked => "unlock_temporarily_blocked",
             Self::SecureRandomUnavailable => "secure_random_unavailable",
@@ -122,7 +135,6 @@ impl fmt::Display for WalletLifecycleError {
             Self::WalletUnavailable => "the local wallet is unavailable",
             Self::InvalidLabel => "wallet label is invalid",
             Self::PasswordPolicy => "wallet password does not meet the security policy",
-            Self::PasswordsMustDiffer => "wallet and recovery passwords must be different",
             Self::InvalidPasswordOrDamage => {
                 "the password is incorrect or encrypted wallet data is damaged"
             }
@@ -190,15 +202,13 @@ impl WalletLifecycleAdapters {
         label: &str,
         recovery_destination_token: &str,
         wallet_secret: SecretInput,
-        recovery_secret: SecretInput,
-    ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
+    ) -> Result<WalletCreationResult, WalletLifecycleError> {
         self.create_at(
             owner_window,
             wallet_id,
             label,
             recovery_destination_token,
             wallet_secret,
-            recovery_secret,
             now_unix_ms()?,
         )
     }
@@ -211,9 +221,8 @@ impl WalletLifecycleAdapters {
         label: &str,
         recovery_destination_token: &str,
         wallet_secret: SecretInput,
-        recovery_secret: SecretInput,
         created_at_unix_ms: u64,
-    ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
+    ) -> Result<WalletCreationResult, WalletLifecycleError> {
         self.require_vault_absent()?;
         let operation = self
             .runtime
@@ -232,16 +241,17 @@ impl WalletLifecycleAdapters {
         self.interrupt_at(WalletLifecycleCheckpoint::CreateDestinationConsumed)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         let wallet_password = wallet_secret.into_wallet_password();
-        let recovery_password = recovery_secret.into_wallet_password();
         let mut prepared = prepare_new_wallet(
             activation,
             wallet_id,
             label,
             created_at_unix_ms,
             &wallet_password,
-            &recovery_password,
         )
         .map_err(map_onboarding_error)?;
+        let recovery_credential = prepared
+            .recovery_credential_for_native_presentation()
+            .map_err(map_onboarding_error)?;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreatePrepared)?;
         operation.ensure_current().map_err(map_runtime_error)?;
@@ -252,7 +262,7 @@ impl WalletLifecycleAdapters {
         self.interrupt_at(WalletLifecycleCheckpoint::CreateRecoveryStored)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         let mut verified = prepared
-            .verify_stored_recovery(activation, &recovery_path, &recovery_password)
+            .verify_stored_recovery(activation, &recovery_path)
             .map_err(map_onboarding_error)?;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreateRecoveryVerified)?;
@@ -263,9 +273,14 @@ impl WalletLifecycleAdapters {
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreateVaultStored)?;
         operation.ensure_current().map_err(map_runtime_error)?;
-        self.runtime
+        let status = self
+            .runtime
             .remember_public_metadata(metadata)
-            .map_err(map_runtime_error)
+            .map_err(map_runtime_error)?;
+        Ok(WalletCreationResult {
+            status,
+            recovery_credential,
+        })
     }
 
     pub(in crate::wallet) fn restore(
@@ -317,7 +332,9 @@ impl WalletLifecycleAdapters {
         self.interrupt_at(WalletLifecycleCheckpoint::RestoreSourceConsumed)?;
         operation.ensure_current().map_err(map_runtime_error)?;
         let wallet_password = new_wallet_secret.into_wallet_password();
-        let recovery_password = recovery_secret.into_wallet_password();
+        let recovery_credential = recovery_secret
+            .into_recovery_credential()
+            .map_err(map_recovery_credential_error)?;
         let mut restored = prepare_restored_wallet(
             activation,
             &recovery_path,
@@ -325,7 +342,7 @@ impl WalletLifecycleAdapters {
             label,
             created_at_unix_ms,
             &wallet_password,
-            &recovery_password,
+            &recovery_credential,
         )
         .map_err(map_onboarding_error)?;
         #[cfg(test)]
@@ -495,7 +512,6 @@ fn map_runtime_error(error: WalletRuntimeError) -> WalletLifecycleError {
 fn map_onboarding_error(error: WalletOnboardingError) -> WalletLifecycleError {
     match error {
         WalletOnboardingError::InvalidLabel => WalletLifecycleError::InvalidLabel,
-        WalletOnboardingError::PasswordsMustDiffer => WalletLifecycleError::PasswordsMustDiffer,
         WalletOnboardingError::SecureRandomUnavailable => {
             WalletLifecycleError::SecureRandomUnavailable
         }
@@ -514,7 +530,7 @@ fn map_onboarding_error(error: WalletOnboardingError) -> WalletLifecycleError {
         WalletOnboardingError::RecoveryBackupMismatch => {
             WalletLifecycleError::RecoveryBackupMismatch
         }
-        WalletOnboardingError::RecoveryPasswordOrDamage => {
+        WalletOnboardingError::RecoveryCredentialOrDamage => {
             WalletLifecycleError::InvalidPasswordOrDamage
         }
         WalletOnboardingError::OnboardingAlreadyCompleted => {
@@ -524,6 +540,10 @@ fn map_onboarding_error(error: WalletOnboardingError) -> WalletLifecycleError {
             WalletLifecycleError::VaultStorageUnavailable
         }
     }
+}
+
+fn map_recovery_credential_error(_error: RecoveryArtifactError) -> WalletLifecycleError {
+    WalletLifecycleError::InvalidPasswordOrDamage
 }
 
 fn map_vault_load_error(error: WalletVaultError) -> WalletLifecycleError {
@@ -568,7 +588,7 @@ mod tests {
     const MAIN: &str = "main";
     const WALLET_PASSWORD: &str = "local wallet password";
     const RESTORED_PASSWORD: &str = "replacement wallet password";
-    const RECOVERY_PASSWORD: &str = "different recovery password";
+    const INVALID_LEGACY_RECOVERY_PASSWORD: &str = "different recovery password";
 
     fn secret(value: &str) -> SecretInput {
         serde_json::from_str(&serde_json::to_string(value).unwrap()).unwrap()
@@ -606,7 +626,6 @@ mod tests {
                         "Blocked",
                         "unused",
                         secret(WALLET_PASSWORD),
-                        secret(RECOVERY_PASSWORD),
                     )
                     .unwrap_err(),
                 WalletLifecycleError::ActivationUnavailable,
@@ -619,7 +638,7 @@ mod tests {
                         "Blocked",
                         "unused",
                         secret(RESTORED_PASSWORD),
-                        secret(RECOVERY_PASSWORD),
+                        secret(INVALID_LEGACY_RECOVERY_PASSWORD),
                     )
                     .unwrap_err(),
                 WalletLifecycleError::ActivationUnavailable,
@@ -652,12 +671,12 @@ mod tests {
                 "Primary Wallet",
                 destination.as_str(),
                 secret(WALLET_PASSWORD),
-                secret(RECOVERY_PASSWORD),
             )
             .unwrap();
-        assert!(created.vault_exists);
-        assert!(created.locked);
-        let created_account = created.account.unwrap();
+        assert!(created.status.vault_exists);
+        assert!(created.status.locked);
+        let recovery_credential = created.recovery_credential;
+        let created_account = created.status.account.unwrap();
         assert_eq!(created_account.label.as_deref(), Some("Primary Wallet"));
         assert_eq!(created_account.backup_verified, Some(true));
         assert!(backup_path.exists());
@@ -688,7 +707,7 @@ mod tests {
                 "Restored Wallet",
                 source.as_str(),
                 secret(RESTORED_PASSWORD),
-                secret(RECOVERY_PASSWORD),
+                secret(recovery_credential.as_str()),
             )
             .unwrap();
         assert!(restored.locked);
@@ -707,7 +726,7 @@ mod tests {
         for forbidden in [
             WALLET_PASSWORD,
             RESTORED_PASSWORD,
-            RECOVERY_PASSWORD,
+            recovery_credential.as_str(),
             "mnemonic",
         ] {
             assert!(!backup_text.contains(forbidden));
@@ -729,7 +748,6 @@ mod tests {
                 "Restart Wallet",
                 token.as_str(),
                 secret(WALLET_PASSWORD),
-                secret(RECOVERY_PASSWORD),
                 1,
             )
             .unwrap();
@@ -764,7 +782,6 @@ mod tests {
                 "Single Wallet",
                 token.as_str(),
                 secret(WALLET_PASSWORD),
-                secret(RECOVERY_PASSWORD),
                 1,
             )
             .unwrap();
@@ -777,7 +794,6 @@ mod tests {
                     "Second Wallet",
                     token.as_str(),
                     secret(WALLET_PASSWORD),
-                    secret(RECOVERY_PASSWORD),
                     2,
                 )
                 .unwrap_err(),
@@ -822,7 +838,6 @@ mod tests {
                 "Lock Independent",
                 token.as_str(),
                 secret(WALLET_PASSWORD),
-                secret(RECOVERY_PASSWORD),
                 1,
             )
             .unwrap();
@@ -883,7 +898,6 @@ mod tests {
                         "Interrupted Wallet",
                         token.as_str(),
                         secret(WALLET_PASSWORD),
-                        secret(RECOVERY_PASSWORD),
                         1,
                     )
                     .unwrap_err(),
@@ -897,7 +911,7 @@ mod tests {
             if recovery_exists {
                 let encrypted = fs::read_to_string(&recovery_path).unwrap();
                 assert!(!encrypted.contains(WALLET_PASSWORD));
-                assert!(!encrypted.contains(RECOVERY_PASSWORD));
+                assert!(!encrypted.contains(INVALID_LEGACY_RECOVERY_PASSWORD));
             }
         }
     }
@@ -914,17 +928,17 @@ mod tests {
             RecoveryPathPurpose::Destination,
             &recovery_path,
         );
-        source
+        let created = source
             .create_at(
                 MAIN,
                 "source",
                 "Source Wallet",
                 destination.as_str(),
                 secret(WALLET_PASSWORD),
-                secret(RECOVERY_PASSWORD),
                 1,
             )
             .unwrap();
+        let recovery_credential = created.recovery_credential;
         let original_recovery = fs::read(&recovery_path).unwrap();
         let cases = [
             (WalletLifecycleCheckpoint::RestoreSourceConsumed, false),
@@ -954,7 +968,7 @@ mod tests {
                         "Restored Wallet",
                         source_token.as_str(),
                         secret(RESTORED_PASSWORD),
-                        secret(RECOVERY_PASSWORD),
+                        secret(recovery_credential.as_str()),
                         2,
                     )
                     .unwrap_err(),
@@ -982,7 +996,6 @@ mod tests {
             WalletLifecycleError::WalletUnavailable,
             WalletLifecycleError::InvalidLabel,
             WalletLifecycleError::PasswordPolicy,
-            WalletLifecycleError::PasswordsMustDiffer,
             WalletLifecycleError::InvalidPasswordOrDamage,
             WalletLifecycleError::UnlockTemporarilyBlocked,
             WalletLifecycleError::SecureRandomUnavailable,

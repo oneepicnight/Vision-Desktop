@@ -33,7 +33,7 @@ Tauri 2 documents that registered application commands are available to all appl
 The design protects:
 
 - the 32-byte Ed25519 wallet seed;
-- local and recovery passwords;
+- local wallet passwords and generated portable recovery credentials;
 - password-derived keys and the current-user DPAPI-protected local factor;
 - decrypted vault contents and unlocked session state;
 - transaction signing authority;
@@ -156,7 +156,7 @@ Input:
 - destination token;
 - bounded wallet identifier and label;
 - local vault password;
-- distinct recovery password.
+- no recovery secret input; Rust generates a 256-bit credential for native presentation.
 
 Behavior:
 
@@ -182,8 +182,8 @@ Input:
 
 - source token;
 - new bounded wallet identifier and label;
-- recovery password;
-- a new local vault password distinct from the recovery password.
+- the exact versioned portable recovery credential;
+- a new local vault password.
 
 Behavior:
 
@@ -250,7 +250,7 @@ Required codes include:
 - `operation_in_progress`
 - `invalid_request`
 - `password_policy`
-- `passwords_must_differ`
+- `invalid_recovery_credential`
 - `destination_cancelled`
 - `destination_expired`
 - `destination_invalid`
@@ -322,8 +322,8 @@ Before activation:
 Approved on 2026-08-01:
 
 - native Rust-side dialog selection rather than a frontend-supplied path;
-- a 16-byte minimum for both local and recovery passwords;
-- distinct local and recovery passwords;
+- the existing local wallet password policy;
+- a Rust-generated 256-bit portable recovery credential with exact version and checksum validation;
 - one backend-controlled onboarding operation after destination authorization;
 - immediate frontend field clearing with no shared-state or persistence;
 - no user-facing wallet creation until private loopback operation is available;

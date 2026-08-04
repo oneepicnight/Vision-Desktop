@@ -1,4 +1,7 @@
-use super::secrets::WalletPassword;
+use super::{
+    recovery::{PortableRecoveryCredential, RecoveryArtifactError},
+    secrets::WalletPassword,
+};
 use serde::de::{self, Deserialize, Deserializer, Visitor};
 use std::fmt;
 use zeroize::Zeroizing;
@@ -15,6 +18,12 @@ pub(in crate::wallet) struct SecretInput(Zeroizing<String>);
 impl SecretInput {
     pub(in crate::wallet) fn into_wallet_password(mut self) -> WalletPassword {
         WalletPassword::new(std::mem::take(&mut *self.0))
+    }
+
+    pub(in crate::wallet) fn into_recovery_credential(
+        self,
+    ) -> Result<PortableRecoveryCredential, RecoveryArtifactError> {
+        PortableRecoveryCredential::parse(self.0.as_str())
     }
 
     #[cfg(test)]

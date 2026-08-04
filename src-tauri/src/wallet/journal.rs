@@ -7,12 +7,15 @@
 )]
 
 use super::{
+    account::derive_account_identity,
     receipt::WalletReceiptObservation,
+    secrets::WalletSeed,
     storage_security,
     submission::WalletSubmissionOutcome,
     transaction::{canonical_transaction_id, VisionTransaction},
 };
 use once_cell::sync::Lazy;
+use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt, fs,
@@ -22,7 +25,11 @@ use std::{
 };
 
 const JOURNAL_SCHEMA: &str = "vision-desktop-wallet-activity";
-const JOURNAL_VERSION: u32 = 1;
+const JOURNAL_VERSION: u32 = 2;
+const JOURNAL_AUTHENTICATION_DOMAIN: &[u8] = b"vision-desktop-wallet-activity-authentication-v1";
+const JOURNAL_KEY_DERIVATION_CONTEXT: &str =
+    "com.vision.desktop.wallet-activity-journal-authentication-key.v1";
+const AUTHENTICATION_TAG_BYTES: usize = 32;
 const MAX_JOURNAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 16 * 1024;
 const MAX_EVENTS: usize = 10_000;
@@ -48,6 +55,7 @@ pub(in crate::wallet) struct WalletActivityJournal {
     wallet_id: String,
     records: Vec<WalletActivityRecord>,
     event_count: usize,
+    last_authentication_tag: [u8; AUTHENTICATION_TAG_BYTES],
 }
 
 impl WalletActivityJournal {
@@ -57,6 +65,50 @@ impl WalletActivityJournal {
 
     pub(in crate::wallet) fn records(&self) -> &[WalletActivityRecord] {
         &self.records
+    }
+}
+
+/// Seed-owned authority for authenticating one wallet's local activity journal.
+///
+/// It is neither serializable nor cloneable and never exposes the seed. Its
+/// wallet identity is checked against every accepted transaction before an
+/// event can be authenticated.
+pub(in crate::wallet) struct WalletJournalAuthenticator<'wallet> {
+    wallet_id: &'wallet str,
+    authentication_key: SecretBox<[u8; AUTHENTICATION_TAG_BYTES]>,
+    sender_address: String,
+}
+
+impl<'wallet> WalletJournalAuthenticator<'wallet> {
+    pub(in crate::wallet) fn new(
+        wallet_id: &'wallet str,
+        seed: &WalletSeed,
+    ) -> Result<Self, WalletJournalError> {
+        validate_wallet_id(wallet_id)?;
+        let authentication_key =
+            SecretBox::<[u8; AUTHENTICATION_TAG_BYTES]>::init_with_mut(|output| {
+                let mut hasher = blake3::Hasher::new_derive_key(JOURNAL_KEY_DERIVATION_CONTEXT);
+                seed.with_exposed(|seed_bytes| {
+                    hasher.update(seed_bytes);
+                });
+                hasher.finalize_xof().fill(output);
+                hasher.reset();
+            });
+        Ok(Self {
+            wallet_id,
+            authentication_key,
+            sender_address: derive_account_identity(seed).address,
+        })
+    }
+
+    fn authenticate(&self, payload: &[u8]) -> [u8; AUTHENTICATION_TAG_BYTES] {
+        let key = self.authentication_key.expose_secret();
+        {
+            let mut input = Vec::with_capacity(JOURNAL_AUTHENTICATION_DOMAIN.len() + payload.len());
+            input.extend_from_slice(JOURNAL_AUTHENTICATION_DOMAIN);
+            input.extend_from_slice(payload);
+            *blake3::keyed_hash(key, &input).as_bytes()
+        }
     }
 }
 
@@ -103,6 +155,8 @@ struct JournalEvent {
     tx_id: String,
     recorded_at_unix_ms: u64,
     event: JournalEventData,
+    previous_authentication_tag_hex: String,
+    authentication_tag_hex: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,7 +195,7 @@ struct CashTransferArgs {
 /// persisted in this journal.
 pub(in crate::wallet) fn append_accepted_submission(
     path: &Path,
-    wallet_id: &str,
+    authenticator: &WalletJournalAuthenticator<'_>,
     transaction: &VisionTransaction,
     outcome: &WalletSubmissionOutcome,
     submitted_at_unix_ms: u64,
@@ -149,23 +203,28 @@ pub(in crate::wallet) fn append_accepted_submission(
     let _guard = JOURNAL_WRITE_LOCK
         .lock()
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    validate_wallet_id(wallet_id)?;
-    let mut journal = load_journal_unlocked(path, wallet_id)?;
+    let mut journal = load_journal_unlocked(path, authenticator)?;
     let (tx_id, submitted) = accepted_submission(transaction, outcome)?;
+    if submitted.sender_address != authenticator.sender_address {
+        return Err(WalletJournalError::SubmissionMismatch);
+    }
     if journal.records.iter().any(|record| record.tx_id == tx_id) {
         return Err(WalletJournalError::DuplicateTransaction);
     }
-    let event = JournalEvent {
+    let mut event = JournalEvent {
         schema: JOURNAL_SCHEMA.to_string(),
         version: JOURNAL_VERSION,
-        wallet_id: wallet_id.to_string(),
+        wallet_id: authenticator.wallet_id.to_string(),
         sequence: next_sequence(journal.event_count)?,
         tx_id,
         recorded_at_unix_ms: submitted_at_unix_ms,
         event: JournalEventData::Submitted(submitted),
+        previous_authentication_tag_hex: hex::encode(journal.last_authentication_tag),
+        authentication_tag_hex: String::new(),
     };
+    authenticate_event(authenticator, &mut event)?;
     append_event(path, &event, journal.event_count == 0)?;
-    apply_event(&mut journal, &event)?;
+    apply_authenticated_event(&mut journal, &event)?;
     Ok(journal)
 }
 
@@ -173,7 +232,7 @@ pub(in crate::wallet) fn append_accepted_submission(
 /// transaction. Repeated identical observations do not grow the journal.
 pub(in crate::wallet) fn append_receipt_observation(
     path: &Path,
-    wallet_id: &str,
+    authenticator: &WalletJournalAuthenticator<'_>,
     tx_id: &str,
     observation: &WalletReceiptObservation,
     observed_at_unix_ms: u64,
@@ -181,10 +240,9 @@ pub(in crate::wallet) fn append_receipt_observation(
     let _guard = JOURNAL_WRITE_LOCK
         .lock()
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    validate_wallet_id(wallet_id)?;
     validate_tx_id(tx_id)?;
     validate_observation(observation)?;
-    let mut journal = load_journal_unlocked(path, wallet_id)?;
+    let mut journal = load_journal_unlocked(path, authenticator)?;
     let record = journal
         .records
         .iter()
@@ -193,31 +251,33 @@ pub(in crate::wallet) fn append_receipt_observation(
     if record.observation == *observation {
         return Ok(journal);
     }
-    let event = JournalEvent {
+    let mut event = JournalEvent {
         schema: JOURNAL_SCHEMA.to_string(),
         version: JOURNAL_VERSION,
-        wallet_id: wallet_id.to_string(),
+        wallet_id: authenticator.wallet_id.to_string(),
         sequence: next_sequence(journal.event_count)?,
         tx_id: tx_id.to_string(),
         recorded_at_unix_ms: observed_at_unix_ms,
         event: JournalEventData::Observation(ObservationEvent {
             observation: observation.clone(),
         }),
+        previous_authentication_tag_hex: hex::encode(journal.last_authentication_tag),
+        authentication_tag_hex: String::new(),
     };
+    authenticate_event(authenticator, &mut event)?;
     append_event(path, &event, false)?;
-    apply_event(&mut journal, &event)?;
+    apply_authenticated_event(&mut journal, &event)?;
     Ok(journal)
 }
 
 pub(in crate::wallet) fn load_activity_journal(
     path: &Path,
-    wallet_id: &str,
+    authenticator: &WalletJournalAuthenticator<'_>,
 ) -> Result<WalletActivityJournal, WalletJournalError> {
     let _guard = JOURNAL_WRITE_LOCK
         .lock()
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    validate_wallet_id(wallet_id)?;
-    load_journal_unlocked(path, wallet_id)
+    load_journal_unlocked(path, authenticator)
 }
 
 fn accepted_submission(
@@ -267,15 +327,16 @@ fn accepted_submission(
 
 fn load_journal_unlocked(
     path: &Path,
-    expected_wallet_id: &str,
+    authenticator: &WalletJournalAuthenticator<'_>,
 ) -> Result<WalletActivityJournal, WalletJournalError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(WalletActivityJournal {
-                wallet_id: expected_wallet_id.to_string(),
+                wallet_id: authenticator.wallet_id.to_string(),
                 records: Vec::new(),
                 event_count: 0,
+                last_authentication_tag: [0_u8; AUTHENTICATION_TAG_BYTES],
             });
         }
         Err(_) => return Err(WalletJournalError::StorageUnavailable),
@@ -308,9 +369,10 @@ fn load_journal_unlocked(
     }
 
     let mut journal = WalletActivityJournal {
-        wallet_id: expected_wallet_id.to_string(),
+        wallet_id: authenticator.wallet_id.to_string(),
         records: Vec::new(),
         event_count: 0,
+        last_authentication_tag: [0_u8; AUTHENTICATION_TAG_BYTES],
     };
     for line in bytes
         .split(|byte| *byte == b'\n')
@@ -323,17 +385,92 @@ fn load_journal_unlocked(
             .map_err(|_| WalletJournalError::InvalidOrUnsupportedFormat)?;
         if event.schema != JOURNAL_SCHEMA
             || event.version != JOURNAL_VERSION
-            || event.wallet_id != expected_wallet_id
+            || event.wallet_id != authenticator.wallet_id
             || event.sequence != next_sequence(journal.event_count)?
         {
             return Err(WalletJournalError::InvalidOrUnsupportedFormat);
         }
-        apply_event(&mut journal, &event)?;
+        verify_event_authentication(authenticator, &journal, &event)?;
+        apply_authenticated_event(&mut journal, &event)?;
     }
     if journal.event_count == 0 {
         return Err(WalletJournalError::InvalidOrUnsupportedFormat);
     }
     Ok(journal)
+}
+
+fn authenticate_event(
+    authenticator: &WalletJournalAuthenticator<'_>,
+    event: &mut JournalEvent,
+) -> Result<(), WalletJournalError> {
+    let payload = event_authentication_payload(event)?;
+    event.authentication_tag_hex = hex::encode(authenticator.authenticate(&payload));
+    Ok(())
+}
+
+fn verify_event_authentication(
+    authenticator: &WalletJournalAuthenticator<'_>,
+    journal: &WalletActivityJournal,
+    event: &JournalEvent,
+) -> Result<(), WalletJournalError> {
+    let previous = decode_authentication_tag(&event.previous_authentication_tag_hex)?;
+    if !constant_time_equal(&previous, &journal.last_authentication_tag) {
+        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+    }
+    let supplied = decode_authentication_tag(&event.authentication_tag_hex)?;
+    let expected = authenticator.authenticate(&event_authentication_payload(event)?);
+    if !constant_time_equal(&supplied, &expected) {
+        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+    }
+    Ok(())
+}
+
+fn event_authentication_payload(event: &JournalEvent) -> Result<Vec<u8>, WalletJournalError> {
+    serde_json::to_vec(&(
+        &event.schema,
+        event.version,
+        &event.wallet_id,
+        event.sequence,
+        &event.tx_id,
+        event.recorded_at_unix_ms,
+        &event.event,
+        &event.previous_authentication_tag_hex,
+    ))
+    .map_err(|_| WalletJournalError::InvalidOrUnsupportedFormat)
+}
+
+fn decode_authentication_tag(
+    encoded: &str,
+) -> Result<[u8; AUTHENTICATION_TAG_BYTES], WalletJournalError> {
+    if encoded.len() != AUTHENTICATION_TAG_BYTES * 2
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+    }
+    let mut tag = [0_u8; AUTHENTICATION_TAG_BYTES];
+    hex::decode_to_slice(encoded, &mut tag)
+        .map_err(|_| WalletJournalError::InvalidOrUnsupportedFormat)?;
+    Ok(tag)
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn apply_authenticated_event(
+    journal: &mut WalletActivityJournal,
+    event: &JournalEvent,
+) -> Result<(), WalletJournalError> {
+    apply_event(journal, event)?;
+    journal.last_authentication_tag = decode_authentication_tag(&event.authentication_tag_hex)?;
+    Ok(())
 }
 
 fn apply_event(
@@ -534,6 +671,20 @@ mod tests {
     };
 
     const WALLET_ID: &str = "primary";
+    static TEST_SEED: Lazy<WalletSeed> = Lazy::new(|| WalletSeed::for_test(7));
+
+    fn authenticator() -> WalletJournalAuthenticator<'static> {
+        WalletJournalAuthenticator::new(WALLET_ID, &TEST_SEED).unwrap()
+    }
+
+    fn other_wallet_authenticator() -> WalletJournalAuthenticator<'static> {
+        WalletJournalAuthenticator::new("another", &TEST_SEED).unwrap()
+    }
+
+    fn wrong_seed_authenticator() -> WalletJournalAuthenticator<'static> {
+        static WRONG_SEED: Lazy<WalletSeed> = Lazy::new(|| WalletSeed::for_test(8));
+        WalletJournalAuthenticator::new(WALLET_ID, &WRONG_SEED).unwrap()
+    }
 
     fn accepted_transaction() -> (VisionTransaction, WalletSubmissionOutcome) {
         let seed = WalletSeed::for_test(7);
@@ -561,7 +712,8 @@ mod tests {
         let (transaction, outcome) = accepted_transaction();
 
         let journal =
-            append_accepted_submission(&path, WALLET_ID, &transaction, &outcome, 100).unwrap();
+            append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100)
+                .unwrap();
         assert_eq!(journal.wallet_id(), WALLET_ID);
         assert_eq!(journal.records().len(), 1);
         let record = &journal.records()[0];
@@ -571,7 +723,7 @@ mod tests {
         assert_eq!(record.nonce, 3);
         assert_eq!(record.observation, WalletReceiptObservation::NotFound);
 
-        let loaded = load_activity_journal(&path, WALLET_ID).unwrap();
+        let loaded = load_activity_journal(&path, &authenticator()).unwrap();
         assert_eq!(loaded, journal);
         let stored = fs::read_to_string(path).unwrap();
         assert!(!stored.contains(&transaction.sig));
@@ -599,7 +751,8 @@ mod tests {
             code: crate::wallet::submission::WalletSubmissionRejection::StaleNonce,
         };
         assert_eq!(
-            append_accepted_submission(&path, WALLET_ID, &transaction, &rejected, 100).unwrap_err(),
+            append_accepted_submission(&path, &authenticator(), &transaction, &rejected, 100)
+                .unwrap_err(),
             WalletJournalError::SubmissionNotAccepted
         );
         assert!(!path.exists());
@@ -609,7 +762,8 @@ mod tests {
             current_nonce: 3,
         };
         assert_eq!(
-            append_accepted_submission(&path, WALLET_ID, &transaction, &mismatch, 100).unwrap_err(),
+            append_accepted_submission(&path, &authenticator(), &transaction, &mismatch, 100)
+                .unwrap_err(),
             WalletJournalError::SubmissionMismatch
         );
         assert!(!path.exists());
@@ -620,9 +774,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = journal_path(&directory);
         let (transaction, outcome) = accepted_transaction();
-        append_accepted_submission(&path, WALLET_ID, &transaction, &outcome, 100).unwrap();
+        append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100).unwrap();
         assert_eq!(
-            append_accepted_submission(&path, WALLET_ID, &transaction, &outcome, 101).unwrap_err(),
+            append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 101)
+                .unwrap_err(),
             WalletJournalError::DuplicateTransaction
         );
     }
@@ -633,14 +788,15 @@ mod tests {
         let path = journal_path(&directory);
         let (transaction, outcome) = accepted_transaction();
         let tx_id = canonical_transaction_id(&transaction).unwrap();
-        append_accepted_submission(&path, WALLET_ID, &transaction, &outcome, 100).unwrap();
+        append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100).unwrap();
 
         let pending = WalletReceiptObservation::Pending;
-        let journal = append_receipt_observation(&path, WALLET_ID, &tx_id, &pending, 110).unwrap();
+        let journal =
+            append_receipt_observation(&path, &authenticator(), &tx_id, &pending, 110).unwrap();
         assert_eq!(journal.records()[0].observation, pending);
         assert_eq!(journal.records()[0].last_observed_at_unix_ms, Some(110));
         let size_after_pending = fs::metadata(&path).unwrap().len();
-        append_receipt_observation(&path, WALLET_ID, &tx_id, &pending, 111).unwrap();
+        append_receipt_observation(&path, &authenticator(), &tx_id, &pending, 111).unwrap();
         assert_eq!(fs::metadata(&path).unwrap().len(), size_after_pending);
 
         let mined = WalletReceiptObservation::Mined {
@@ -649,12 +805,14 @@ mod tests {
             tx_index: 1,
             confirmations: 2,
         };
-        let journal = append_receipt_observation(&path, WALLET_ID, &tx_id, &mined, 120).unwrap();
+        let journal =
+            append_receipt_observation(&path, &authenticator(), &tx_id, &mined, 120).unwrap();
         assert_eq!(journal.records()[0].observation, mined);
 
         let unknown = "cc".repeat(32);
         assert_eq!(
-            append_receipt_observation(&path, WALLET_ID, &unknown, &pending, 130).unwrap_err(),
+            append_receipt_observation(&path, &authenticator(), &unknown, &pending, 130)
+                .unwrap_err(),
             WalletJournalError::UnknownTransaction
         );
     }
@@ -665,17 +823,17 @@ mod tests {
         let path = journal_path(&directory);
         let (transaction, outcome) = accepted_transaction();
         let tx_id = canonical_transaction_id(&transaction).unwrap();
-        append_accepted_submission(&path, WALLET_ID, &transaction, &outcome, 100).unwrap();
+        append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100).unwrap();
         let mined = WalletReceiptObservation::Mined {
             block_hash: "bb".repeat(32),
             block_height: 20,
             tx_index: 1,
             confirmations: 9,
         };
-        append_receipt_observation(&path, WALLET_ID, &tx_id, &mined, 110).unwrap();
+        append_receipt_observation(&path, &authenticator(), &tx_id, &mined, 110).unwrap();
         append_receipt_observation(
             &path,
-            WALLET_ID,
+            &authenticator(),
             &tx_id,
             &WalletReceiptObservation::Pending,
             120,
@@ -683,7 +841,7 @@ mod tests {
         .unwrap();
         let journal = append_receipt_observation(
             &path,
-            WALLET_ID,
+            &authenticator(),
             &tx_id,
             &WalletReceiptObservation::NotFound,
             130,
@@ -706,7 +864,7 @@ mod tests {
             confirmations: 0,
         };
         assert_eq!(
-            append_receipt_observation(&path, WALLET_ID, &"aa".repeat(32), &invalid, 1)
+            append_receipt_observation(&path, &authenticator(), &"aa".repeat(32), &invalid, 1)
                 .unwrap_err(),
             WalletJournalError::InvalidObservation
         );
@@ -717,26 +875,26 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = journal_path(&directory);
         let (transaction, outcome) = accepted_transaction();
-        append_accepted_submission(&path, WALLET_ID, &transaction, &outcome, 100).unwrap();
+        append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100).unwrap();
 
         let mut truncated = fs::read(&path).unwrap();
         truncated.pop();
         fs::write(&path, truncated).unwrap();
         storage_security::protect_file(&path).unwrap();
         assert_eq!(
-            load_activity_journal(&path, WALLET_ID).unwrap_err(),
+            load_activity_journal(&path, &authenticator()).unwrap_err(),
             WalletJournalError::InvalidOrUnsupportedFormat
         );
 
         fs::remove_file(&path).unwrap();
         let (transaction, outcome) = accepted_transaction();
-        append_accepted_submission(&path, WALLET_ID, &transaction, &outcome, 100).unwrap();
+        append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100).unwrap();
         let stored = fs::read_to_string(&path).unwrap();
-        let changed = stored.replacen("\"version\":1", "\"version\":1,\"secret\":\"x\"", 1);
+        let changed = stored.replacen("\"version\":2", "\"version\":2,\"secret\":\"x\"", 1);
         fs::write(&path, changed).unwrap();
         storage_security::protect_file(&path).unwrap();
         assert_eq!(
-            load_activity_journal(&path, WALLET_ID).unwrap_err(),
+            load_activity_journal(&path, &authenticator()).unwrap_err(),
             WalletJournalError::InvalidOrUnsupportedFormat
         );
     }
@@ -746,9 +904,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = journal_path(&directory);
         let (transaction, outcome) = accepted_transaction();
-        append_accepted_submission(&path, WALLET_ID, &transaction, &outcome, 100).unwrap();
+        append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100).unwrap();
         assert_eq!(
-            load_activity_journal(&path, "another").unwrap_err(),
+            load_activity_journal(&path, &other_wallet_authenticator()).unwrap_err(),
             WalletJournalError::InvalidOrUnsupportedFormat
         );
 
@@ -757,8 +915,81 @@ mod tests {
         fs::write(&path, changed).unwrap();
         storage_security::protect_file(&path).unwrap();
         assert_eq!(
-            load_activity_journal(&path, WALLET_ID).unwrap_err(),
+            load_activity_journal(&path, &authenticator()).unwrap_err(),
             WalletJournalError::InvalidOrUnsupportedFormat
         );
+    }
+
+    #[test]
+    fn authentication_rejects_content_tampering_wrong_seed_and_reordered_chains() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = journal_path(&directory);
+        let (transaction, outcome) = accepted_transaction();
+        let tx_id = canonical_transaction_id(&transaction).unwrap();
+        append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100).unwrap();
+        let one_event = fs::read_to_string(&path).unwrap();
+        assert!(one_event.contains("previous_authentication_tag_hex"));
+        assert!(one_event.contains("authentication_tag_hex"));
+        assert!(!one_event.contains(&"07".repeat(32)));
+
+        let tampered = one_event.replacen(
+            "\"amount_raw_units\":\"42\"",
+            "\"amount_raw_units\":\"43\"",
+            1,
+        );
+        assert_ne!(tampered, one_event);
+        fs::write(&path, tampered).unwrap();
+        storage_security::protect_file(&path).unwrap();
+        assert_eq!(
+            load_activity_journal(&path, &authenticator()).unwrap_err(),
+            WalletJournalError::InvalidOrUnsupportedFormat
+        );
+
+        fs::write(&path, &one_event).unwrap();
+        storage_security::protect_file(&path).unwrap();
+        assert_eq!(
+            load_activity_journal(&path, &wrong_seed_authenticator()).unwrap_err(),
+            WalletJournalError::InvalidOrUnsupportedFormat
+        );
+
+        append_receipt_observation(
+            &path,
+            &authenticator(),
+            &tx_id,
+            &WalletReceiptObservation::Pending,
+            110,
+        )
+        .unwrap();
+        let two_events = fs::read_to_string(&path).unwrap();
+        let mut lines = two_events.lines();
+        let first = lines.next().unwrap();
+        let second = lines.next().unwrap();
+        assert!(lines.next().is_none());
+        fs::write(&path, format!("{second}\n{first}\n")).unwrap();
+        storage_security::protect_file(&path).unwrap();
+        assert_eq!(
+            load_activity_journal(&path, &authenticator()).unwrap_err(),
+            WalletJournalError::InvalidOrUnsupportedFormat
+        );
+    }
+
+    #[test]
+    fn accepted_submission_must_belong_to_the_authenticating_seed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = journal_path(&directory);
+        let foreign_seed = WalletSeed::for_test(8);
+        let draft = CashTransferDraft::for_current_nonce(3, "22".repeat(32), 42);
+        let transaction = sign_cash_transfer_for_test(&foreign_seed, &draft).unwrap();
+        let outcome = WalletSubmissionOutcome::Accepted {
+            tx_id: canonical_transaction_id(&transaction).unwrap(),
+            current_nonce: 3,
+        };
+
+        assert_eq!(
+            append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100)
+                .unwrap_err(),
+            WalletJournalError::SubmissionMismatch
+        );
+        assert!(!path.exists());
     }
 }

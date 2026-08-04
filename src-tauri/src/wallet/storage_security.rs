@@ -7,6 +7,7 @@ pub(in crate::wallet) fn protect_directory(path: &Path) -> Result<(), WalletVaul
     platform::protect(path, true)
 }
 
+#[cfg(any(not(windows), test))]
 pub(in crate::wallet) fn protect_file(path: &Path) -> Result<(), WalletVaultError> {
     platform::protect(path, false)
 }
@@ -15,6 +16,7 @@ pub(in crate::wallet) fn verify_directory(path: &Path) -> Result<(), WalletVault
     platform::verify(path, true)
 }
 
+#[cfg(not(windows))]
 pub(in crate::wallet) fn verify_file(path: &Path) -> Result<(), WalletVaultError> {
     platform::verify(path, false)
 }

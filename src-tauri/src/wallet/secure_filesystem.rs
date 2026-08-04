@@ -119,6 +119,17 @@ pub(in crate::wallet) fn create_new_publishable_file(path: &Path) -> io::Result<
 /// is the validated handle rather than a pathname, so a path substitution cannot redirect which
 /// file is published.
 pub(in crate::wallet) fn publish_open_file(file: &File, destination: &Path) -> io::Result<()> {
+    rename_open_file(file, destination, false)
+}
+
+/// Atomically replaces an existing destination with the already-open, validated staging file.
+/// The source identity is handle-bound and the operation never exposes a partially written final
+/// file. Callers must hold the destination directory chain open for the complete operation.
+pub(in crate::wallet) fn replace_with_open_file(file: &File, destination: &Path) -> io::Result<()> {
+    rename_open_file(file, destination, true)
+}
+
+fn rename_open_file(file: &File, destination: &Path, replace_existing: bool) -> io::Result<()> {
     validate_absolute_disk_path(destination)?;
     let destination_wide: Vec<u16> = destination.as_os_str().encode_wide().collect();
     if destination_wide.is_empty() || destination_wide.contains(&0) {
@@ -141,11 +152,11 @@ pub(in crate::wallet) fn publish_open_file(file: &File, destination: &Path) -> i
     let mut buffer = vec![0_usize; words];
     let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     // SAFETY: `buffer` is pointer-aligned and large enough for the fixed header plus every UTF-16
-    // destination unit. `file` owns a valid handle with DELETE access. ReplaceIfExists remains
-    // false, so an existing destination is never overwritten.
+    // destination unit. `file` owns a valid handle with DELETE access. `replace_existing` is an
+    // explicit caller policy; the Windows rename is atomic with respect to the final path.
     let renamed = unsafe {
         ptr::write(information, FILE_RENAME_INFO::default());
-        (*information).Anonymous.ReplaceIfExists = false;
+        (*information).Anonymous.ReplaceIfExists = replace_existing;
         (*information).RootDirectory = ptr::null_mut();
         (*information).FileNameLength = name_bytes;
         ptr::copy_nonoverlapping(
@@ -205,7 +216,10 @@ fn validate_absolute_disk_path(path: &Path) -> io::Result<()> {
         components.next(),
         Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
     ) || !matches!(components.next(), Some(Component::RootDir))
-        || components.any(|component| !matches!(component, Component::Normal(_)))
+        || components.any(|component| match component {
+            Component::Normal(value) => value.encode_wide().any(|unit| unit == b':' as u16),
+            _ => true,
+        })
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -264,6 +278,58 @@ mod tests {
     }
 
     #[test]
+    fn replacement_is_handle_bound_atomic_and_blocked_by_a_held_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let guarded = directory.path().join("guarded");
+        let _guard = DirectoryChainGuard::ensure(&guarded).unwrap();
+        let final_path = guarded.join("activity.jsonl");
+        fs::write(&final_path, b"old-complete-journal\n").unwrap();
+
+        let staged_path = guarded.join("staged.jsonl");
+        let mut staged = create_new_publishable_file(&staged_path).unwrap();
+        staged.write_all(b"new-complete-journal\n").unwrap();
+        staged.sync_all().unwrap();
+
+        let held_destination = open_existing_file(&final_path).unwrap();
+        assert!(replace_with_open_file(&staged, &final_path).is_err());
+        assert_eq!(fs::read(&final_path).unwrap(), b"old-complete-journal\n");
+        drop(held_destination);
+
+        replace_with_open_file(&staged, &final_path).unwrap();
+        assert!(!staged_path.exists());
+        assert_eq!(fs::read(&final_path).unwrap(), b"new-complete-journal\n");
+    }
+
+    #[test]
+    fn replacement_removes_a_destination_reparse_point_without_following_it() {
+        use std::os::windows::fs::symlink_file;
+
+        let directory = tempfile::tempdir().unwrap();
+        let guarded = directory.path().join("guarded");
+        let _guard = DirectoryChainGuard::ensure(&guarded).unwrap();
+        let victim = guarded.join("victim.jsonl");
+        fs::write(&victim, b"victim-must-not-change\n").unwrap();
+        let destination = guarded.join("activity.jsonl");
+
+        // Symlink creation can be disabled by Windows policy. If it is available, atomic
+        // replacement must replace the directory entry rather than following its target.
+        if symlink_file(&victim, &destination).is_ok() {
+            let staging_path = guarded.join("staged-for-reparse-test.jsonl");
+            let mut staged = create_new_publishable_file(&staging_path).unwrap();
+            staged.write_all(b"new-complete-journal\n").unwrap();
+            staged.sync_all().unwrap();
+            replace_with_open_file(&staged, &destination).unwrap();
+
+            assert_eq!(fs::read(&victim).unwrap(), b"victim-must-not-change\n");
+            assert!(!fs::symlink_metadata(&destination)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(fs::read(&destination).unwrap(), b"new-complete-journal\n");
+        }
+    }
+
+    #[test]
     fn held_directory_and_file_handles_block_path_replacement() {
         let directory = tempfile::tempdir().unwrap();
         let guarded = directory.path().join("guarded");
@@ -287,6 +353,9 @@ mod tests {
     fn secure_file_helpers_reject_non_disk_paths_and_directories_as_files() {
         assert!(DirectoryChainGuard::open_existing(Path::new("relative")).is_err());
         assert!(DirectoryChainGuard::open_existing(Path::new(r"\\server\share")).is_err());
+        assert!(
+            validate_absolute_disk_path(Path::new(r"C:\wallet\activity.jsonl:stream")).is_err()
+        );
         let directory = tempfile::tempdir().unwrap();
         assert!(open_existing_file(directory.path()).is_err());
     }

@@ -57,6 +57,25 @@ The journal stores only public activity metadata and authentication tags. It sto
 signature, signed transaction bytes, password, recovery credential, vault data, DPAPI blob,
 session token, or activation proof.
 
+## Windows storage publication
+
+Journal reads now hold every ancestor directory open against rename, open the journal itself with
+reparse-point traversal disabled, validate the regular-file identity and restrictive ACL through
+that same handle, and read through that handle. Alternate data stream paths are rejected.
+
+Journal updates no longer append to the live file. Desktop builds the complete next authenticated
+journal from the already verified bytes, writes it to a random create-new staging file in the same
+guarded directory, applies and verifies the restrictive ACL through the staging handle, flushes
+the complete file, and atomically renames that handle over the prior journal. Creation uses the
+same process but refuses to replace an existing destination. There is no fallible storage step
+after publication.
+
+Deterministic tests interrupt the process after staging-file protection and after the complete
+staging file is flushed. In both cases the previous live journal remains byte-for-byte intact. An
+interrupted first write publishes no partial journal. Additional tests prove that a held journal
+handle blocks replacement, publication remains tied to the staging handle, reparse-point journal
+files fail closed, and alternate data stream paths are rejected.
+
 ## Deliberate limitations
 
 Authentication proves that retained events were produced for this wallet and that the retained
@@ -68,7 +87,12 @@ The journal therefore remains non-authoritative local display history. It never 
 nonces, signing decisions, retry decisions, receipt truth, or confidence by itself. Core remains
 the source for current canonical observations.
 
-Filesystem replacement races, cross-process ownership, interrupted append recovery, and atomic
-publication are intentionally assigned to the next hardening tranche. This commit does not claim
-to solve them. Version 1 journals fail closed; no migration is enabled while custody commands
-remain unregistered.
+An interruption before atomic publication can leave a randomly named, access-controlled staging
+file containing public journal metadata. It is never selected as the live journal and can be
+cleaned by a future bounded maintenance routine. Cross-process and cross-Windows-session ownership
+is intentionally assigned to the next hardening tranche; without that exclusion, two legitimate
+Desktop processes could each replace the journal using different previously valid snapshots. The
+process-local mutex remains defense against in-process overlap only.
+
+Version 1 journals fail closed; no migration is enabled while custody commands remain
+unregistered.

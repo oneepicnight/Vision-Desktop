@@ -6,6 +6,11 @@
     )
 )]
 
+#[cfg(windows)]
+use super::secure_filesystem::{
+    create_new_publishable_file, open_existing_file, publish_open_file, replace_with_open_file,
+    DirectoryChainGuard,
+};
 use super::{
     account::derive_account_identity,
     receipt::WalletReceiptObservation,
@@ -20,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt, fs,
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Mutex,
 };
 
@@ -33,6 +38,7 @@ const AUTHENTICATION_TAG_BYTES: usize = 32;
 const MAX_JOURNAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 16 * 1024;
 const MAX_EVENTS: usize = 10_000;
+const JOURNAL_STAGING_PREFIX: &str = ".wallet-activity-stage-";
 
 static JOURNAL_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -56,6 +62,11 @@ pub(in crate::wallet) struct WalletActivityJournal {
     records: Vec<WalletActivityRecord>,
     event_count: usize,
     last_authentication_tag: [u8; AUTHENTICATION_TAG_BYTES],
+}
+
+struct LoadedJournal {
+    journal: WalletActivityJournal,
+    encoded: Vec<u8>,
 }
 
 impl WalletActivityJournal {
@@ -203,7 +214,8 @@ pub(in crate::wallet) fn append_accepted_submission(
     let _guard = JOURNAL_WRITE_LOCK
         .lock()
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    let mut journal = load_journal_unlocked(path, authenticator)?;
+    let loaded = load_journal_unlocked(path, authenticator)?;
+    let mut journal = loaded.journal;
     let (tx_id, submitted) = accepted_submission(transaction, outcome)?;
     if submitted.sender_address != authenticator.sender_address {
         return Err(WalletJournalError::SubmissionMismatch);
@@ -223,7 +235,12 @@ pub(in crate::wallet) fn append_accepted_submission(
         authentication_tag_hex: String::new(),
     };
     authenticate_event(authenticator, &mut event)?;
-    append_event(path, &event, journal.event_count == 0)?;
+    append_event(
+        path,
+        loaded.encoded.as_slice(),
+        &event,
+        journal.event_count == 0,
+    )?;
     apply_authenticated_event(&mut journal, &event)?;
     Ok(journal)
 }
@@ -242,7 +259,8 @@ pub(in crate::wallet) fn append_receipt_observation(
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
     validate_tx_id(tx_id)?;
     validate_observation(observation)?;
-    let mut journal = load_journal_unlocked(path, authenticator)?;
+    let loaded = load_journal_unlocked(path, authenticator)?;
+    let mut journal = loaded.journal;
     let record = journal
         .records
         .iter()
@@ -265,7 +283,7 @@ pub(in crate::wallet) fn append_receipt_observation(
         authentication_tag_hex: String::new(),
     };
     authenticate_event(authenticator, &mut event)?;
-    append_event(path, &event, false)?;
+    append_event(path, loaded.encoded.as_slice(), &event, false)?;
     apply_authenticated_event(&mut journal, &event)?;
     Ok(journal)
 }
@@ -277,7 +295,7 @@ pub(in crate::wallet) fn load_activity_journal(
     let _guard = JOURNAL_WRITE_LOCK
         .lock()
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    load_journal_unlocked(path, authenticator)
+    load_journal_unlocked(path, authenticator).map(|loaded| loaded.journal)
 }
 
 fn accepted_submission(
@@ -328,42 +346,18 @@ fn accepted_submission(
 fn load_journal_unlocked(
     path: &Path,
     authenticator: &WalletJournalAuthenticator<'_>,
-) -> Result<WalletActivityJournal, WalletJournalError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(WalletActivityJournal {
+) -> Result<LoadedJournal, WalletJournalError> {
+    let Some(bytes) = read_journal_bytes(path)? else {
+        return Ok(LoadedJournal {
+            journal: WalletActivityJournal {
                 wallet_id: authenticator.wallet_id.to_string(),
                 records: Vec::new(),
                 event_count: 0,
                 last_authentication_tag: [0_u8; AUTHENTICATION_TAG_BYTES],
-            });
-        }
-        Err(_) => return Err(WalletJournalError::StorageUnavailable),
+            },
+            encoded: Vec::new(),
+        });
     };
-    let parent = path
-        .parent()
-        .ok_or(WalletJournalError::StorageUnavailable)?;
-    storage_security::verify_directory(parent)
-        .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    storage_security::verify_file(path).map_err(|_| WalletJournalError::StorageUnavailable)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(WalletJournalError::StorageUnavailable);
-    }
-    let file_size =
-        usize::try_from(metadata.len()).map_err(|_| WalletJournalError::JournalTooLarge)?;
-    if file_size == 0 || file_size > MAX_JOURNAL_BYTES {
-        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
-    }
-    let mut bytes = Vec::with_capacity(file_size);
-    fs::File::open(path)
-        .map_err(|_| WalletJournalError::StorageUnavailable)?
-        .take(MAX_JOURNAL_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    if bytes.len() > MAX_JOURNAL_BYTES {
-        return Err(WalletJournalError::JournalTooLarge);
-    }
     if bytes.last() != Some(&b'\n') {
         return Err(WalletJournalError::InvalidOrUnsupportedFormat);
     }
@@ -396,7 +390,80 @@ fn load_journal_unlocked(
     if journal.event_count == 0 {
         return Err(WalletJournalError::InvalidOrUnsupportedFormat);
     }
-    Ok(journal)
+    Ok(LoadedJournal {
+        journal,
+        encoded: bytes,
+    })
+}
+
+#[cfg(windows)]
+fn read_journal_bytes(path: &Path) -> Result<Option<Vec<u8>>, WalletJournalError> {
+    let parent = path
+        .parent()
+        .ok_or(WalletJournalError::StorageUnavailable)?;
+    let _directories = match DirectoryChainGuard::open_existing(parent) {
+        Ok(guard) => guard,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(WalletJournalError::StorageUnavailable),
+    };
+    storage_security::verify_directory(parent)
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    let file = match open_existing_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(WalletJournalError::StorageUnavailable),
+    };
+    storage_security::verify_open_file(&file)
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    let file_size =
+        usize::try_from(metadata.len()).map_err(|_| WalletJournalError::JournalTooLarge)?;
+    if file_size == 0 || file_size > MAX_JOURNAL_BYTES {
+        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+    }
+    let mut bytes = Vec::with_capacity(file_size);
+    file.take(MAX_JOURNAL_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    if bytes.len() > MAX_JOURNAL_BYTES {
+        return Err(WalletJournalError::JournalTooLarge);
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(not(windows))]
+fn read_journal_bytes(path: &Path) -> Result<Option<Vec<u8>>, WalletJournalError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(WalletJournalError::StorageUnavailable),
+    };
+    let parent = path
+        .parent()
+        .ok_or(WalletJournalError::StorageUnavailable)?;
+    storage_security::verify_directory(parent)
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    storage_security::verify_file(path).map_err(|_| WalletJournalError::StorageUnavailable)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(WalletJournalError::StorageUnavailable);
+    }
+    let file_size =
+        usize::try_from(metadata.len()).map_err(|_| WalletJournalError::JournalTooLarge)?;
+    if file_size == 0 || file_size > MAX_JOURNAL_BYTES {
+        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+    }
+    let mut bytes = Vec::with_capacity(file_size);
+    fs::File::open(path)
+        .map_err(|_| WalletJournalError::StorageUnavailable)?
+        .take(MAX_JOURNAL_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    if bytes.len() > MAX_JOURNAL_BYTES {
+        return Err(WalletJournalError::JournalTooLarge);
+    }
+    Ok(Some(bytes))
 }
 
 fn authenticate_event(
@@ -550,6 +617,7 @@ fn validate_observation(observation: &WalletReceiptObservation) -> Result<(), Wa
 
 fn append_event(
     path: &Path,
+    existing: &[u8],
     event: &JournalEvent,
     create_new: bool,
 ) -> Result<(), WalletJournalError> {
@@ -559,63 +627,136 @@ fn append_event(
     if encoded.len() > MAX_EVENT_BYTES {
         return Err(WalletJournalError::JournalTooLarge);
     }
+    if create_new != existing.is_empty() {
+        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+    }
+    let new_size = existing
+        .len()
+        .checked_add(encoded.len())
+        .ok_or(WalletJournalError::JournalTooLarge)?;
+    if new_size > MAX_JOURNAL_BYTES {
+        return Err(WalletJournalError::JournalTooLarge);
+    }
+    let mut replacement = Vec::with_capacity(new_size);
+    replacement.extend_from_slice(existing);
+    replacement.extend_from_slice(&encoded);
+    persist_journal_bytes(path, &replacement, create_new)
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalPersistenceCheckpoint {
+    StagingFileSecured,
+    StagingFileFlushed,
+}
+
+#[cfg(windows)]
+fn persist_journal_bytes(
+    path: &Path,
+    bytes: &[u8],
+    create_new: bool,
+) -> Result<(), WalletJournalError> {
+    persist_journal_bytes_with_checkpoint(path, bytes, create_new, |_| Ok(()))
+}
+
+#[cfg(windows)]
+fn persist_journal_bytes_with_checkpoint<F>(
+    path: &Path,
+    bytes: &[u8],
+    create_new: bool,
+    mut checkpoint: F,
+) -> Result<(), WalletJournalError>
+where
+    F: FnMut(JournalPersistenceCheckpoint) -> Result<(), WalletJournalError>,
+{
     let parent = path
         .parent()
         .ok_or(WalletJournalError::StorageUnavailable)?;
-    if create_new {
-        fs::create_dir_all(parent).map_err(|_| WalletJournalError::StorageUnavailable)?;
-        storage_security::protect_directory(parent)
-            .map_err(|_| WalletJournalError::StorageUnavailable)?;
-        write_new_journal(path, &encoded)?;
-        storage_security::protect_file(path)
-            .and_then(|_| storage_security::verify_file(path))
-            .map_err(|_| WalletJournalError::StorageUnavailable)?;
-        return Ok(());
-    }
+    let _directories =
+        DirectoryChainGuard::ensure(parent).map_err(|_| WalletJournalError::StorageUnavailable)?;
+    storage_security::protect_directory(parent)
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
 
-    storage_security::verify_directory(parent)
+    let (_staging_path, mut staging_file) = create_journal_staging_file(parent)?;
+    storage_security::protect_open_file(&staging_file)
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    storage_security::verify_file(path).map_err(|_| WalletJournalError::StorageUnavailable)?;
-    let metadata =
-        fs::symlink_metadata(path).map_err(|_| WalletJournalError::StorageUnavailable)?;
-    let existing =
-        usize::try_from(metadata.len()).map_err(|_| WalletJournalError::JournalTooLarge)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || existing
-            .checked_add(encoded.len())
-            .is_none_or(|size| size > MAX_JOURNAL_BYTES)
-    {
-        return Err(WalletJournalError::JournalTooLarge);
+    checkpoint(JournalPersistenceCheckpoint::StagingFileSecured)?;
+    staging_file
+        .write_all(bytes)
+        .and_then(|_| staging_file.sync_all())
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    storage_security::verify_open_file(&staging_file)
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    checkpoint(JournalPersistenceCheckpoint::StagingFileFlushed)?;
+
+    if create_new {
+        publish_open_file(&staging_file, path)
+            .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    } else {
+        let existing =
+            open_existing_file(path).map_err(|_| WalletJournalError::StorageUnavailable)?;
+        storage_security::verify_open_file(&existing)
+            .map_err(|_| WalletJournalError::StorageUnavailable)?;
+        drop(existing);
+        replace_with_open_file(&staging_file, path)
+            .map_err(|_| WalletJournalError::StorageUnavailable)?;
     }
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    file.write_all(&encoded)
-        .and_then(|_| file.sync_all())
-        .map_err(|_| WalletJournalError::StorageUnavailable)
+    Ok(())
 }
 
-fn write_new_journal(path: &Path, bytes: &[u8]) -> Result<(), WalletJournalError> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
+#[cfg(windows)]
+fn create_journal_staging_file(parent: &Path) -> Result<(PathBuf, fs::File), WalletJournalError> {
+    let mut suffix = [0_u8; 16];
+    getrandom::fill(&mut suffix).map_err(|_| WalletJournalError::StorageUnavailable)?;
+    let path = parent.join(format!(
+        "{JOURNAL_STAGING_PREFIX}{}.tmp",
+        hex::encode(suffix)
+    ));
+    let file =
+        create_new_publishable_file(&path).map_err(|_| WalletJournalError::StorageUnavailable)?;
+    Ok((path, file))
+}
+
+#[cfg(not(windows))]
+fn persist_journal_bytes(
+    path: &Path,
+    bytes: &[u8],
+    create_new: bool,
+) -> Result<(), WalletJournalError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path
+        .parent()
+        .ok_or(WalletJournalError::StorageUnavailable)?;
+    fs::create_dir_all(parent).map_err(|_| WalletJournalError::StorageUnavailable)?;
+    storage_security::protect_directory(parent)
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    let result = file
+    let mut suffix = [0_u8; 16];
+    getrandom::fill(&mut suffix).map_err(|_| WalletJournalError::StorageUnavailable)?;
+    let staging_path = parent.join(format!(
+        "{JOURNAL_STAGING_PREFIX}{}.tmp",
+        hex::encode(suffix)
+    ));
+    let mut staging = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&staging_path)
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    staging
         .write_all(bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|_| WalletJournalError::StorageUnavailable);
-    if result.is_err() {
-        let _ = fs::remove_file(path);
+        .and_then(|_| staging.sync_all())
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    drop(staging);
+    let published = if create_new {
+        fs::hard_link(&staging_path, path)
+    } else {
+        fs::rename(&staging_path, path)
+    };
+    if published.is_ok() && create_new {
+        let _ = fs::remove_file(&staging_path);
     }
-    result
+    published.map_err(|_| WalletJournalError::StorageUnavailable)
 }
 
 fn next_sequence(event_count: usize) -> Result<u64, WalletJournalError> {
@@ -991,5 +1132,84 @@ mod tests {
             WalletJournalError::SubmissionMismatch
         );
         assert!(!path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn interrupted_copy_on_write_never_changes_the_live_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = journal_path(&directory);
+        let (transaction, outcome) = accepted_transaction();
+        append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100).unwrap();
+        let original = fs::read(&path).unwrap();
+        let mut unpublished = original.clone();
+        unpublished.extend_from_slice(b"incomplete-untrusted-event\n");
+
+        for interruption in [
+            JournalPersistenceCheckpoint::StagingFileSecured,
+            JournalPersistenceCheckpoint::StagingFileFlushed,
+        ] {
+            let error =
+                persist_journal_bytes_with_checkpoint(&path, &unpublished, false, |checkpoint| {
+                    if checkpoint == interruption {
+                        Err(WalletJournalError::StorageUnavailable)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .unwrap_err();
+            assert_eq!(error, WalletJournalError::StorageUnavailable);
+            assert_eq!(fs::read(&path).unwrap(), original);
+            load_activity_journal(&path, &authenticator()).unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn interrupted_first_write_never_publishes_a_partial_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = journal_path(&directory);
+        let parent = path.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        storage_security::protect_directory(parent).unwrap();
+
+        let error = persist_journal_bytes_with_checkpoint(
+            &path,
+            b"not-a-complete-journal\n",
+            true,
+            |checkpoint| {
+                if checkpoint == JournalPersistenceCheckpoint::StagingFileFlushed {
+                    Err(WalletJournalError::StorageUnavailable)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, WalletJournalError::StorageUnavailable);
+        assert!(!path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn journal_reader_rejects_reparse_point_files() {
+        use std::os::windows::fs::symlink_file;
+
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("wallets");
+        fs::create_dir(&parent).unwrap();
+        storage_security::protect_directory(&parent).unwrap();
+        let target = parent.join("target.jsonl");
+        fs::write(&target, b"attacker-controlled\n").unwrap();
+        let link = parent.join("primary-activity.jsonl");
+
+        // Creating symlinks can be disabled by Windows policy. When it is available, the reader
+        // must reject the reparse point rather than following it to the target.
+        if symlink_file(&target, &link).is_ok() {
+            assert_eq!(
+                load_activity_journal(&link, &authenticator()).unwrap_err(),
+                WalletJournalError::StorageUnavailable
+            );
+        }
     }
 }

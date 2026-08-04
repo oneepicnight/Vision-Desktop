@@ -17,6 +17,8 @@ mod onboarding;
 mod receipt;
 mod recovery;
 #[cfg(windows)]
+mod recovery_ceremony;
+#[cfg(windows)]
 mod recovery_selection;
 mod runtime;
 mod secret_input;
@@ -38,6 +40,8 @@ pub use contract::{
 };
 #[cfg(windows)]
 pub(crate) use lifecycle::WalletLifecycleAdapters;
+#[cfg(windows)]
+pub(crate) use recovery_ceremony::NativeRecoveryCredentialCeremony;
 pub(crate) use runtime::WalletRuntimeState;
 pub use secrets::WalletSeed;
 #[cfg(windows)]

@@ -185,7 +185,7 @@ impl PreparedWalletOnboarding {
         &self.metadata
     }
 
-    /// Returns the generated credential only to a future Rust-native presentation
+    /// Returns the generated credential only to the Rust-native presentation
     /// boundary. The zeroizing string must never be serialized into React state,
     /// logs, events, or support packages.
     pub(in crate::wallet) fn recovery_credential_for_native_presentation(

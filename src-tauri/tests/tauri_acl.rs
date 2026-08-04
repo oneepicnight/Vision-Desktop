@@ -376,7 +376,7 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
         wallet_adapter_production
             .match_indices(".run_authorized(")
             .count(),
-        10
+        12
     );
     assert_eq!(
         wallet_adapter_production
@@ -422,6 +422,9 @@ fn wallet_sensitive_authority_requires_runtime_activation_proof() {
     let cargo_manifest = read("Cargo.toml");
     let activation_source = read("src/wallet/activation.rs");
     let kdf_source = read("src/wallet/kdf.rs");
+    let lifecycle_source = read("src/wallet/lifecycle.rs");
+    let ceremony_source = read("src/wallet/recovery_ceremony.rs");
+    let lib_source = read("src/lib.rs");
     let runtime_source = read("src/wallet/runtime.rs");
     let onboarding_source = read("src/wallet/onboarding.rs");
     let recovery_source = read("src/wallet/recovery.rs");
@@ -454,6 +457,29 @@ fn wallet_sensitive_authority_requires_runtime_activation_proof() {
     assert!(kdf_source.contains("self.blocks.iter_mut().zeroize()"));
     assert!(!vault_source.contains("hash_password_into("));
     assert!(!recovery_source.contains("hash_password_into("));
+    assert!(lib_source.contains("NativeRecoveryCredentialCeremony::new"));
+    let ceremony_production = ceremony_source.split("#[cfg(test)]").next().unwrap();
+    assert!(!ceremony_production.contains("#[tauri::command]"));
+    assert!(!ceremony_production.contains("SetClipboardData"));
+    assert!(!ceremony_production.contains("OpenClipboard"));
+    assert!(!lifecycle_source.contains("WalletCreationResult"));
+
+    let create_flow = lifecycle_source
+        .split("fn create_at(")
+        .nth(1)
+        .and_then(|source| source.split("pub(in crate::wallet) fn restore(").next())
+        .expect("private create flow exists");
+    let acknowledgement = create_flow
+        .find("present_and_verify")
+        .expect("native recovery acknowledgement is mandatory");
+    let recovery_publication = create_flow
+        .find("store_recovery_backup")
+        .expect("recovery publication exists");
+    let vault_publication = create_flow
+        .find("store_local_vault")
+        .expect("vault publication exists");
+    assert!(acknowledgement < recovery_publication);
+    assert!(recovery_publication < vault_publication);
 
     for source in [
         onboarding_source,

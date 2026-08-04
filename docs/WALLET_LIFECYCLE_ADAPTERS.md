@@ -57,10 +57,14 @@ Create performs these steps inside one main-window-owned exclusive runtime opera
 3. Convert the bounded zeroizing local secret input into a Rust-only wallet password.
 4. Generate the seed and an independent 256-bit portable recovery credential directly from the operating-system random source.
 5. Separately encrypt the current-user-protected local vault and portable recovery artifact.
-6. Store the recovery artifact with create-new semantics.
-7. Read it back through the bounded parser, decrypt it, and prove the same Vision identity.
-8. Store the local vault with create-new semantics.
-9. Retain only public metadata and return a locked status plus the credential in a zeroizing, Rust-native-only creation result.
+6. Display the generated credential in a Rust-owned, main-window-parented native Windows ceremony and require an exact user re-entry.
+7. Clear the native input and encoded Rust presentation buffer after acknowledgement.
+8. Store the recovery artifact with create-new semantics only after acknowledgement.
+9. Read it back through the bounded parser, decrypt it, and prove the same Vision identity.
+10. Store the local vault with create-new semantics.
+11. Retain only public metadata and return a locked status; the credential is never part of the lifecycle result.
+
+Cancellation, native-UI failure, or runtime invalidation during the acknowledgement ceremony occurs before either filesystem write. The operation returns a fixed failure, retains no public account metadata, and leaves both the selected recovery destination and canonical vault absent. The ceremony uses no WebView, Tauri command, frontend state, clipboard API, command-line output, or support-package path. The credential is intentionally not auto-copied; the operator must record it offline and prove possession by re-entering it.
 
 The adapter checks its operation generation around every sensitive stage and every filesystem
 write. Session lock, suspend, main-window loss, explicit invalidation, or stale work prevents later
@@ -68,7 +72,7 @@ stages from being accepted. A narrow race may allow an already-entered handle-bo
 finish, but create-new storage prevents replacement and the result remains locked and inaccessible.
 
 Deterministic interruption tests invalidate runtime authority after destination/source consumption,
-encrypted preparation, recovery storage and verification, and local-vault storage. They prove that
+encrypted preparation, native recovery acknowledgement, recovery storage and verification, and local-vault storage. They prove that
 no later stage runs, the runtime remains locked with no accepted account metadata, existing files
 are never replaced, restore never changes its source backup, and only files whose handle-bound
 write already completed may remain. Retained recovery or vault artifacts are encrypted and are not

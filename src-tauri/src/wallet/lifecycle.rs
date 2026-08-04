@@ -10,6 +10,9 @@ use super::{
     contract::{WalletLifecycleStatus, WalletLockResult},
     onboarding::{prepare_new_wallet, prepare_restored_wallet, WalletOnboardingError},
     recovery::RecoveryArtifactError,
+    recovery_ceremony::{
+        NativeRecoveryCredentialCeremony, RecoveryCeremonyError, RecoveryCredentialCeremony,
+    },
     runtime::{RecoveryPathPurpose, WalletOperationKind, WalletRuntimeError, WalletRuntimeState},
     secret_input::SecretInput,
     session::WalletSessionError,
@@ -26,6 +29,7 @@ use windows_sys::Win32::{
     Storage::FileSystem::{GetDriveTypeW, FILE_ATTRIBUTE_REPARSE_POINT},
     System::WindowsProgramming::DRIVE_FIXED,
 };
+#[cfg(test)]
 use zeroize::Zeroizing;
 
 const WALLET_DIRECTORY: &str = "wallet";
@@ -38,20 +42,92 @@ const WALLET_VAULT_FILE: &str = "wallet.vault.json";
 pub(crate) struct WalletLifecycleAdapters {
     runtime: Arc<WalletRuntimeState>,
     vault_path: PathBuf,
+    recovery_ceremony: Arc<dyn RecoveryCredentialCeremony>,
     #[cfg(test)]
     interruption_checkpoint: Option<WalletLifecycleCheckpoint>,
+    #[cfg(test)]
+    test_recovery_ceremony: Arc<TestRecoveryCredentialCeremony>,
 }
 
-/// Private result of wallet creation. The recovery credential is intentionally
-/// not serializable and is reserved for a future Rust-native presentation flow.
-pub(crate) struct WalletCreationResult {
-    status: WalletLifecycleStatus,
-    recovery_credential: Zeroizing<String>,
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestRecoveryCeremonyOutcome {
+    Verified,
+    Cancelled,
+    Unavailable,
+    AuthorityRevoked,
 }
 
-impl fmt::Debug for WalletCreationResult {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("WalletCreationResult([REDACTED])")
+#[cfg(test)]
+struct TestRecoveryCredentialCeremony {
+    outcome: TestRecoveryCeremonyOutcome,
+    captured_credential: std::sync::Mutex<Option<Zeroizing<String>>>,
+    runtime_to_revoke: Option<Arc<WalletRuntimeState>>,
+}
+
+#[cfg(test)]
+impl TestRecoveryCredentialCeremony {
+    fn verified() -> Self {
+        Self {
+            outcome: TestRecoveryCeremonyOutcome::Verified,
+            captured_credential: std::sync::Mutex::new(None),
+            runtime_to_revoke: None,
+        }
+    }
+
+    fn with_outcome(
+        outcome: TestRecoveryCeremonyOutcome,
+        runtime_to_revoke: Arc<WalletRuntimeState>,
+    ) -> Self {
+        Self {
+            outcome,
+            captured_credential: std::sync::Mutex::new(None),
+            runtime_to_revoke: Some(runtime_to_revoke),
+        }
+    }
+
+    fn take_credential(&self) -> Option<Zeroizing<String>> {
+        self.captured_credential.lock().ok()?.take()
+    }
+}
+
+#[cfg(test)]
+impl RecoveryCredentialCeremony for TestRecoveryCredentialCeremony {
+    fn present_and_verify(
+        &self,
+        encoded_credential: &Zeroizing<String>,
+        authority_is_current: &dyn Fn() -> bool,
+    ) -> Result<(), RecoveryCeremonyError> {
+        if !authority_is_current() {
+            return Err(RecoveryCeremonyError::AuthorityRevoked);
+        }
+        match self.outcome {
+            TestRecoveryCeremonyOutcome::Verified => {
+                let mut captured = Zeroizing::new(String::with_capacity(encoded_credential.len()));
+                captured.push_str(encoded_credential.as_str());
+                *self
+                    .captured_credential
+                    .lock()
+                    .map_err(|_| RecoveryCeremonyError::NativeUiUnavailable)? = Some(captured);
+                if authority_is_current() {
+                    Ok(())
+                } else {
+                    Err(RecoveryCeremonyError::AuthorityRevoked)
+                }
+            }
+            TestRecoveryCeremonyOutcome::Cancelled => Err(RecoveryCeremonyError::Cancelled),
+            TestRecoveryCeremonyOutcome::Unavailable => {
+                Err(RecoveryCeremonyError::NativeUiUnavailable)
+            }
+            TestRecoveryCeremonyOutcome::AuthorityRevoked => {
+                if let Some(runtime) = &self.runtime_to_revoke {
+                    runtime
+                        .invalidate_all()
+                        .map_err(|_| RecoveryCeremonyError::AuthorityRevoked)?;
+                }
+                Err(RecoveryCeremonyError::AuthorityRevoked)
+            }
+        }
     }
 }
 
@@ -60,6 +136,7 @@ impl fmt::Debug for WalletCreationResult {
 enum WalletLifecycleCheckpoint {
     CreateDestinationConsumed,
     CreatePrepared,
+    CreateRecoveryAcknowledged,
     CreateRecoveryStored,
     CreateRecoveryVerified,
     CreateVaultStored,
@@ -85,6 +162,8 @@ pub(crate) enum WalletLifecycleError {
     UnlockTemporarilyBlocked,
     SecureRandomUnavailable,
     RecoveryProtectionUnavailable,
+    RecoveryAcknowledgementCancelled,
+    RecoveryAcknowledgementUnavailable,
     RecoveryDestinationExists,
     RecoveryStorageUnavailable,
     RecoveryBackupMismatch,
@@ -111,6 +190,8 @@ impl WalletLifecycleError {
             Self::UnlockTemporarilyBlocked => "unlock_temporarily_blocked",
             Self::SecureRandomUnavailable => "secure_random_unavailable",
             Self::RecoveryProtectionUnavailable => "recovery_protection_unavailable",
+            Self::RecoveryAcknowledgementCancelled => "recovery_acknowledgement_cancelled",
+            Self::RecoveryAcknowledgementUnavailable => "recovery_acknowledgement_unavailable",
             Self::RecoveryDestinationExists => "recovery_destination_exists",
             Self::RecoveryStorageUnavailable => "recovery_storage_unavailable",
             Self::RecoveryBackupMismatch => "recovery_backup_mismatch",
@@ -143,6 +224,12 @@ impl fmt::Display for WalletLifecycleError {
             }
             Self::SecureRandomUnavailable => "secure operating-system randomness is unavailable",
             Self::RecoveryProtectionUnavailable => "portable recovery protection is unavailable",
+            Self::RecoveryAcknowledgementCancelled => {
+                "wallet creation was cancelled before recovery acknowledgement"
+            }
+            Self::RecoveryAcknowledgementUnavailable => {
+                "secure recovery acknowledgement is unavailable"
+            }
             Self::RecoveryDestinationExists => "the recovery destination already exists",
             Self::RecoveryStorageUnavailable => "the recovery file is unavailable",
             Self::RecoveryBackupMismatch => "the recovery backup does not match the wallet",
@@ -159,6 +246,7 @@ impl WalletLifecycleAdapters {
     pub(crate) fn initialize(
         runtime: Arc<WalletRuntimeState>,
         local_app_data: &Path,
+        recovery_ceremony: Arc<NativeRecoveryCredentialCeremony>,
     ) -> Result<Self, WalletLifecycleError> {
         validate_local_custody_root(local_app_data)?;
         let vault_path = local_app_data
@@ -174,8 +262,11 @@ impl WalletLifecycleAdapters {
         Ok(Self {
             runtime,
             vault_path,
+            recovery_ceremony,
             #[cfg(test)]
             interruption_checkpoint: None,
+            #[cfg(test)]
+            test_recovery_ceremony: Arc::new(TestRecoveryCredentialCeremony::verified()),
         })
     }
 
@@ -202,7 +293,7 @@ impl WalletLifecycleAdapters {
         label: &str,
         recovery_destination_token: &str,
         wallet_secret: SecretInput,
-    ) -> Result<WalletCreationResult, WalletLifecycleError> {
+    ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
         self.create_at(
             owner_window,
             wallet_id,
@@ -222,7 +313,7 @@ impl WalletLifecycleAdapters {
         recovery_destination_token: &str,
         wallet_secret: SecretInput,
         created_at_unix_ms: u64,
-    ) -> Result<WalletCreationResult, WalletLifecycleError> {
+    ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
         self.require_vault_absent()?;
         let operation = self
             .runtime
@@ -239,24 +330,39 @@ impl WalletLifecycleAdapters {
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreateDestinationConsumed)?;
         let wallet_password = wallet_secret.into_wallet_password();
-        let (mut prepared, recovery_credential) = operation
+        let mut prepared = operation
             .run_authorized(|activation| {
-                let prepared = prepare_new_wallet(
+                prepare_new_wallet(
                     activation,
                     wallet_id,
                     label,
                     created_at_unix_ms,
                     &wallet_password,
                 )
-                .map_err(map_onboarding_error)?;
-                let recovery_credential = prepared
-                    .recovery_credential_for_native_presentation()
-                    .map_err(map_onboarding_error)?;
-                Ok((prepared, recovery_credential))
+                .map_err(map_onboarding_error)
             })
             .map_err(map_runtime_error)??;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreatePrepared)?;
+        let recovery_credential = operation
+            .run_authorized(|_| {
+                prepared
+                    .recovery_credential_for_native_presentation()
+                    .map_err(map_onboarding_error)
+            })
+            .map_err(map_runtime_error)??;
+        operation
+            .run_authorized(|_| {
+                self.recovery_ceremony
+                    .present_and_verify(&recovery_credential, &|| {
+                        operation.ensure_current().is_ok()
+                    })
+                    .map_err(map_recovery_ceremony_error)
+            })
+            .map_err(map_runtime_error)??;
+        drop(recovery_credential);
+        #[cfg(test)]
+        self.interrupt_at(WalletLifecycleCheckpoint::CreateRecoveryAcknowledged)?;
         operation
             .run_authorized(|_| {
                 prepared
@@ -291,11 +397,7 @@ impl WalletLifecycleAdapters {
                     .map_err(map_runtime_error)
             })
             .map_err(map_runtime_error)??;
-        let status = operation.complete(status).map_err(map_runtime_error)?;
-        Ok(WalletCreationResult {
-            status,
-            recovery_credential,
-        })
+        operation.complete(status).map_err(map_runtime_error)
     }
 
     pub(in crate::wallet) fn restore(
@@ -421,10 +523,14 @@ impl WalletLifecycleAdapters {
 
     #[cfg(test)]
     fn for_test(runtime: Arc<WalletRuntimeState>, vault_path: &std::path::Path) -> Self {
+        let test_recovery_ceremony = Arc::new(TestRecoveryCredentialCeremony::verified());
         Self {
             runtime,
             vault_path: vault_path.to_path_buf(),
+            recovery_ceremony: Arc::clone(&test_recovery_ceremony)
+                as Arc<dyn RecoveryCredentialCeremony>,
             interruption_checkpoint: None,
+            test_recovery_ceremony,
         }
     }
 
@@ -434,11 +540,40 @@ impl WalletLifecycleAdapters {
         vault_path: &std::path::Path,
         checkpoint: WalletLifecycleCheckpoint,
     ) -> Self {
+        let test_recovery_ceremony = Arc::new(TestRecoveryCredentialCeremony::verified());
         Self {
             runtime,
             vault_path: vault_path.to_path_buf(),
+            recovery_ceremony: Arc::clone(&test_recovery_ceremony)
+                as Arc<dyn RecoveryCredentialCeremony>,
             interruption_checkpoint: Some(checkpoint),
+            test_recovery_ceremony,
         }
+    }
+
+    #[cfg(test)]
+    fn for_test_with_ceremony(
+        runtime: Arc<WalletRuntimeState>,
+        vault_path: &std::path::Path,
+        outcome: TestRecoveryCeremonyOutcome,
+    ) -> Self {
+        let test_recovery_ceremony = Arc::new(TestRecoveryCredentialCeremony::with_outcome(
+            outcome,
+            Arc::clone(&runtime),
+        ));
+        Self {
+            runtime,
+            vault_path: vault_path.to_path_buf(),
+            recovery_ceremony: Arc::clone(&test_recovery_ceremony)
+                as Arc<dyn RecoveryCredentialCeremony>,
+            interruption_checkpoint: None,
+            test_recovery_ceremony,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_test_recovery_credential(&self) -> Option<Zeroizing<String>> {
+        self.test_recovery_ceremony.take_credential()
     }
 
     #[cfg(test)]
@@ -564,6 +699,16 @@ fn map_onboarding_error(error: WalletOnboardingError) -> WalletLifecycleError {
         }
         WalletOnboardingError::VaultStorageUnavailable => {
             WalletLifecycleError::VaultStorageUnavailable
+        }
+    }
+}
+
+fn map_recovery_ceremony_error(error: RecoveryCeremonyError) -> WalletLifecycleError {
+    match error {
+        RecoveryCeremonyError::Cancelled => WalletLifecycleError::RecoveryAcknowledgementCancelled,
+        RecoveryCeremonyError::AuthorityRevoked => WalletLifecycleError::RuntimeUnavailable,
+        RecoveryCeremonyError::NativeUiUnavailable => {
+            WalletLifecycleError::RecoveryAcknowledgementUnavailable
         }
     }
 }
@@ -699,10 +844,10 @@ mod tests {
                 secret(WALLET_PASSWORD),
             )
             .unwrap();
-        assert!(created.status.vault_exists);
-        assert!(created.status.locked);
-        let recovery_credential = created.recovery_credential;
-        let created_account = created.status.account.unwrap();
+        assert!(created.vault_exists);
+        assert!(created.locked);
+        let recovery_credential = first.take_test_recovery_credential().unwrap();
+        let created_account = created.account.unwrap();
         assert_eq!(created_account.label.as_deref(), Some("Primary Wallet"));
         assert_eq!(created_account.backup_verified, Some(true));
         assert!(backup_path.exists());
@@ -756,6 +901,56 @@ mod tests {
             "mnemonic",
         ] {
             assert!(!backup_text.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn recovery_acknowledgement_failure_never_publishes_backup_or_vault() {
+        let root = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                TestRecoveryCeremonyOutcome::Cancelled,
+                WalletLifecycleError::RecoveryAcknowledgementCancelled,
+            ),
+            (
+                TestRecoveryCeremonyOutcome::Unavailable,
+                WalletLifecycleError::RecoveryAcknowledgementUnavailable,
+            ),
+            (
+                TestRecoveryCeremonyOutcome::AuthorityRevoked,
+                WalletLifecycleError::RuntimeUnavailable,
+            ),
+        ];
+
+        for (index, (outcome, expected_error)) in cases.into_iter().enumerate() {
+            let directory = root.path().join(format!("ceremony-{index}"));
+            fs::create_dir(&directory).unwrap();
+            let backup_path = directory.join("wallet.vision-recovery.json");
+            let vault_path = directory.join("wallet").join(WALLET_VAULT_FILE);
+            let runtime = Arc::new(WalletRuntimeState::for_test());
+            let adapter = WalletLifecycleAdapters::for_test_with_ceremony(
+                Arc::clone(&runtime),
+                &vault_path,
+                outcome,
+            );
+            let token = selection_token(&runtime, RecoveryPathPurpose::Destination, &backup_path);
+
+            assert_eq!(
+                adapter
+                    .create_at(
+                        MAIN,
+                        &format!("ceremony-{index}"),
+                        "Ceremony Wallet",
+                        token.as_str(),
+                        secret(WALLET_PASSWORD),
+                        1,
+                    )
+                    .unwrap_err(),
+                expected_error
+            );
+            assert!(!backup_path.exists());
+            assert!(!vault_path.exists());
+            assert!(adapter.take_test_recovery_credential().is_none());
         }
     }
 
@@ -894,6 +1089,11 @@ mod tests {
                 false,
             ),
             (WalletLifecycleCheckpoint::CreatePrepared, false, false),
+            (
+                WalletLifecycleCheckpoint::CreateRecoveryAcknowledged,
+                false,
+                false,
+            ),
             (WalletLifecycleCheckpoint::CreateRecoveryStored, true, false),
             (
                 WalletLifecycleCheckpoint::CreateRecoveryVerified,
@@ -954,7 +1154,7 @@ mod tests {
             RecoveryPathPurpose::Destination,
             &recovery_path,
         );
-        let created = source
+        source
             .create_at(
                 MAIN,
                 "source",
@@ -964,7 +1164,7 @@ mod tests {
                 1,
             )
             .unwrap();
-        let recovery_credential = created.recovery_credential;
+        let recovery_credential = source.take_test_recovery_credential().unwrap();
         let original_recovery = fs::read(&recovery_path).unwrap();
         let cases = [
             (WalletLifecycleCheckpoint::RestoreSourceConsumed, false),
@@ -1026,6 +1226,8 @@ mod tests {
             WalletLifecycleError::UnlockTemporarilyBlocked,
             WalletLifecycleError::SecureRandomUnavailable,
             WalletLifecycleError::RecoveryProtectionUnavailable,
+            WalletLifecycleError::RecoveryAcknowledgementCancelled,
+            WalletLifecycleError::RecoveryAcknowledgementUnavailable,
             WalletLifecycleError::RecoveryDestinationExists,
             WalletLifecycleError::RecoveryStorageUnavailable,
             WalletLifecycleError::RecoveryBackupMismatch,

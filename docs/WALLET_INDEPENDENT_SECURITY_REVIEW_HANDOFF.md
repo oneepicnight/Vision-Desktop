@@ -186,6 +186,14 @@ fully compromised Windows user session.
     portable-recovery derivation share the implementation, and AEAD setup no longer creates a
     caller-owned copied cipher-key buffer. This is a correction offered for independent re-review,
     not self-approval of H-RR-01.
+12. New-wallet creation now invokes a Rust-owned native Windows recovery ceremony before any
+    recovery or vault publication. The main-window-parented modal displays the Rust-generated
+    credential, requires exact re-entry, clears the native input on every close path, polls runtime
+    authority while open, and fails closed on cancellation, native-UI failure, or revocation. The
+    lifecycle no longer returns the credential. Tests prove all pre-acknowledgement failures leave
+    both destination and canonical vault absent, and static authority tests enforce ceremony →
+    recovery publication → vault publication ordering with no Tauri command or clipboard API. This
+    is a correction offered for independent re-review, not self-approval of H-RR-02.
 
 ## Required reviewer output
 

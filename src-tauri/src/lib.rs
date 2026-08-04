@@ -51,9 +51,22 @@ pub fn run() {
                 let wallet_local_data = app.path().local_data_dir().map_err(|_| {
                     std::io::Error::other("secure wallet storage location is unavailable")
                 })?;
+                let main_window = app.get_webview_window("main").ok_or_else(|| {
+                    std::io::Error::other("secure wallet owner window is unavailable")
+                })?;
+                let main_window_handle = main_window.hwnd().map_err(|_| {
+                    std::io::Error::other("secure wallet owner window is unavailable")
+                })?;
+                let recovery_ceremony = Arc::new(
+                    wallet::NativeRecoveryCredentialCeremony::new(main_window_handle.0 as isize)
+                        .map_err(|_| {
+                            std::io::Error::other("secure recovery acknowledgement is unavailable")
+                        })?,
+                );
                 let wallet_adapters = wallet::WalletLifecycleAdapters::initialize(
                     Arc::clone(&wallet_runtime),
                     &wallet_local_data,
+                    recovery_ceremony,
                 )
                 .map_err(|_| {
                     std::io::Error::other("secure wallet lifecycle adapters are unavailable")

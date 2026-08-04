@@ -1,5 +1,8 @@
-use super::{runtime::WalletActivationProof, secrets::WalletSeed};
-use argon2::{Algorithm, Argon2, Params, Version};
+use super::{
+    kdf::{derive_argon2id_key, WalletKdfError},
+    runtime::WalletActivationProof,
+    secrets::WalletSeed,
+};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     Key, XChaCha20Poly1305, XNonce,
@@ -382,12 +385,11 @@ impl PortableRecoveryArtifact {
         };
 
         let key = derive_recovery_key(recovery_credential, &salt)?;
-        let mut cipher_key = Key::try_from(key.as_ref())
-            .map_err(|_| RecoveryArtifactError::InvalidOrUnsupportedFormat)?;
         let cipher_nonce = XNonce::try_from(nonce.as_slice())
             .map_err(|_| RecoveryArtifactError::InvalidOrUnsupportedFormat)?;
-        let cipher = XChaCha20Poly1305::new(&cipher_key);
-        cipher_key.as_mut_slice().zeroize();
+        let cipher_key = <&Key>::try_from(key.as_slice())
+            .map_err(|_| RecoveryArtifactError::InvalidOrUnsupportedFormat)?;
+        let cipher = XChaCha20Poly1305::new(cipher_key);
         let aad = artifact.aad();
         let ciphertext = seed
             .with_exposed(|seed_bytes| {
@@ -418,12 +420,11 @@ impl PortableRecoveryArtifact {
         let ciphertext =
             decode_fixed::<{ SEED_BYTES + AUTH_TAG_BYTES }>(&self.cipher.ciphertext_hex)?;
         let key = derive_recovery_key(recovery_credential, &salt)?;
-        let mut cipher_key = Key::try_from(key.as_ref())
-            .map_err(|_| RecoveryArtifactError::InvalidOrUnsupportedFormat)?;
         let cipher_nonce = XNonce::try_from(nonce.as_slice())
             .map_err(|_| RecoveryArtifactError::InvalidOrUnsupportedFormat)?;
-        let cipher = XChaCha20Poly1305::new(&cipher_key);
-        cipher_key.as_mut_slice().zeroize();
+        let cipher_key = <&Key>::try_from(key.as_slice())
+            .map_err(|_| RecoveryArtifactError::InvalidOrUnsupportedFormat)?;
+        let cipher = XChaCha20Poly1305::new(cipher_key);
         let plaintext = Zeroizing::new(
             cipher
                 .decrypt(
@@ -532,14 +533,16 @@ fn derive_recovery_key(
     credential: &PortableRecoveryCredential,
     salt: &[u8; SALT_BYTES],
 ) -> Result<Zeroizing<[u8; 32]>, RecoveryArtifactError> {
-    let params = Params::new(KDF_MEMORY_KIB, KDF_ITERATIONS, KDF_LANES, Some(32))
-        .map_err(|_| RecoveryArtifactError::InvalidOrUnsupportedFormat)?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut key = Zeroizing::new([0_u8; 32]);
     credential
-        .with_exposed(|bytes| argon2.hash_password_into(bytes, salt, key.as_mut()))
-        .map_err(|_| RecoveryArtifactError::InvalidPasswordOrDamagedArtifact)?;
-    Ok(key)
+        .with_exposed(|bytes| {
+            derive_argon2id_key(bytes, salt, KDF_MEMORY_KIB, KDF_ITERATIONS, KDF_LANES)
+        })
+        .map_err(|error| match error {
+            WalletKdfError::InvalidParameters => RecoveryArtifactError::InvalidOrUnsupportedFormat,
+            WalletKdfError::AllocationUnavailable | WalletKdfError::DerivationFailed => {
+                RecoveryArtifactError::InvalidPasswordOrDamagedArtifact
+            }
+        })
 }
 
 fn validate_wallet_id(wallet_id: &str) -> Result<(), RecoveryArtifactError> {

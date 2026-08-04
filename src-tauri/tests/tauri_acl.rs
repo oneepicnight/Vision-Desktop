@@ -419,7 +419,9 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
 
 #[test]
 fn wallet_sensitive_authority_requires_runtime_activation_proof() {
+    let cargo_manifest = read("Cargo.toml");
     let activation_source = read("src/wallet/activation.rs");
+    let kdf_source = read("src/wallet/kdf.rs");
     let runtime_source = read("src/wallet/runtime.rs");
     let onboarding_source = read("src/wallet/onboarding.rs");
     let recovery_source = read("src/wallet/recovery.rs");
@@ -446,6 +448,12 @@ fn wallet_sensitive_authority_requires_runtime_activation_proof() {
     );
     assert!(runtime_source.contains("activation_proof: WalletActivationProof"));
     assert!(runtime_source.contains("WalletRuntimeError::ActivationUnavailable"));
+    assert!(cargo_manifest.contains("argon2 = { version = \"0.5.3\", features = [\"zeroize\"] }"));
+    assert!(kdf_source.contains("hash_password_into_with_memory"));
+    assert!(kdf_source.contains("impl Drop for Argon2Workspace"));
+    assert!(kdf_source.contains("self.blocks.iter_mut().zeroize()"));
+    assert!(!vault_source.contains("hash_password_into("));
+    assert!(!recovery_source.contains("hash_password_into("));
 
     for source in [
         onboarding_source,

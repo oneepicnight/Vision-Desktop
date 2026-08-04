@@ -178,6 +178,14 @@ fully compromised Windows user session.
     buffers. Secret-canary tests cover every directory and ZIP member and force contamination of
     every allowed file. This is a correction offered for independent re-review, not self-approval
     of the original M-05 finding.
+11. The corrected KDF boundary enables Argon2's `zeroize` feature, replaces both convenience
+    allocations with one caller-owned RAII workspace, and wipes the complete workspace before
+    allocator release on success, error, and panic unwinding. Compile-time trait evidence proves
+    Argon2 blocks implement `Zeroize`; an instrumented drop observer checks the first and final
+    blocks of the full 64 MiB workspace and verifies every initialized block is zero before release. Vault and
+    portable-recovery derivation share the implementation, and AEAD setup no longer creates a
+    caller-owned copied cipher-key buffer. This is a correction offered for independent re-review,
+    not self-approval of H-RR-01.
 
 ## Required reviewer output
 

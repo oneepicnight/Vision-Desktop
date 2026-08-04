@@ -1,10 +1,10 @@
 use super::{
     device_protection::{self, DeviceKey, ProtectedDeviceKey},
+    kdf::{derive_argon2id_key, WalletKdfError},
     runtime::WalletActivationProof,
     secrets::{WalletPassword, WalletSeed},
     storage_security,
 };
-use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     Key, XChaCha20Poly1305, XNonce,
@@ -17,7 +17,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 const VAULT_SCHEMA: &str = "vision-desktop-wallet-vault";
 const VAULT_VERSION: u16 = 2;
@@ -190,12 +190,11 @@ impl EncryptedWalletVault {
 
         let password_key = derive_password_key(password, &salt)?;
         let key = combine_keys(&password_key, &protected_device_key.device_key);
-        let mut cipher_key = Key::try_from(key.as_ref())
-            .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
         let cipher_nonce = XNonce::try_from(nonce.as_slice())
             .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
-        let cipher = XChaCha20Poly1305::new(&cipher_key);
-        cipher_key.as_mut_slice().zeroize();
+        let cipher_key = <&Key>::try_from(key.as_slice())
+            .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
+        let cipher = XChaCha20Poly1305::new(cipher_key);
         let aad = vault.aad();
         let ciphertext = seed
             .with_exposed(|bytes| {
@@ -254,12 +253,11 @@ impl EncryptedWalletVault {
         )?;
         let password_key = derive_password_key(password, &salt)?;
         let key = combine_keys(&password_key, &device_key);
-        let mut cipher_key = Key::try_from(key.as_ref())
-            .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
         let cipher_nonce = XNonce::try_from(nonce.as_slice())
             .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
-        let cipher = XChaCha20Poly1305::new(&cipher_key);
-        cipher_key.as_mut_slice().zeroize();
+        let cipher_key = <&Key>::try_from(key.as_slice())
+            .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
+        let cipher = XChaCha20Poly1305::new(cipher_key);
         let plaintext = Zeroizing::new(
             cipher
                 .decrypt(
@@ -491,14 +489,16 @@ fn derive_password_key(
     password: &WalletPassword,
     salt: &[u8; SALT_BYTES],
 ) -> Result<Zeroizing<[u8; 32]>, WalletVaultError> {
-    let params = Params::new(KDF_MEMORY_KIB, KDF_ITERATIONS, KDF_LANES, Some(32))
-        .map_err(|_| WalletVaultError::InvalidOrUnsupportedFormat)?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut key = Zeroizing::new([0_u8; 32]);
     password
-        .with_exposed(|bytes| argon2.hash_password_into(bytes, salt, key.as_mut()))
-        .map_err(|_| WalletVaultError::InvalidPasswordOrCorruptVault)?;
-    Ok(key)
+        .with_exposed(|bytes| {
+            derive_argon2id_key(bytes, salt, KDF_MEMORY_KIB, KDF_ITERATIONS, KDF_LANES)
+        })
+        .map_err(|error| match error {
+            WalletKdfError::InvalidParameters => WalletVaultError::InvalidOrUnsupportedFormat,
+            WalletKdfError::AllocationUnavailable | WalletKdfError::DerivationFailed => {
+                WalletVaultError::InvalidPasswordOrCorruptVault
+            }
+        })
 }
 
 fn combine_keys(password_key: &[u8; 32], device_key: &DeviceKey) -> Zeroizing<[u8; 32]> {

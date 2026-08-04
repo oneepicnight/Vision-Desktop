@@ -10,6 +10,7 @@ mod amount;
 mod contract;
 mod device_protection;
 mod journal;
+mod kdf;
 #[cfg(windows)]
 mod lifecycle;
 mod onboarding;

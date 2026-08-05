@@ -8,7 +8,7 @@
 
 use super::{
     account::derive_account_identity,
-    activation::WalletActivationPolicy,
+    activation::{WalletActivationPolicy, WalletActivationScope},
     contract::{WalletAccountSummary, WalletLifecycleStatus, WalletPublicMetadata},
     secrets::WalletPassword,
     session::{WalletSession, WalletSessionError},
@@ -89,7 +89,7 @@ pub(in crate::wallet) struct WalletOperationPermit<'a> {
 }
 
 pub(in crate::wallet) struct WalletActivationProof {
-    _private: (),
+    scope: WalletActivationScope,
 }
 
 pub(in crate::wallet) struct RecoveryPathToken(Zeroizing<String>);
@@ -208,7 +208,8 @@ impl WalletRuntimeState {
         kind: WalletOperationKind,
     ) -> Result<WalletOperationPermit<'_>, WalletRuntimeError> {
         require_main_window(owner_window)?;
-        self.require_activation()?;
+        let activation_scope = kind.activation_scope();
+        self.require_activation(activation_scope)?;
         let mut inner = self.lock_inner()?;
         if self.revocation_is_pending() {
             return Err(WalletRuntimeError::RuntimeUnavailable);
@@ -229,7 +230,9 @@ impl WalletRuntimeState {
             generation,
             revocation_epoch,
             owner_window: owner_window.to_string(),
-            activation_proof: WalletActivationProof { _private: () },
+            activation_proof: WalletActivationProof {
+                scope: activation_scope,
+            },
         })
     }
 
@@ -239,7 +242,7 @@ impl WalletRuntimeState {
         purpose: RecoveryPathPurpose,
     ) -> Result<RecoverySelectionPermit, WalletRuntimeError> {
         require_main_window(owner_window)?;
-        self.require_activation()?;
+        self.require_activation(WalletActivationScope::Lifecycle)?;
         let mut inner = self.lock_inner()?;
         if self.revocation_is_pending() {
             return Err(WalletRuntimeError::RuntimeUnavailable);
@@ -482,8 +485,8 @@ impl WalletRuntimeState {
         Ok(u64::try_from(inner.started_at.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 
-    fn require_activation(&self) -> Result<(), WalletRuntimeError> {
-        if self.activation.is_satisfied() {
+    fn require_activation(&self, scope: WalletActivationScope) -> Result<(), WalletRuntimeError> {
+        if self.activation.is_satisfied(scope) {
             Ok(())
         } else {
             Err(WalletRuntimeError::ActivationUnavailable)
@@ -551,6 +554,25 @@ impl WalletRuntimeState {
             suffix
         );
         Self::with_process_lock(WalletProcessLock::acquire(&name).unwrap(), activation).unwrap()
+    }
+}
+
+impl WalletOperationKind {
+    const fn activation_scope(self) -> WalletActivationScope {
+        match self {
+            Self::Create | Self::Restore | Self::Unlock => WalletActivationScope::Lifecycle,
+            Self::Sign => WalletActivationScope::Signing,
+        }
+    }
+}
+
+impl WalletActivationProof {
+    pub(in crate::wallet) fn require_signing(&self) -> Result<(), WalletRuntimeError> {
+        if self.scope == WalletActivationScope::Signing {
+            Ok(())
+        } else {
+            Err(WalletRuntimeError::ActivationUnavailable)
+        }
     }
 }
 
@@ -836,7 +858,9 @@ mod platform {
 mod tests {
     use super::*;
     use crate::wallet::{
-        activation::all_activation_requirements_for_test,
+        activation::{
+            lifecycle_activation_requirements_for_test, signing_activation_requirements_for_test,
+        },
         secrets::{WalletPassword, WalletSeed},
         vault::EncryptedWalletVault,
     };
@@ -970,8 +994,8 @@ mod tests {
     }
 
     #[test]
-    fn every_missing_activation_requirement_blocks_all_sensitive_authority() {
-        for requirement in all_activation_requirements_for_test() {
+    fn lifecycle_requirements_block_lifecycle_signing_and_recovery_authority() {
+        for requirement in lifecycle_activation_requirements_for_test() {
             let runtime = WalletRuntimeState::for_test_missing_activation(requirement);
             for kind in [
                 WalletOperationKind::Create,
@@ -999,12 +1023,52 @@ mod tests {
     }
 
     #[test]
+    fn signing_requirements_block_only_signing_authority() {
+        for requirement in signing_activation_requirements_for_test() {
+            for kind in [
+                WalletOperationKind::Create,
+                WalletOperationKind::Restore,
+                WalletOperationKind::Unlock,
+            ] {
+                let runtime = WalletRuntimeState::for_test_missing_activation(requirement);
+                runtime.begin_operation(MAIN_WINDOW_LABEL, kind).unwrap();
+            }
+
+            let runtime = WalletRuntimeState::for_test_missing_activation(requirement);
+            assert_eq!(
+                runtime
+                    .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
+                    .err(),
+                Some(WalletRuntimeError::ActivationUnavailable),
+                "missing requirement: {requirement:?}",
+            );
+
+            let runtime = WalletRuntimeState::for_test_missing_activation(requirement);
+            runtime
+                .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn production_activation_policy_issues_no_sensitive_authority() {
         let runtime = WalletRuntimeState::for_test_with_production_activation();
 
         assert_eq!(
             runtime
+                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Create)
+                .err(),
+            Some(WalletRuntimeError::ActivationUnavailable),
+        );
+        assert_eq!(
+            runtime
                 .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
+                .err(),
+            Some(WalletRuntimeError::ActivationUnavailable),
+        );
+        assert_eq!(
+            runtime
+                .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination,)
                 .err(),
             Some(WalletRuntimeError::ActivationUnavailable),
         );

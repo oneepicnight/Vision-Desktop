@@ -1,57 +1,145 @@
 use super::contract::{wallet_contract_gate, WalletContractRequirement};
 
-const INDEPENDENT_SECURITY_REVIEW_APPROVED: bool = false;
+const INDEPENDENT_LIFECYCLE_SECURITY_REVIEW_APPROVED: bool = false;
+const INDEPENDENT_SIGNING_SECURITY_REVIEW_APPROVED: bool = false;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::wallet) enum WalletActivationScope {
+    Lifecycle,
+    Signing,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::wallet) enum WalletActivationRequirement {
     CompatibilityApproval,
-    Compatibility(WalletContractRequirement),
-    IndependentSecurityReview,
+    Compatibility(WalletActivationScope, WalletContractRequirement),
+    IndependentSecurityReview(WalletActivationScope),
 }
 
 pub(super) struct WalletActivationPolicy {
-    unmet_requirements: Vec<WalletActivationRequirement>,
+    lifecycle_unmet_requirements: Vec<WalletActivationRequirement>,
+    signing_unmet_requirements: Vec<WalletActivationRequirement>,
 }
 
 impl WalletActivationPolicy {
     pub(super) fn production() -> Self {
         let gate = wallet_contract_gate();
-        let mut unmet_requirements = gate
+        let mut lifecycle_unmet_requirements = gate
+            .unmet_requirements
+            .iter()
+            .copied()
+            .filter(is_lifecycle_contract_requirement)
+            .map(|requirement| {
+                WalletActivationRequirement::Compatibility(
+                    WalletActivationScope::Lifecycle,
+                    requirement,
+                )
+            })
+            .collect::<Vec<_>>();
+        if !INDEPENDENT_LIFECYCLE_SECURITY_REVIEW_APPROVED {
+            lifecycle_unmet_requirements.push(
+                WalletActivationRequirement::IndependentSecurityReview(
+                    WalletActivationScope::Lifecycle,
+                ),
+            );
+        }
+
+        let mut signing_unmet_requirements = gate
             .unmet_requirements
             .into_iter()
-            .map(WalletActivationRequirement::Compatibility)
+            .map(|requirement| {
+                WalletActivationRequirement::Compatibility(
+                    WalletActivationScope::Signing,
+                    requirement,
+                )
+            })
             .collect::<Vec<_>>();
         if !gate.signing_enabled {
-            unmet_requirements.push(WalletActivationRequirement::CompatibilityApproval);
+            signing_unmet_requirements.push(WalletActivationRequirement::CompatibilityApproval);
         }
-        if !INDEPENDENT_SECURITY_REVIEW_APPROVED {
-            unmet_requirements.push(WalletActivationRequirement::IndependentSecurityReview);
+        if !INDEPENDENT_SIGNING_SECURITY_REVIEW_APPROVED {
+            signing_unmet_requirements.push(
+                WalletActivationRequirement::IndependentSecurityReview(
+                    WalletActivationScope::Signing,
+                ),
+            );
         }
-        Self { unmet_requirements }
+
+        Self {
+            lifecycle_unmet_requirements,
+            signing_unmet_requirements,
+        }
     }
 
-    pub(super) fn is_satisfied(&self) -> bool {
-        self.unmet_requirements.is_empty()
+    pub(super) fn is_satisfied(&self, scope: WalletActivationScope) -> bool {
+        self.lifecycle_unmet_requirements.is_empty()
+            && (scope == WalletActivationScope::Lifecycle
+                || self.signing_unmet_requirements.is_empty())
     }
 
     #[cfg(test)]
     pub(super) fn satisfied_for_test() -> Self {
         Self {
-            unmet_requirements: Vec::new(),
+            lifecycle_unmet_requirements: Vec::new(),
+            signing_unmet_requirements: Vec::new(),
         }
     }
 
     #[cfg(test)]
     pub(super) fn missing_for_test(requirement: WalletActivationRequirement) -> Self {
-        Self {
-            unmet_requirements: vec![requirement],
+        let mut policy = Self::satisfied_for_test();
+        match requirement_scope(requirement) {
+            WalletActivationScope::Lifecycle => {
+                policy.lifecycle_unmet_requirements.push(requirement);
+            }
+            WalletActivationScope::Signing => {
+                policy.signing_unmet_requirements.push(requirement);
+            }
         }
+        policy
+    }
+}
+
+const fn is_lifecycle_contract_requirement(requirement: &WalletContractRequirement) -> bool {
+    matches!(
+        requirement,
+        WalletContractRequirement::KeyDerivation | WalletContractRequirement::AddressEncoding
+    )
+}
+
+#[cfg(test)]
+const fn requirement_scope(requirement: WalletActivationRequirement) -> WalletActivationScope {
+    match requirement {
+        WalletActivationRequirement::CompatibilityApproval => WalletActivationScope::Signing,
+        WalletActivationRequirement::Compatibility(scope, _)
+        | WalletActivationRequirement::IndependentSecurityReview(scope) => scope,
     }
 }
 
 #[cfg(test)]
-pub(in crate::wallet) fn all_activation_requirements_for_test() -> Vec<WalletActivationRequirement>
-{
+pub(in crate::wallet) fn lifecycle_activation_requirements_for_test(
+) -> Vec<WalletActivationRequirement> {
+    use WalletContractRequirement::{AddressEncoding, KeyDerivation};
+
+    [KeyDerivation, AddressEncoding]
+        .into_iter()
+        .map(|requirement| {
+            WalletActivationRequirement::Compatibility(
+                WalletActivationScope::Lifecycle,
+                requirement,
+            )
+        })
+        .chain(std::iter::once(
+            WalletActivationRequirement::IndependentSecurityReview(
+                WalletActivationScope::Lifecycle,
+            ),
+        ))
+        .collect()
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn signing_activation_requirements_for_test(
+) -> Vec<WalletActivationRequirement> {
     use WalletContractRequirement::{
         AddressEncoding, AmountDenomination, FeeAndNonceRules, KeyDerivation,
         PrivateLoopbackBinding, ReceiptAndHistory, SignatureVector, SubmissionResponse,
@@ -72,10 +160,15 @@ pub(in crate::wallet) fn all_activation_requirements_for_test() -> Vec<WalletAct
                 PrivateLoopbackBinding,
             ]
             .into_iter()
-            .map(WalletActivationRequirement::Compatibility),
+            .map(|requirement| {
+                WalletActivationRequirement::Compatibility(
+                    WalletActivationScope::Signing,
+                    requirement,
+                )
+            }),
         )
         .chain(std::iter::once(
-            WalletActivationRequirement::IndependentSecurityReview,
+            WalletActivationRequirement::IndependentSecurityReview(WalletActivationScope::Signing),
         ))
         .collect()
 }
@@ -85,28 +178,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_policy_is_blocked_by_runtime_and_review_requirements() {
+    fn production_policy_keeps_lifecycle_and_signing_independently_closed() {
         let policy = WalletActivationPolicy::production();
 
-        assert!(!policy.is_satisfied());
+        assert!(!policy.is_satisfied(WalletActivationScope::Lifecycle));
+        assert!(!policy.is_satisfied(WalletActivationScope::Signing));
+        assert_eq!(
+            policy.lifecycle_unmet_requirements,
+            vec![WalletActivationRequirement::IndependentSecurityReview(
+                WalletActivationScope::Lifecycle,
+            )]
+        );
         assert!(policy
-            .unmet_requirements
+            .signing_unmet_requirements
             .contains(&WalletActivationRequirement::CompatibilityApproval));
-        assert!(policy
-            .unmet_requirements
-            .contains(&WalletActivationRequirement::Compatibility(
+        assert!(policy.signing_unmet_requirements.contains(
+            &WalletActivationRequirement::Compatibility(
+                WalletActivationScope::Signing,
                 WalletContractRequirement::PrivateLoopbackBinding,
-            ),));
-        assert!(policy
-            .unmet_requirements
-            .contains(&WalletActivationRequirement::IndependentSecurityReview));
+            ),
+        ));
+        assert!(
+            policy.signing_unmet_requirements.contains(
+                &WalletActivationRequirement::IndependentSecurityReview(
+                    WalletActivationScope::Signing,
+                ),
+            )
+        );
     }
 
     #[test]
-    fn test_policy_can_isolate_every_individual_requirement() {
-        for requirement in all_activation_requirements_for_test() {
-            assert!(!WalletActivationPolicy::missing_for_test(requirement).is_satisfied());
+    fn signing_requirements_do_not_block_lifecycle_authority() {
+        for requirement in signing_activation_requirements_for_test() {
+            let policy = WalletActivationPolicy::missing_for_test(requirement);
+            assert!(policy.is_satisfied(WalletActivationScope::Lifecycle));
+            assert!(!policy.is_satisfied(WalletActivationScope::Signing));
         }
-        assert!(WalletActivationPolicy::satisfied_for_test().is_satisfied());
+    }
+
+    #[test]
+    fn lifecycle_requirements_also_block_signing_authority() {
+        for requirement in lifecycle_activation_requirements_for_test() {
+            let policy = WalletActivationPolicy::missing_for_test(requirement);
+            assert!(!policy.is_satisfied(WalletActivationScope::Lifecycle));
+            assert!(!policy.is_satisfied(WalletActivationScope::Signing));
+        }
+    }
+
+    #[test]
+    fn satisfied_test_policy_allows_both_scopes() {
+        let policy = WalletActivationPolicy::satisfied_for_test();
+        assert!(policy.is_satisfied(WalletActivationScope::Lifecycle));
+        assert!(policy.is_satisfied(WalletActivationScope::Signing));
     }
 }

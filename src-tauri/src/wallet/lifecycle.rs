@@ -751,7 +751,7 @@ fn map_session_error(error: WalletSessionError) -> WalletLifecycleError {
 mod tests {
     use super::*;
     use crate::wallet::{
-        activation::all_activation_requirements_for_test,
+        activation::lifecycle_activation_requirements_for_test,
         runtime::{RecoveryPathToken, RecoverySelectionPermit},
     };
     use std::fs;
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn lifecycle_adapters_refuse_every_individually_unmet_activation_gate() {
         let directory = tempfile::tempdir().unwrap();
-        for requirement in all_activation_requirements_for_test() {
+        for requirement in lifecycle_activation_requirements_for_test() {
             let runtime = Arc::new(WalletRuntimeState::for_test_missing_activation(requirement));
             let vault_path = directory
                 .path()

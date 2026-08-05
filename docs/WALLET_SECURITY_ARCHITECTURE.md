@@ -36,6 +36,10 @@ Vision Core receives public queries and fully signed transactions only. Desktop 
 ## Fail-closed rules
 
 - Signing is disabled until every item in `wallet_contract_gate()` has an approved contract and deterministic test vectors.
+- Lifecycle and signing use separate runtime activation scopes. Lifecycle approval covers only local
+  create, restore, unlock, lock, recovery selection, and public account identity. Signing is a
+  strict superset and validates its scope again inside the signer. Both production approvals remain
+  false; see `WALLET_ACTIVATION_SCOPES.md`.
 - Wallet creation must not become available until recovery produces the identical public key and address in an independent vector test.
 - Amounts are strings or bounded integers in confirmed smallest units; floating-point blockchain arithmetic is forbidden.
 - Transaction success requires an explicit accepted response and later observed receipt/finality state. Missing errors are not success.

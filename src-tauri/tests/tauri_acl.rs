@@ -434,22 +434,31 @@ fn wallet_sensitive_authority_requires_runtime_activation_proof() {
     let transaction_source = read("src/wallet/transaction.rs");
     let vault_source = read("src/wallet/vault.rs");
 
-    assert!(activation_source.contains("INDEPENDENT_SECURITY_REVIEW_APPROVED: bool = false"));
+    assert!(
+        activation_source.contains("INDEPENDENT_LIFECYCLE_SECURITY_REVIEW_APPROVED: bool = false")
+    );
+    assert!(
+        activation_source.contains("INDEPENDENT_SIGNING_SECURITY_REVIEW_APPROVED: bool = false")
+    );
+    assert!(activation_source.contains("WalletActivationScope::Lifecycle"));
+    assert!(activation_source.contains("WalletActivationScope::Signing"));
     assert!(activation_source.contains("WalletActivationRequirement::IndependentSecurityReview"));
     assert!(runtime_source.contains("activation: WalletActivationPolicy"));
     assert_eq!(
         runtime_source
-            .match_indices("self.require_activation()?;")
+            .match_indices("self.require_activation(")
             .count(),
         2
     );
     assert!(runtime_source.contains("pub(in crate::wallet) struct WalletActivationProof"));
     assert_eq!(
         runtime_source
-            .match_indices("WalletActivationProof { _private: () }")
+            .match_indices("activation_proof: WalletActivationProof {")
             .count(),
         1
     );
+    assert!(runtime_source.contains("scope: WalletActivationScope"));
+    assert!(runtime_source.contains("pub(in crate::wallet) fn require_signing"));
     assert!(runtime_source.contains("activation_proof: WalletActivationProof"));
     assert!(runtime_source.contains("WalletRuntimeError::ActivationUnavailable"));
     assert!(cargo_manifest.contains("argon2 = { version = \"0.5.3\", features = [\"zeroize\"] }"));
@@ -464,6 +473,7 @@ fn wallet_sensitive_authority_requires_runtime_activation_proof() {
     assert!(!ceremony_production.contains("SetClipboardData"));
     assert!(!ceremony_production.contains("OpenClipboard"));
     assert!(!lifecycle_source.contains("WalletCreationResult"));
+    assert!(transaction_source.contains(".require_signing()"));
 
     let create_flow = lifecycle_source
         .split("fn create_at(")
@@ -491,7 +501,7 @@ fn wallet_sensitive_authority_requires_runtime_activation_proof() {
         vault_source,
     ] {
         assert!(source.contains("&WalletActivationProof"));
-        assert!(!source.contains("WalletActivationProof { _private: () }"));
+        assert!(!source.contains("WalletActivationProof {"));
         assert!(!source.contains("#[tauri::command]"));
     }
 }

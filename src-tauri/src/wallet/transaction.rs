@@ -70,6 +70,7 @@ struct CashTransferArgs<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::wallet) enum WalletTransactionError {
+    ActivationUnavailable,
     InvalidRecipient,
     ZeroAmount,
     TransferToSelf,
@@ -82,6 +83,7 @@ pub(in crate::wallet) enum WalletTransactionError {
 impl fmt::Display for WalletTransactionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::ActivationUnavailable => "wallet signing activation is unavailable",
             Self::InvalidRecipient => "recipient account address is invalid",
             Self::ZeroAmount => "transfer amount must be greater than zero",
             Self::TransferToSelf => "transfer recipient must differ from the sender",
@@ -119,10 +121,13 @@ pub(in crate::wallet) fn canonical_transaction_id(
 /// verified internally, but no UI may reach signing until every remaining
 /// compatibility and security gate passes.
 pub(in crate::wallet) fn sign_cash_transfer(
-    _activation: &WalletActivationProof,
+    activation: &WalletActivationProof,
     seed: &WalletSeed,
     draft: &CashTransferDraft,
 ) -> Result<VisionTransaction, WalletTransactionError> {
+    activation
+        .require_signing()
+        .map_err(|_| WalletTransactionError::ActivationUnavailable)?;
     if !is_lowercase_hex_32_bytes(&draft.recipient) {
         return Err(WalletTransactionError::InvalidRecipient);
     }
@@ -288,6 +293,18 @@ mod tests {
                 &Signature::from_bytes(&signature_bytes),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn lifecycle_activation_proof_cannot_authorize_signing() {
+        let result = super::super::runtime::WalletRuntimeState::with_activation_proof_for_test(
+            super::super::runtime::WalletOperationKind::Create,
+            |activation| {
+                sign_cash_transfer(activation, &WalletSeed::for_test(7), &signed_vector_draft())
+            },
+        );
+
+        assert_eq!(result, Err(WalletTransactionError::ActivationUnavailable));
     }
 
     #[test]

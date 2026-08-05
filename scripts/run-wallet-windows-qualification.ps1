@@ -78,15 +78,29 @@ switch ($Action) {
 }
 
 try {
-    $priorErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        & cargo test --manifest-path $manifestPath --release $testName -- --ignored --exact --nocapture --test-threads=1 2>&1 |
-            Tee-Object -FilePath $evidencePath -Append
-        $testExitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $priorErrorActionPreference
+    $processStart = New-Object System.Diagnostics.ProcessStartInfo
+    $processStart.FileName = "cargo.exe"
+    $processStart.WorkingDirectory = $repositoryRoot
+    $processStart.UseShellExecute = $false
+    $processStart.CreateNoWindow = $true
+    $processStart.RedirectStandardOutput = $true
+    $processStart.RedirectStandardError = $true
+    $processStart.Arguments = "test --manifest-path `"$manifestPath`" --release $testName -- --ignored --exact --nocapture --test-threads=1"
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $processStart
+    if (-not $process.Start()) {
+        throw "Failed to start the Rust qualification probe."
     }
+    $standardOutput = $process.StandardOutput.ReadToEndAsync()
+    $standardError = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $stdoutText = $standardOutput.GetAwaiter().GetResult()
+    $stderrText = $standardError.GetAwaiter().GetResult()
+    $testExitCode = $process.ExitCode
+    $capturedOutput = "`r`n--- cargo stderr ---`r`n$stderrText`r`n--- cargo stdout ---`r`n$stdoutText"
+    [System.IO.File]::AppendAllText($evidencePath, $capturedOutput)
+    Write-Output $stderrText
+    Write-Output $stdoutText
 } finally {
     Remove-Item Env:VISION_WALLET_QUALIFICATION_EVENT -ErrorAction SilentlyContinue
     Remove-Item Env:VISION_WALLET_QUALIFICATION_TIMEOUT_SECONDS -ErrorAction SilentlyContinue
@@ -94,13 +108,8 @@ try {
     Remove-Item Env:VISION_WALLET_QUALIFICATION_HOLD_SECONDS -ErrorAction SilentlyContinue
 }
 
-[System.IO.File]::AppendAllLines(
-    $evidencePath,
-    @(
-        "completed_utc=$([DateTime]::UtcNow.ToString('o'))"
-        "exit_code=$testExitCode"
-    )
-)
+$footer = "`r`ncompleted_utc=$([DateTime]::UtcNow.ToString('o'))`r`nexit_code=$testExitCode`r`n"
+[System.IO.File]::AppendAllText($evidencePath, $footer)
 $evidenceHash = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
 Write-Output "Evidence: $evidencePath"
 Write-Output "SHA-256: $evidenceHash"

@@ -238,7 +238,8 @@ mod tests {
     use crate::wallet::runtime::{RecoveryPathPurpose, WalletOperationKind};
     use std::path::PathBuf;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SendMessageW, PBT_APMRESUMEAUTOMATIC, WTS_SESSION_UNLOCK,
+        DispatchMessageW, PeekMessageW, SendMessageW, TranslateMessage, MSG,
+        PBT_APMRESUMEAUTOMATIC, PM_REMOVE, WTS_SESSION_UNLOCK,
     };
 
     #[test]
@@ -332,5 +333,72 @@ mod tests {
             runtime.consume_recovery_path("main", RecoveryPathPurpose::Source, token.as_str()),
             Err(WalletRuntimeError::PathAuthorizationInvalid)
         );
+    }
+
+    /// Manual real-Windows qualification probe.
+    ///
+    /// Run this ignored release-profile test interactively, wait for the READY line, then perform
+    /// exactly one real Windows session lock or suspend/hibernate cycle. The hidden listener and
+    /// message pump are the production implementations; only the synthetic pre-existing authority
+    /// is test-only. No secret, vault, command, or WebView permission is involved.
+    #[test]
+    #[ignore = "requires an operator to trigger a real Windows lock or power transition"]
+    fn real_windows_security_event_revokes_runtime_authority() {
+        let expected_event = std::env::var("VISION_WALLET_QUALIFICATION_EVENT")
+            .expect("set VISION_WALLET_QUALIFICATION_EVENT to session_lock, suspend, or hibernate");
+        assert!(
+            matches!(
+                expected_event.as_str(),
+                "session_lock" | "suspend" | "hibernate"
+            ),
+            "unsupported qualification event"
+        );
+        let timeout_seconds = std::env::var("VISION_WALLET_QUALIFICATION_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (30..=1_800).contains(value))
+            .unwrap_or(600);
+
+        let runtime = Arc::new(WalletRuntimeState::for_test());
+        let lifecycle = WindowsWalletLifecycle::register(Arc::clone(&runtime)).unwrap();
+        let authority = runtime
+            .begin_operation("main", WalletOperationKind::Unlock)
+            .unwrap();
+        authority.ensure_current().unwrap();
+
+        println!(
+            "VISION_WALLET_QUALIFICATION_READY event={expected_event} pid={} timeout_seconds={timeout_seconds}",
+            std::process::id()
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds);
+        while authority.ensure_current().is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "real Windows security event did not revoke wallet authority before timeout"
+            );
+            let mut message = MSG::default();
+            // SAFETY: this test owns the thread's hidden lifecycle window and pumps only messages
+            // already queued by Windows for this thread.
+            while unsafe { PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0
+            {
+                unsafe {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        assert_eq!(
+            authority.ensure_current(),
+            Err(WalletRuntimeError::RuntimeUnavailable)
+        );
+        drop(authority);
+        runtime
+            .begin_operation("main", WalletOperationKind::Create)
+            .expect("runtime must remain locked and usable after explicit reauthorization");
+        runtime.invalidate_all().unwrap();
+        drop(lifecycle);
+        println!("VISION_WALLET_QUALIFICATION_PASS event={expected_event}");
     }
 }

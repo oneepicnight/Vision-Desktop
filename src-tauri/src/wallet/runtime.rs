@@ -968,6 +968,49 @@ mod tests {
         WalletProcessLock::acquire(&base).unwrap();
     }
 
+    /// Manual real-Windows console/RDP and fast-user-switching qualification probe.
+    ///
+    /// Start the `owner` role in the first Windows session. While it remains alive, start the
+    /// `contender` role under the same Windows account in the second session; it must pass by being
+    /// denied. After terminating the owner, run `recovery`; it must acquire the same global lease.
+    #[test]
+    #[ignore = "requires coordinated processes in separate Windows sessions"]
+    fn real_windows_cross_session_wallet_ownership() {
+        let role = std::env::var("VISION_WALLET_QUALIFICATION_ROLE")
+            .expect("set VISION_WALLET_QUALIFICATION_ROLE to owner, contender, or recovery");
+        let lock_name = "com.vision.desktop.wallet-runtime.cross-session-qualification.v1";
+        match role.as_str() {
+            "owner" => {
+                let _owner = WalletProcessLock::acquire(lock_name)
+                    .expect("qualification owner could not acquire the wallet lease");
+                let hold_seconds = std::env::var("VISION_WALLET_QUALIFICATION_HOLD_SECONDS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .filter(|value| (30..=1_800).contains(value))
+                    .unwrap_or(600);
+                println!(
+                    "VISION_WALLET_QUALIFICATION_OWNER_READY pid={} hold_seconds={hold_seconds}",
+                    std::process::id()
+                );
+                std::thread::sleep(std::time::Duration::from_secs(hold_seconds));
+                println!("VISION_WALLET_QUALIFICATION_OWNER_RELEASED");
+            }
+            "contender" => {
+                assert_eq!(
+                    WalletProcessLock::acquire(lock_name).err(),
+                    Some(WalletRuntimeError::ProcessLockUnavailable)
+                );
+                println!("VISION_WALLET_QUALIFICATION_CONTENDER_DENIED");
+            }
+            "recovery" => {
+                let _recovered = WalletProcessLock::acquire(lock_name)
+                    .expect("wallet lease was not recovered after owner termination");
+                println!("VISION_WALLET_QUALIFICATION_OWNERSHIP_RECOVERED");
+            }
+            _ => panic!("unsupported qualification role"),
+        }
+    }
+
     #[test]
     fn operations_are_main_window_owned_and_mutually_exclusive() {
         let runtime = WalletRuntimeState::for_test();

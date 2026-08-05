@@ -1,11 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::BTreeSet,
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-};
+#[cfg(test)]
+use std::path::PathBuf;
+use std::{collections::BTreeSet, fs, io::Write, path::Path};
 use time::OffsetDateTime;
 use zip::{write::SimpleFileOptions, ZipWriter};
 
@@ -18,6 +15,7 @@ use crate::{
 const SUPPORT_PACKAGE_SCHEMA: &str = "1.1";
 const SECURITY_CLASSIFICATION_ERROR: &str =
     "support package content failed security classification";
+const SUPPORT_PACKAGE_GENERATION_ERROR: &str = "support package generation failed";
 const LOG_OMISSION_NOTICE: &str =
     "Untrusted process log content is excluded from Vision Desktop support packages.\n";
 const COLLECTION_OMISSION_REASON: &str = "omitted_by_support_package_privacy_boundary";
@@ -63,10 +61,17 @@ const FORBIDDEN_CONTENT_MARKERS: [&str; 24] = [
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SupportPackageResult {
-    pub report_dir: PathBuf,
-    pub zip_path: PathBuf,
     pub zip_sha256: String,
     pub assessment: String,
+}
+
+#[derive(Debug, Clone)]
+struct StoredSupportPackage {
+    #[cfg(test)]
+    report_dir: PathBuf,
+    #[cfg(test)]
+    zip_path: PathBuf,
+    result: SupportPackageResult,
 }
 
 #[derive(Debug, Clone)]
@@ -84,9 +89,6 @@ fn redacted_config_summary(config: Option<&NodeConfig>) -> serde_json::Value {
     match config {
         Some(config) => serde_json::json!({
             "available": true,
-            "mode": config.mode,
-            "api_port": config.api_port,
-            "p2p_port": config.p2p_port,
             "configured_peer_count": config.seed_peers.len(),
             "advertised_endpoint_configured": config.advertised_host.is_some()
                 || config.advertised_port.is_some(),
@@ -250,35 +252,45 @@ fn write_support_package_at(
     binary_sha: &str,
     config: Option<&NodeConfig>,
     now: OffsetDateTime,
-) -> Result<SupportPackageResult, String> {
+) -> Result<StoredSupportPackage, String> {
     let run_id = format!("vision-desktop-report-{}", now.unix_timestamp_nanos());
     let files = build_support_files(&run_id, now, manifest, binary_sha, config)?;
-    fs::create_dir_all(reports_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(reports_dir).map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
     let report_dir = reports_dir.join(&run_id);
-    fs::create_dir(&report_dir).map_err(|e| e.to_string())?;
+    fs::create_dir(&report_dir).map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
     for support_file in &files {
         fs::write(report_dir.join(support_file.name), &support_file.bytes)
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
     }
 
     let zip_path = reports_dir.join(format!("{run_id}.zip"));
-    let file = fs::File::create(&zip_path).map_err(|e| e.to_string())?;
+    let file =
+        fs::File::create(&zip_path).map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for support_file in &files {
         zip.start_file(support_file.name, options)
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
         zip.write_all(&support_file.bytes)
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
     }
-    let zip_file = zip.finish().map_err(|e| e.to_string())?;
-    zip_file.sync_all().map_err(|e| e.to_string())?;
-    let zip_sha256 = sha256_file(&zip_path)?;
-    Ok(SupportPackageResult {
+    let zip_file = zip
+        .finish()
+        .map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
+    zip_file
+        .sync_all()
+        .map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
+    let zip_sha256 =
+        sha256_file(&zip_path).map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
+    Ok(StoredSupportPackage {
+        #[cfg(test)]
         report_dir,
+        #[cfg(test)]
         zip_path,
-        zip_sha256,
-        assessment: "INCOMPLETE".to_string(),
+        result: SupportPackageResult {
+            zip_sha256,
+            assessment: "INCOMPLETE".to_string(),
+        },
     })
 }
 
@@ -286,9 +298,11 @@ pub fn generate_support_package(
     config: Option<NodeConfig>,
 ) -> Result<SupportPackageResult, String> {
     let paths = default_paths();
-    ensure_dir(&paths.reports)?;
-    let manifest = load_core_manifest()?;
-    let binary_sha = sha256_file(&bundled_core_binary_path())?;
+    ensure_dir(&paths.reports).map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
+    let manifest =
+        load_core_manifest().map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
+    let binary_sha = sha256_file(&bundled_core_binary_path())
+        .map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
     write_support_package_at(
         &paths.reports,
         &manifest,
@@ -296,6 +310,7 @@ pub fn generate_support_package(
         config.as_ref(),
         OffsetDateTime::now_utc(),
     )
+    .map(|stored| stored.result)
 }
 
 #[cfg(test)]
@@ -351,11 +366,34 @@ mod tests {
     fn configuration_summary_exposes_only_non_identifying_shape() {
         let summary = redacted_config_summary(Some(&canary_config()));
         let serialized = serde_json::to_vec(&summary).unwrap();
+        let keys = summary
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
 
         assert_no_canaries(&serialized);
+        assert_eq!(
+            keys,
+            [
+                "advertised_endpoint_configured",
+                "available",
+                "configured_peer_count",
+                "data_directory_configured",
+                "log_directory_configured",
+                "mining_enabled",
+                "mining_payout_configured",
+            ]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+        );
         assert_eq!(summary["configured_peer_count"], 1);
         assert_eq!(summary["advertised_endpoint_configured"], true);
         assert_eq!(summary["mining_payout_configured"], true);
+        assert!(summary.get("mode").is_none());
+        assert!(summary.get("api_port").is_none());
+        assert!(summary.get("p2p_port").is_none());
         assert!(summary.get("node_name").is_none());
         assert!(summary.get("seed_peers").is_none());
         assert!(summary.get("advertised_host").is_none());
@@ -492,5 +530,57 @@ mod tests {
                 .map(str::to_string)
                 .collect::<BTreeSet<_>>()
         );
+    }
+
+    #[test]
+    fn public_result_is_pathless() {
+        let directory = tempfile::tempdir().unwrap();
+        let stored = write_support_package_at(
+            directory.path(),
+            &manifest(),
+            &"B".repeat(64),
+            None,
+            fixed_time(),
+        )
+        .unwrap();
+        let serialized = serde_json::to_string(&stored.result).unwrap();
+        let serialized_value = serde_json::to_value(&stored.result).unwrap();
+        let keys = serialized_value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(stored.result.zip_sha256.len(), 64);
+        assert_eq!(stored.result.assessment, "INCOMPLETE");
+        assert_eq!(
+            keys,
+            ["assessment", "zip_sha256"]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        assert!(!serialized.contains("report_dir"));
+        assert!(!serialized.contains("zip_path"));
+        assert!(!serialized.contains('\\'));
+        assert!(!serialized.contains('/'));
+    }
+
+    #[test]
+    fn filesystem_failures_return_a_fixed_pathless_error() {
+        let occupied_path = tempfile::NamedTempFile::new().unwrap();
+        let error = write_support_package_at(
+            occupied_path.path(),
+            &manifest(),
+            &"B".repeat(64),
+            None,
+            fixed_time(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, SUPPORT_PACKAGE_GENERATION_ERROR);
+        assert!(!error.contains(':'));
+        assert!(!error.contains('\\'));
+        assert!(!error.contains('/'));
     }
 }

@@ -37,6 +37,7 @@ fn manifest_dir() -> PathBuf {
 fn read(relative_path: &str) -> String {
     fs::read_to_string(manifest_dir().join(relative_path))
         .unwrap_or_else(|error| panic!("failed to read {relative_path}: {error}"))
+        .replace("\r\n", "\n")
 }
 
 fn expected_commands() -> BTreeSet<String> {

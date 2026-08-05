@@ -147,7 +147,8 @@ Known Diagnostics limitations:
 - Desktop does not infer severity, category, or node health from arbitrary log text
 - support-package generation and directory opening remain the only support actions; they use existing Desktop-managed paths
 - raw stdout and stderr are deliberately excluded from generated support packages even though their bounded tails remain visible locally in Diagnostics
-- support packages use an exact file allowlist and include only non-identifying configuration shape; node names, peer endpoints, advertised hosts, payout addresses, filesystem paths, private activity, and all custody material are excluded
+- support packages use an exact file allowlist and include only non-identifying configuration counts and booleans; node names, operating mode, exact ports, peer endpoints, advertised hosts, payout addresses, filesystem paths, private activity, and all custody material are excluded
+- support-package IPC returns only the package SHA-256 and fixed assessment; native destination paths and filesystem errors never cross into the WebView
 - the page does not add write controls for mining or Core runtime behavior
 
 Bundled Core baseline for local development:

@@ -78,9 +78,15 @@ switch ($Action) {
 }
 
 try {
-    & cargo test --manifest-path $manifestPath --release $testName -- --ignored --exact --nocapture --test-threads=1 2>&1 |
-        Tee-Object -FilePath $evidencePath -Append
-    $testExitCode = $LASTEXITCODE
+    $priorErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & cargo test --manifest-path $manifestPath --release $testName -- --ignored --exact --nocapture --test-threads=1 2>&1 |
+            Tee-Object -FilePath $evidencePath -Append
+        $testExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $priorErrorActionPreference
+    }
 } finally {
     Remove-Item Env:VISION_WALLET_QUALIFICATION_EVENT -ErrorAction SilentlyContinue
     Remove-Item Env:VISION_WALLET_QUALIFICATION_TIMEOUT_SECONDS -ErrorAction SilentlyContinue

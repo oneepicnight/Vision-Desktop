@@ -118,5 +118,5 @@ warnings; and state that no wallet command, permission, signing path, or approva
 during the private-runtime probe stage.
 
 Only an independent reviewer may convert this evidence into lifecycle-only integration approval.
-Journal-head rollback protection and private-loopback Core compatibility remain mandatory before
-signing or sending.
+The implemented journal-head correction still requires independent re-review, and private-loopback
+Core compatibility remains mandatory before signing or sending.

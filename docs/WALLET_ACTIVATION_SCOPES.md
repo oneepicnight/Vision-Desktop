@@ -56,5 +56,6 @@ Automated tests prove:
 - a lifecycle activation proof is rejected by the transaction signer; and
 - the Tauri authority inventory still contains no wallet command or wallet permission.
 
-The remaining gates are documented in `WALLET_LIFECYCLE_REVOCATION.md`,
-`WALLET_INDEPENDENT_SECURITY_REVIEW_HANDOFF.md`, and `WALLET_JOURNAL_AUTHENTICATION.md`.
+The journal-head correction in `WALLET_JOURNAL_AUTHENTICATION.md` remains subject to independent
+re-review before signing or sending. Other gates are documented in
+`WALLET_LIFECYCLE_REVOCATION.md` and `WALLET_INDEPENDENT_SECURITY_REVIEW_HANDOFF.md`.

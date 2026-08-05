@@ -34,11 +34,19 @@ const JOURNAL_VERSION: u32 = 2;
 const JOURNAL_AUTHENTICATION_DOMAIN: &[u8] = b"vision-desktop-wallet-activity-authentication-v1";
 const JOURNAL_KEY_DERIVATION_CONTEXT: &str =
     "com.vision.desktop.wallet-activity-journal-authentication-key.v1";
+const JOURNAL_HEAD_SCHEMA: &str = "vision-desktop-wallet-activity-head";
+const JOURNAL_HEAD_VERSION: u32 = 1;
+const JOURNAL_HEAD_AUTHENTICATION_DOMAIN: &[u8] =
+    b"vision-desktop-wallet-activity-head-authentication-v1";
+const JOURNAL_HEAD_KEY_DERIVATION_CONTEXT: &str =
+    "com.vision.desktop.wallet-activity-journal-head-authentication-key.v1";
 const AUTHENTICATION_TAG_BYTES: usize = 32;
 const MAX_JOURNAL_BYTES: usize = 8 * 1024 * 1024;
+const MAX_JOURNAL_HEAD_BYTES: usize = 4 * 1024;
 const MAX_EVENT_BYTES: usize = 16 * 1024;
 const MAX_EVENTS: usize = 10_000;
 const JOURNAL_STAGING_PREFIX: &str = ".wallet-activity-stage-";
+const JOURNAL_HEAD_SUFFIX: &str = ".head.json";
 
 static JOURNAL_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -67,6 +75,37 @@ pub(in crate::wallet) struct WalletActivityJournal {
 struct LoadedJournal {
     journal: WalletActivityJournal,
     encoded: Vec<u8>,
+    head_generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct JournalHead {
+    schema: String,
+    version: u32,
+    wallet_id: String,
+    generation: u64,
+    state: JournalHeadState,
+    authentication_tag_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JournalHeadState {
+    Committed {
+        position: JournalHeadPosition,
+    },
+    Transition {
+        previous: JournalHeadPosition,
+        next: JournalHeadPosition,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct JournalHeadPosition {
+    sequence: u64,
+    authentication_tag_hex: String,
 }
 
 impl WalletActivityJournal {
@@ -87,6 +126,7 @@ impl WalletActivityJournal {
 pub(in crate::wallet) struct WalletJournalAuthenticator<'wallet> {
     wallet_id: &'wallet str,
     authentication_key: SecretBox<[u8; AUTHENTICATION_TAG_BYTES]>,
+    head_authentication_key: SecretBox<[u8; AUTHENTICATION_TAG_BYTES]>,
     sender_address: String,
 }
 
@@ -96,31 +136,57 @@ impl<'wallet> WalletJournalAuthenticator<'wallet> {
         seed: &WalletSeed,
     ) -> Result<Self, WalletJournalError> {
         validate_wallet_id(wallet_id)?;
-        let authentication_key =
-            SecretBox::<[u8; AUTHENTICATION_TAG_BYTES]>::init_with_mut(|output| {
-                let mut hasher = blake3::Hasher::new_derive_key(JOURNAL_KEY_DERIVATION_CONTEXT);
-                seed.with_exposed(|seed_bytes| {
-                    hasher.update(seed_bytes);
-                });
-                hasher.finalize_xof().fill(output);
-                hasher.reset();
-            });
+        let authentication_key = derive_authentication_key(seed, JOURNAL_KEY_DERIVATION_CONTEXT);
+        let head_authentication_key =
+            derive_authentication_key(seed, JOURNAL_HEAD_KEY_DERIVATION_CONTEXT);
         Ok(Self {
             wallet_id,
             authentication_key,
+            head_authentication_key,
             sender_address: derive_account_identity(seed).address,
         })
     }
 
     fn authenticate(&self, payload: &[u8]) -> [u8; AUTHENTICATION_TAG_BYTES] {
-        let key = self.authentication_key.expose_secret();
-        {
-            let mut input = Vec::with_capacity(JOURNAL_AUTHENTICATION_DOMAIN.len() + payload.len());
-            input.extend_from_slice(JOURNAL_AUTHENTICATION_DOMAIN);
-            input.extend_from_slice(payload);
-            *blake3::keyed_hash(key, &input).as_bytes()
-        }
+        authenticate_payload(
+            self.authentication_key.expose_secret(),
+            JOURNAL_AUTHENTICATION_DOMAIN,
+            payload,
+        )
     }
+
+    fn authenticate_head(&self, payload: &[u8]) -> [u8; AUTHENTICATION_TAG_BYTES] {
+        authenticate_payload(
+            self.head_authentication_key.expose_secret(),
+            JOURNAL_HEAD_AUTHENTICATION_DOMAIN,
+            payload,
+        )
+    }
+}
+
+fn derive_authentication_key(
+    seed: &WalletSeed,
+    context: &'static str,
+) -> SecretBox<[u8; AUTHENTICATION_TAG_BYTES]> {
+    SecretBox::<[u8; AUTHENTICATION_TAG_BYTES]>::init_with_mut(|output| {
+        let mut hasher = blake3::Hasher::new_derive_key(context);
+        seed.with_exposed(|seed_bytes| {
+            hasher.update(seed_bytes);
+        });
+        hasher.finalize_xof().fill(output);
+        hasher.reset();
+    })
+}
+
+fn authenticate_payload(
+    key: &[u8; AUTHENTICATION_TAG_BYTES],
+    domain: &[u8],
+    payload: &[u8],
+) -> [u8; AUTHENTICATION_TAG_BYTES] {
+    let mut input = Vec::with_capacity(domain.len() + payload.len());
+    input.extend_from_slice(domain);
+    input.extend_from_slice(payload);
+    *blake3::keyed_hash(key, &input).as_bytes()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,9 +303,11 @@ pub(in crate::wallet) fn append_accepted_submission(
     authenticate_event(authenticator, &mut event)?;
     append_event(
         path,
+        authenticator,
         loaded.encoded.as_slice(),
         &event,
         journal.event_count == 0,
+        loaded.head_generation,
     )?;
     apply_authenticated_event(&mut journal, &event)?;
     Ok(journal)
@@ -283,7 +351,14 @@ pub(in crate::wallet) fn append_receipt_observation(
         authentication_tag_hex: String::new(),
     };
     authenticate_event(authenticator, &mut event)?;
-    append_event(path, loaded.encoded.as_slice(), &event, false)?;
+    append_event(
+        path,
+        authenticator,
+        loaded.encoded.as_slice(),
+        &event,
+        false,
+        loaded.head_generation,
+    )?;
     apply_authenticated_event(&mut journal, &event)?;
     Ok(journal)
 }
@@ -347,57 +422,193 @@ fn load_journal_unlocked(
     path: &Path,
     authenticator: &WalletJournalAuthenticator<'_>,
 ) -> Result<LoadedJournal, WalletJournalError> {
-    let Some(bytes) = read_journal_bytes(path)? else {
-        return Ok(LoadedJournal {
-            journal: WalletActivityJournal {
-                wallet_id: authenticator.wallet_id.to_string(),
-                records: Vec::new(),
-                event_count: 0,
-                last_authentication_tag: [0_u8; AUTHENTICATION_TAG_BYTES],
-            },
-            encoded: Vec::new(),
-        });
-    };
-    if bytes.last() != Some(&b'\n') {
-        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
-    }
-
     let mut journal = WalletActivityJournal {
         wallet_id: authenticator.wallet_id.to_string(),
         records: Vec::new(),
         event_count: 0,
         last_authentication_tag: [0_u8; AUTHENTICATION_TAG_BYTES],
     };
-    for line in bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        if line.len() > MAX_EVENT_BYTES || journal.event_count >= MAX_EVENTS {
-            return Err(WalletJournalError::JournalTooLarge);
-        }
-        let event: JournalEvent = serde_json::from_slice(line)
-            .map_err(|_| WalletJournalError::InvalidOrUnsupportedFormat)?;
-        if event.schema != JOURNAL_SCHEMA
-            || event.version != JOURNAL_VERSION
-            || event.wallet_id != authenticator.wallet_id
-            || event.sequence != next_sequence(journal.event_count)?
-        {
+    let bytes = read_journal_bytes(path)?.unwrap_or_default();
+    if !bytes.is_empty() {
+        if bytes.last() != Some(&b'\n') {
             return Err(WalletJournalError::InvalidOrUnsupportedFormat);
         }
-        verify_event_authentication(authenticator, &journal, &event)?;
-        apply_authenticated_event(&mut journal, &event)?;
+        for line in bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            if line.len() > MAX_EVENT_BYTES || journal.event_count >= MAX_EVENTS {
+                return Err(WalletJournalError::JournalTooLarge);
+            }
+            let event: JournalEvent = serde_json::from_slice(line)
+                .map_err(|_| WalletJournalError::InvalidOrUnsupportedFormat)?;
+            if event.schema != JOURNAL_SCHEMA
+                || event.version != JOURNAL_VERSION
+                || event.wallet_id != authenticator.wallet_id
+                || event.sequence != next_sequence(journal.event_count)?
+            {
+                return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+            }
+            verify_event_authentication(authenticator, &journal, &event)?;
+            apply_authenticated_event(&mut journal, &event)?;
+        }
+        if journal.event_count == 0 {
+            return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+        }
     }
-    if journal.event_count == 0 {
-        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
-    }
+    let head_generation = verify_or_recover_journal_head(path, authenticator, &journal)?;
     Ok(LoadedJournal {
         journal,
         encoded: bytes,
+        head_generation,
     })
+}
+
+fn verify_or_recover_journal_head(
+    journal_path: &Path,
+    authenticator: &WalletJournalAuthenticator<'_>,
+    journal: &WalletActivityJournal,
+) -> Result<Option<u64>, WalletJournalError> {
+    let head_path = journal_head_path(journal_path)?;
+    let Some(bytes) = read_journal_head_bytes(&head_path)? else {
+        return if journal.event_count == 0 {
+            Ok(None)
+        } else {
+            Err(WalletJournalError::InvalidOrUnsupportedFormat)
+        };
+    };
+    let head: JournalHead = serde_json::from_slice(&bytes)
+        .map_err(|_| WalletJournalError::InvalidOrUnsupportedFormat)?;
+    verify_journal_head(authenticator, &head)?;
+    let actual = journal_head_position(journal)?;
+    let committed_position = match &head.state {
+        JournalHeadState::Committed { position } => {
+            if *position != actual {
+                return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+            }
+            return Ok(Some(head.generation));
+        }
+        JournalHeadState::Transition { previous, next } if *previous == actual => previous.clone(),
+        JournalHeadState::Transition { next, .. } if *next == actual => next.clone(),
+        JournalHeadState::Transition { .. } => {
+            return Err(WalletJournalError::InvalidOrUnsupportedFormat)
+        }
+    };
+
+    let mut recovered = JournalHead {
+        schema: JOURNAL_HEAD_SCHEMA.to_string(),
+        version: JOURNAL_HEAD_VERSION,
+        wallet_id: authenticator.wallet_id.to_string(),
+        generation: head.generation,
+        state: JournalHeadState::Committed {
+            position: committed_position,
+        },
+        authentication_tag_hex: String::new(),
+    };
+    authenticate_journal_head(authenticator, &mut recovered)?;
+    persist_journal_head(&head_path, &recovered, false)?;
+    Ok(Some(head.generation))
+}
+
+fn journal_head_path(journal_path: &Path) -> Result<PathBuf, WalletJournalError> {
+    let file_name = journal_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or(WalletJournalError::StorageUnavailable)?;
+    if file_name.is_empty() || file_name.contains(':') {
+        return Err(WalletJournalError::StorageUnavailable);
+    }
+    Ok(journal_path.with_file_name(format!("{file_name}{JOURNAL_HEAD_SUFFIX}")))
+}
+
+fn journal_head_position(
+    journal: &WalletActivityJournal,
+) -> Result<JournalHeadPosition, WalletJournalError> {
+    Ok(JournalHeadPosition {
+        sequence: u64::try_from(journal.event_count)
+            .map_err(|_| WalletJournalError::JournalTooLarge)?,
+        authentication_tag_hex: hex::encode(journal.last_authentication_tag),
+    })
+}
+
+fn authenticate_journal_head(
+    authenticator: &WalletJournalAuthenticator<'_>,
+    head: &mut JournalHead,
+) -> Result<(), WalletJournalError> {
+    let payload = journal_head_authentication_payload(head)?;
+    head.authentication_tag_hex = hex::encode(authenticator.authenticate_head(&payload));
+    Ok(())
+}
+
+fn verify_journal_head(
+    authenticator: &WalletJournalAuthenticator<'_>,
+    head: &JournalHead,
+) -> Result<(), WalletJournalError> {
+    if head.schema != JOURNAL_HEAD_SCHEMA
+        || head.version != JOURNAL_HEAD_VERSION
+        || head.wallet_id != authenticator.wallet_id
+        || head.generation == 0
+    {
+        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+    }
+    let positions = match &head.state {
+        JournalHeadState::Committed { position } => [Some(position), None],
+        JournalHeadState::Transition { previous, next } => {
+            if next.sequence
+                != previous
+                    .sequence
+                    .checked_add(1)
+                    .ok_or(WalletJournalError::InvalidOrUnsupportedFormat)?
+            {
+                return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+            }
+            [Some(previous), Some(next)]
+        }
+    };
+    for position in positions.into_iter().flatten() {
+        let tag = decode_authentication_tag(&position.authentication_tag_hex)?;
+        if position.sequence > MAX_EVENTS as u64
+            || position.sequence > head.generation
+            || (position.sequence == 0 && tag != [0_u8; AUTHENTICATION_TAG_BYTES])
+            || (position.sequence != 0 && tag == [0_u8; AUTHENTICATION_TAG_BYTES])
+        {
+            return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+        }
+    }
+    let supplied = decode_authentication_tag(&head.authentication_tag_hex)?;
+    let expected = authenticator.authenticate_head(&journal_head_authentication_payload(head)?);
+    if !constant_time_equal(&supplied, &expected) {
+        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+    }
+    Ok(())
+}
+
+fn journal_head_authentication_payload(head: &JournalHead) -> Result<Vec<u8>, WalletJournalError> {
+    serde_json::to_vec(&(
+        &head.schema,
+        head.version,
+        &head.wallet_id,
+        head.generation,
+        &head.state,
+    ))
+    .map_err(|_| WalletJournalError::InvalidOrUnsupportedFormat)
 }
 
 #[cfg(windows)]
 fn read_journal_bytes(path: &Path) -> Result<Option<Vec<u8>>, WalletJournalError> {
+    read_protected_file_bytes(path, MAX_JOURNAL_BYTES)
+}
+
+#[cfg(windows)]
+fn read_journal_head_bytes(path: &Path) -> Result<Option<Vec<u8>>, WalletJournalError> {
+    read_protected_file_bytes(path, MAX_JOURNAL_HEAD_BYTES)
+}
+
+#[cfg(windows)]
+fn read_protected_file_bytes(
+    path: &Path,
+    maximum_bytes: usize,
+) -> Result<Option<Vec<u8>>, WalletJournalError> {
     let parent = path
         .parent()
         .ok_or(WalletJournalError::StorageUnavailable)?;
@@ -420,14 +631,14 @@ fn read_journal_bytes(path: &Path) -> Result<Option<Vec<u8>>, WalletJournalError
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
     let file_size =
         usize::try_from(metadata.len()).map_err(|_| WalletJournalError::JournalTooLarge)?;
-    if file_size == 0 || file_size > MAX_JOURNAL_BYTES {
+    if file_size == 0 || file_size > maximum_bytes {
         return Err(WalletJournalError::InvalidOrUnsupportedFormat);
     }
     let mut bytes = Vec::with_capacity(file_size);
-    file.take(MAX_JOURNAL_BYTES as u64 + 1)
+    file.take(maximum_bytes as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    if bytes.len() > MAX_JOURNAL_BYTES {
+    if bytes.len() > maximum_bytes {
         return Err(WalletJournalError::JournalTooLarge);
     }
     Ok(Some(bytes))
@@ -435,6 +646,19 @@ fn read_journal_bytes(path: &Path) -> Result<Option<Vec<u8>>, WalletJournalError
 
 #[cfg(not(windows))]
 fn read_journal_bytes(path: &Path) -> Result<Option<Vec<u8>>, WalletJournalError> {
+    read_protected_file_bytes(path, MAX_JOURNAL_BYTES)
+}
+
+#[cfg(not(windows))]
+fn read_journal_head_bytes(path: &Path) -> Result<Option<Vec<u8>>, WalletJournalError> {
+    read_protected_file_bytes(path, MAX_JOURNAL_HEAD_BYTES)
+}
+
+#[cfg(not(windows))]
+fn read_protected_file_bytes(
+    path: &Path,
+    maximum_bytes: usize,
+) -> Result<Option<Vec<u8>>, WalletJournalError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -451,16 +675,16 @@ fn read_journal_bytes(path: &Path) -> Result<Option<Vec<u8>>, WalletJournalError
     }
     let file_size =
         usize::try_from(metadata.len()).map_err(|_| WalletJournalError::JournalTooLarge)?;
-    if file_size == 0 || file_size > MAX_JOURNAL_BYTES {
+    if file_size == 0 || file_size > maximum_bytes {
         return Err(WalletJournalError::InvalidOrUnsupportedFormat);
     }
     let mut bytes = Vec::with_capacity(file_size);
     fs::File::open(path)
         .map_err(|_| WalletJournalError::StorageUnavailable)?
-        .take(MAX_JOURNAL_BYTES as u64 + 1)
+        .take(maximum_bytes as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
-    if bytes.len() > MAX_JOURNAL_BYTES {
+    if bytes.len() > maximum_bytes {
         return Err(WalletJournalError::JournalTooLarge);
     }
     Ok(Some(bytes))
@@ -617,10 +841,43 @@ fn validate_observation(observation: &WalletReceiptObservation) -> Result<(), Wa
 
 fn append_event(
     path: &Path,
+    authenticator: &WalletJournalAuthenticator<'_>,
     existing: &[u8],
     event: &JournalEvent,
     create_new: bool,
+    head_generation: Option<u64>,
 ) -> Result<(), WalletJournalError> {
+    append_event_with_checkpoint(
+        path,
+        authenticator,
+        existing,
+        event,
+        create_new,
+        head_generation,
+        |_| Ok(()),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalTransactionCheckpoint {
+    HeadTransitionPublished,
+    JournalPublished,
+    HeadCommitted,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_event_with_checkpoint<F>(
+    path: &Path,
+    authenticator: &WalletJournalAuthenticator<'_>,
+    existing: &[u8],
+    event: &JournalEvent,
+    create_new: bool,
+    head_generation: Option<u64>,
+    mut checkpoint: F,
+) -> Result<(), WalletJournalError>
+where
+    F: FnMut(JournalTransactionCheckpoint) -> Result<(), WalletJournalError>,
+{
     let mut encoded =
         serde_json::to_vec(event).map_err(|_| WalletJournalError::InvalidOrUnsupportedFormat)?;
     encoded.push(b'\n');
@@ -640,7 +897,66 @@ fn append_event(
     let mut replacement = Vec::with_capacity(new_size);
     replacement.extend_from_slice(existing);
     replacement.extend_from_slice(&encoded);
-    persist_journal_bytes(path, &replacement, create_new)
+
+    let previous = JournalHeadPosition {
+        sequence: event
+            .sequence
+            .checked_sub(1)
+            .ok_or(WalletJournalError::InvalidOrUnsupportedFormat)?,
+        authentication_tag_hex: event.previous_authentication_tag_hex.clone(),
+    };
+    let next = JournalHeadPosition {
+        sequence: event.sequence,
+        authentication_tag_hex: event.authentication_tag_hex.clone(),
+    };
+    let generation = head_generation
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(WalletJournalError::JournalTooLarge)?;
+    let mut transition = JournalHead {
+        schema: JOURNAL_HEAD_SCHEMA.to_string(),
+        version: JOURNAL_HEAD_VERSION,
+        wallet_id: authenticator.wallet_id.to_string(),
+        generation,
+        state: JournalHeadState::Transition {
+            previous,
+            next: next.clone(),
+        },
+        authentication_tag_hex: String::new(),
+    };
+    authenticate_journal_head(authenticator, &mut transition)?;
+    let head_path = journal_head_path(path)?;
+    persist_journal_head(&head_path, &transition, head_generation.is_none())?;
+    checkpoint(JournalTransactionCheckpoint::HeadTransitionPublished)?;
+
+    persist_journal_bytes(path, &replacement, create_new)?;
+    checkpoint(JournalTransactionCheckpoint::JournalPublished)?;
+
+    let mut committed = JournalHead {
+        schema: JOURNAL_HEAD_SCHEMA.to_string(),
+        version: JOURNAL_HEAD_VERSION,
+        wallet_id: authenticator.wallet_id.to_string(),
+        generation,
+        state: JournalHeadState::Committed { position: next },
+        authentication_tag_hex: String::new(),
+    };
+    authenticate_journal_head(authenticator, &mut committed)?;
+    persist_journal_head(&head_path, &committed, false)?;
+    checkpoint(JournalTransactionCheckpoint::HeadCommitted)?;
+    Ok(())
+}
+
+fn persist_journal_head(
+    path: &Path,
+    head: &JournalHead,
+    create_new: bool,
+) -> Result<(), WalletJournalError> {
+    let bytes =
+        serde_json::to_vec(head).map_err(|_| WalletJournalError::InvalidOrUnsupportedFormat)?;
+    if bytes.is_empty() || bytes.len() > MAX_JOURNAL_HEAD_BYTES {
+        return Err(WalletJournalError::InvalidOrUnsupportedFormat);
+    }
+    persist_journal_bytes(path, &bytes, create_new)
 }
 
 #[cfg(windows)]
@@ -846,6 +1162,28 @@ mod tests {
             .join("primary-activity.jsonl")
     }
 
+    fn pending_event(
+        loaded: &LoadedJournal,
+        authenticator: &WalletJournalAuthenticator<'_>,
+        tx_id: &str,
+    ) -> JournalEvent {
+        let mut event = JournalEvent {
+            schema: JOURNAL_SCHEMA.to_string(),
+            version: JOURNAL_VERSION,
+            wallet_id: WALLET_ID.to_string(),
+            sequence: next_sequence(loaded.journal.event_count).unwrap(),
+            tx_id: tx_id.to_string(),
+            recorded_at_unix_ms: 110,
+            event: JournalEventData::Observation(ObservationEvent {
+                observation: WalletReceiptObservation::Pending,
+            }),
+            previous_authentication_tag_hex: hex::encode(loaded.journal.last_authentication_tag),
+            authentication_tag_hex: String::new(),
+        };
+        authenticate_event(authenticator, &mut event).unwrap();
+        event
+    }
+
     #[test]
     fn accepted_submission_round_trips_public_metadata_only() {
         let directory = tempfile::tempdir().unwrap();
@@ -866,7 +1204,8 @@ mod tests {
 
         let loaded = load_activity_journal(&path, &authenticator()).unwrap();
         assert_eq!(loaded, journal);
-        let stored = fs::read_to_string(path).unwrap();
+        let stored = fs::read_to_string(&path).unwrap();
+        let stored_head = fs::read_to_string(journal_head_path(&path).unwrap()).unwrap();
         assert!(!stored.contains(&transaction.sig));
         for forbidden in [
             "private_key",
@@ -878,6 +1217,7 @@ mod tests {
             "signature",
         ] {
             assert!(!stored.contains(forbidden));
+            assert!(!stored_head.contains(forbidden));
         }
     }
 
@@ -1028,6 +1368,7 @@ mod tests {
         );
 
         fs::remove_file(&path).unwrap();
+        fs::remove_file(journal_head_path(&path).unwrap()).unwrap();
         let (transaction, outcome) = accepted_transaction();
         append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100).unwrap();
         let stored = fs::read_to_string(&path).unwrap();
@@ -1112,6 +1453,160 @@ mod tests {
             load_activity_journal(&path, &authenticator()).unwrap_err(),
             WalletJournalError::InvalidOrUnsupportedFormat
         );
+    }
+
+    #[test]
+    fn independent_head_rejects_valid_prefix_rollback_missing_and_tampered_anchors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = journal_path(&directory);
+        let head_path = journal_head_path(&path).unwrap();
+        let (transaction, outcome) = accepted_transaction();
+        let tx_id = canonical_transaction_id(&transaction).unwrap();
+        append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100).unwrap();
+        let authentic_prefix = fs::read(&path).unwrap();
+
+        append_receipt_observation(
+            &path,
+            &authenticator(),
+            &tx_id,
+            &WalletReceiptObservation::Pending,
+            110,
+        )
+        .unwrap();
+        let current_journal = fs::read(&path).unwrap();
+        let current_head = fs::read(&head_path).unwrap();
+
+        fs::write(&path, &authentic_prefix).unwrap();
+        storage_security::protect_file(&path).unwrap();
+        assert_eq!(
+            load_activity_journal(&path, &authenticator()).unwrap_err(),
+            WalletJournalError::InvalidOrUnsupportedFormat
+        );
+
+        fs::write(&path, &current_journal).unwrap();
+        storage_security::protect_file(&path).unwrap();
+        fs::remove_file(&head_path).unwrap();
+        assert_eq!(
+            load_activity_journal(&path, &authenticator()).unwrap_err(),
+            WalletJournalError::InvalidOrUnsupportedFormat
+        );
+
+        fs::write(&head_path, &current_head).unwrap();
+        storage_security::protect_file(&head_path).unwrap();
+        let mut tampered: serde_json::Value = serde_json::from_slice(&current_head).unwrap();
+        tampered["generation"] = serde_json::json!(999);
+        fs::write(&head_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        storage_security::protect_file(&head_path).unwrap();
+        assert_eq!(
+            load_activity_journal(&path, &authenticator()).unwrap_err(),
+            WalletJournalError::InvalidOrUnsupportedFormat
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn head_transaction_recovers_each_interruption_boundary_without_accepting_mismatch() {
+        for interruption in [
+            JournalTransactionCheckpoint::HeadTransitionPublished,
+            JournalTransactionCheckpoint::JournalPublished,
+            JournalTransactionCheckpoint::HeadCommitted,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = journal_path(&directory);
+            let (transaction, outcome) = accepted_transaction();
+            let tx_id = canonical_transaction_id(&transaction).unwrap();
+            let auth = authenticator();
+            append_accepted_submission(&path, &auth, &transaction, &outcome, 100).unwrap();
+            let original_journal = fs::read(&path).unwrap();
+            let loaded = load_journal_unlocked(&path, &auth).unwrap();
+            let event = pending_event(&loaded, &auth, &tx_id);
+
+            let error = append_event_with_checkpoint(
+                &path,
+                &auth,
+                loaded.encoded.as_slice(),
+                &event,
+                false,
+                loaded.head_generation,
+                |checkpoint| {
+                    if checkpoint == interruption {
+                        Err(WalletJournalError::StorageUnavailable)
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error, WalletJournalError::StorageUnavailable);
+
+            let recovered = load_activity_journal(&path, &auth).unwrap();
+            let expected_observation =
+                if interruption == JournalTransactionCheckpoint::HeadTransitionPublished {
+                    assert_eq!(fs::read(&path).unwrap(), original_journal);
+                    WalletReceiptObservation::NotFound
+                } else {
+                    WalletReceiptObservation::Pending
+                };
+            assert_eq!(recovered.records()[0].observation, expected_observation);
+
+            let recovered_head: JournalHead =
+                serde_json::from_slice(&fs::read(journal_head_path(&path).unwrap()).unwrap())
+                    .unwrap();
+            assert!(matches!(
+                recovered_head.state,
+                JournalHeadState::Committed { .. }
+            ));
+            verify_journal_head(&auth, &recovered_head).unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn interrupted_first_head_transition_recovers_empty_state_and_allows_safe_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = journal_path(&directory);
+        let auth = authenticator();
+        let loaded = load_journal_unlocked(&path, &auth).unwrap();
+        let (transaction, outcome) = accepted_transaction();
+        let (tx_id, submitted) = accepted_submission(&transaction, &outcome).unwrap();
+        let mut event = JournalEvent {
+            schema: JOURNAL_SCHEMA.to_string(),
+            version: JOURNAL_VERSION,
+            wallet_id: WALLET_ID.to_string(),
+            sequence: 1,
+            tx_id,
+            recorded_at_unix_ms: 100,
+            event: JournalEventData::Submitted(submitted),
+            previous_authentication_tag_hex: hex::encode([0_u8; AUTHENTICATION_TAG_BYTES]),
+            authentication_tag_hex: String::new(),
+        };
+        authenticate_event(&auth, &mut event).unwrap();
+
+        let error = append_event_with_checkpoint(
+            &path,
+            &auth,
+            loaded.encoded.as_slice(),
+            &event,
+            true,
+            loaded.head_generation,
+            |checkpoint| {
+                if checkpoint == JournalTransactionCheckpoint::HeadTransitionPublished {
+                    Err(WalletJournalError::StorageUnavailable)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, WalletJournalError::StorageUnavailable);
+        assert!(!path.exists());
+        assert!(journal_head_path(&path).unwrap().exists());
+
+        let recovered = load_activity_journal(&path, &auth).unwrap();
+        assert!(recovered.records().is_empty());
+        append_accepted_submission(&path, &auth, &transaction, &outcome, 100).unwrap();
+        let retried = load_activity_journal(&path, &auth).unwrap();
+        assert_eq!(retried.records().len(), 1);
     }
 
     #[test]
@@ -1208,6 +1703,27 @@ mod tests {
         if symlink_file(&target, &link).is_ok() {
             assert_eq!(
                 load_activity_journal(&link, &authenticator()).unwrap_err(),
+                WalletJournalError::StorageUnavailable
+            );
+        }
+
+        let protected_directory = tempfile::tempdir().unwrap();
+        let protected_path = journal_path(&protected_directory);
+        let (transaction, outcome) = accepted_transaction();
+        append_accepted_submission(
+            &protected_path,
+            &authenticator(),
+            &transaction,
+            &outcome,
+            100,
+        )
+        .unwrap();
+        let protected_head = journal_head_path(&protected_path).unwrap();
+        let head_target = protected_head.with_file_name("attacker-head-target.json");
+        fs::rename(&protected_head, &head_target).unwrap();
+        if symlink_file(&head_target, &protected_head).is_ok() {
+            assert_eq!(
+                load_activity_journal(&protected_path, &authenticator()).unwrap_err(),
                 WalletJournalError::StorageUnavailable
             );
         }

@@ -1,9 +1,10 @@
 use super::runtime::{WalletRuntimeError, WalletRuntimeState};
 use std::{ffi::c_void, mem, os::windows::ffi::OsStrExt, ptr, sync::Arc};
 use windows_sys::Win32::{
-    Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
+    Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
     System::{
         LibraryLoader::GetModuleHandleW,
+        Power::{RegisterSuspendResumeNotification, UnregisterSuspendResumeNotification},
         RemoteDesktop::{
             WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
             NOTIFY_FOR_THIS_SESSION,
@@ -11,10 +12,10 @@ use windows_sys::Win32::{
     },
     UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, RegisterClassExW,
-        SetWindowLongPtrW, UnregisterClassW, CREATESTRUCTW, GWLP_USERDATA, PBT_APMSTANDBY,
-        PBT_APMSUSPEND, WM_ENDSESSION, WM_NCCREATE, WM_NCDESTROY, WM_POWERBROADCAST,
-        WM_QUERYENDSESSION, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_OVERLAPPED, WTS_SESSION_LOCK,
+        SetWindowLongPtrW, UnregisterClassW, CREATESTRUCTW, DEVICE_NOTIFY_WINDOW_HANDLE,
+        GWLP_USERDATA, PBT_APMSTANDBY, PBT_APMSUSPEND, WM_ENDSESSION, WM_NCCREATE, WM_NCDESTROY,
+        WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_OVERLAPPED, WTS_SESSION_LOCK,
     },
 };
 
@@ -27,6 +28,7 @@ const CLASS_PREFIX: &str = "VisionDesktopWalletLifecycle";
 pub(crate) struct WindowsWalletLifecycle {
     window: isize,
     instance: isize,
+    suspend_resume_notification: isize,
     class_name: Vec<u16>,
 }
 
@@ -112,9 +114,32 @@ impl WindowsWalletLifecycle {
             return Err(WalletRuntimeError::RuntimeUnavailable);
         }
 
+        // A window does not automatically receive Desktop Activity Moderator notifications on
+        // Modern Standby systems. Opt in explicitly so S0 low-power idle and traditional S3/S4
+        // transitions both deliver PBT_APMSUSPEND before desktop execution is paused.
+        // SAFETY: `window` is a live top-level window and the notification handle is retained
+        // until it is unregistered before window destruction.
+        let suspend_resume_notification = unsafe {
+            RegisterSuspendResumeNotification(
+                window.cast::<c_void>() as HANDLE,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            )
+        };
+        if suspend_resume_notification == 0 {
+            // SAFETY: session notification registration succeeded and all retained handles are
+            // still live. Destroying the window releases its Arc through WM_NCDESTROY.
+            unsafe {
+                WTSUnRegisterSessionNotification(window);
+                DestroyWindow(window);
+                UnregisterClassW(class_name.as_ptr(), instance);
+            }
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+
         Ok(Self {
             window: window as isize,
             instance: instance as isize,
+            suspend_resume_notification,
             class_name,
         })
     }
@@ -134,11 +159,13 @@ impl Drop for WindowsWalletLifecycle {
             // invalidation and releases the window-owned runtime reference.
             // SAFETY: the handles and class name were retained unchanged from registration.
             unsafe {
+                UnregisterSuspendResumeNotification(self.suspend_resume_notification);
                 WTSUnRegisterSessionNotification(window);
                 DestroyWindow(window);
                 UnregisterClassW(self.class_name.as_ptr(), instance);
             }
             self.window = 0;
+            self.suspend_resume_notification = 0;
         }
     }
 }

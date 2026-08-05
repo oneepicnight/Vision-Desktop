@@ -62,6 +62,12 @@ For each action:
 Unlock or resume must never restore old authority. The probe proves that the actual hidden listener
 revoked an existing operation and that the runtime can issue only fresh authority afterward.
 
+Record `powercfg /a` with suspend evidence. On an S0 Low Power Idle system, selecting Sleep must
+produce a real Modern Standby entry in the Windows System event log; merely turning off the display
+does not qualify. The production hidden window explicitly opts into Desktop Activity Moderator
+suspend/resume notifications, and failure to receive the notification is a failed gate even when
+Windows later resumes normally.
+
 ## Cross-session ownership
 
 Use the same Windows account in two genuine Windows sessions, such as console plus RDP or Fast User

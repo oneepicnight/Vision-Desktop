@@ -713,42 +713,67 @@ mod platform {
     use super::WalletRuntimeError;
     use crate::wallet::storage_security;
     use std::{mem::size_of, os::windows::ffi::OsStrExt, ptr};
+    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, HLOCAL},
+        Foundation::{
+            CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, HLOCAL, STATUS_SUCCESS,
+        },
         Security::{
             Authorization::{
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
             },
             PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
         },
-        System::{SystemInformation::GetProductInfo, Threading::CreateMutexW},
+        System::{
+            SystemInformation::{
+                GetProductInfo, OSVERSIONINFOEXW, OSVERSIONINFOW, PRODUCT_CORE,
+                PRODUCT_CORE_COUNTRYSPECIFIC, PRODUCT_CORE_N, PRODUCT_CORE_SINGLELANGUAGE,
+                PRODUCT_EDUCATION, PRODUCT_EDUCATION_N, PRODUCT_ENTERPRISE, PRODUCT_ENTERPRISE_N,
+                PRODUCT_ENTERPRISE_S, PRODUCT_ENTERPRISE_S_N, PRODUCT_PROFESSIONAL,
+                PRODUCT_PROFESSIONAL_N, PRODUCT_PRO_WORKSTATION, PRODUCT_PRO_WORKSTATION_N,
+            },
+            SystemServices::{
+                PRODUCT_PRO_FOR_EDUCATION, PRODUCT_PRO_FOR_EDUCATION_N, VER_NT_WORKSTATION,
+            },
+            Threading::CreateMutexW,
+        },
     };
 
-    // Explicit standard Windows Client allowlist. Unknown and future SKUs remain fail closed until
-    // they are reviewed. PRODUCT_SERVERRDSH (0xAF, Windows Enterprise multi-session) is
-    // intentionally absent, as are every Windows Server and IoT edition.
+    // Exact non-evaluation Windows Client edition allowlist. Enterprise E/G, Pro Single Language,
+    // Windows SE, Cloud, Server, multi-session, IoT, evaluation, unknown, and future editions are
+    // intentionally absent until reviewed.
     const SUPPORTED_WINDOWS_CLIENT_PRODUCTS: &[u32] = &[
-        0x04, // Enterprise
-        0x1B, // Enterprise N
-        0x30, // Professional
-        0x31, // Professional N
-        0x48, // Enterprise evaluation
-        0x54, // Enterprise N evaluation
-        0x62, // Home N
-        0x63, // Home China
-        0x64, // Home Single Language
-        0x65, // Home
-        0x79, // Education
-        0x7A, // Education N
-        0x7D, // Enterprise LTSC
-        0x7E, // Enterprise LTSC N
-        0x81, // Enterprise LTSC evaluation
-        0x82, // Enterprise LTSC N evaluation
-        0xA1, // Pro for Workstations
-        0xA2, // Pro for Workstations N
-        0xA4, // Pro Education
-        0xA5, // Pro Education N
+        PRODUCT_CORE,
+        PRODUCT_CORE_N,
+        PRODUCT_CORE_COUNTRYSPECIFIC,
+        PRODUCT_CORE_SINGLELANGUAGE,
+        PRODUCT_PROFESSIONAL,
+        PRODUCT_PROFESSIONAL_N,
+        PRODUCT_PRO_WORKSTATION,
+        PRODUCT_PRO_WORKSTATION_N,
+        PRODUCT_PRO_FOR_EDUCATION,
+        PRODUCT_PRO_FOR_EDUCATION_N,
+        PRODUCT_ENTERPRISE,
+        PRODUCT_ENTERPRISE_N,
+        PRODUCT_ENTERPRISE_S,
+        PRODUCT_ENTERPRISE_S_N,
+        PRODUCT_EDUCATION,
+        PRODUCT_EDUCATION_N,
     ];
+
+    // Windows 11 24H2, 25H2, and 26H1 are the only reviewed release families. Cumulative-update
+    // revisions do not change `dwBuildNumber`. New base builds remain denied until reviewed.
+    const SUPPORTED_WINDOWS_BUILD_FAMILIES: &[u32] = &[26100, 26200, 28000];
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct WindowsHostIdentity {
+        major: u32,
+        minor: u32,
+        build: u32,
+        service_pack_major: u16,
+        service_pack_minor: u16,
+        product_family: u8,
+    }
 
     pub(super) struct ProcessLock(isize);
 
@@ -787,15 +812,57 @@ mod platform {
     }
 
     fn ensure_supported_wallet_host() -> Result<(), WalletRuntimeError> {
+        let host = actual_windows_host_identity()?;
         let mut product_type = 0;
-        // Windows 10 and 11 both report version 10.0 to this API. A failure or a product outside
-        // the explicit standard-client allowlist denies wallet runtime initialization.
+        // Supplying the actual version prevents `GetProductInfo` from mapping the product to an
+        // older Windows product set. The separate build-family check still denies a future Windows
+        // release that retains major/minor version 10.0.
         // SAFETY: `product_type` is a valid writable output pointer for the duration of the call.
-        let succeeded = unsafe { GetProductInfo(10, 0, 0, 0, &mut product_type) };
-        if succeeded == 0 || !is_supported_windows_client_product(product_type) {
+        let succeeded = unsafe {
+            GetProductInfo(
+                host.major,
+                host.minor,
+                u32::from(host.service_pack_major),
+                u32::from(host.service_pack_minor),
+                &mut product_type,
+            )
+        };
+        if succeeded == 0 || !is_supported_windows_host(host, product_type) {
             return Err(WalletRuntimeError::UnsupportedWindowsHost);
         }
         Ok(())
+    }
+
+    fn actual_windows_host_identity() -> Result<WindowsHostIdentity, WalletRuntimeError> {
+        let mut version = OSVERSIONINFOEXW {
+            dwOSVersionInfoSize: u32::try_from(size_of::<OSVERSIONINFOEXW>())
+                .map_err(|_| WalletRuntimeError::UnsupportedWindowsHost)?,
+            ..Default::default()
+        };
+        // SAFETY: `version` has the required size field and is a valid writable structure. The
+        // API accepts either OSVERSIONINFOW or its layout-compatible extended form.
+        let status = unsafe {
+            RtlGetVersion((&mut version as *mut OSVERSIONINFOEXW).cast::<OSVERSIONINFOW>())
+        };
+        if status != STATUS_SUCCESS {
+            return Err(WalletRuntimeError::UnsupportedWindowsHost);
+        }
+        Ok(WindowsHostIdentity {
+            major: version.dwMajorVersion,
+            minor: version.dwMinorVersion,
+            build: version.dwBuildNumber,
+            service_pack_major: version.wServicePackMajor,
+            service_pack_minor: version.wServicePackMinor,
+            product_family: version.wProductType,
+        })
+    }
+
+    fn is_supported_windows_host(host: WindowsHostIdentity, product_type: u32) -> bool {
+        host.major == 10
+            && host.minor == 0
+            && host.product_family == VER_NT_WORKSTATION as u8
+            && SUPPORTED_WINDOWS_BUILD_FAMILIES.contains(&host.build)
+            && is_supported_windows_client_product(product_type)
     }
 
     fn is_supported_windows_client_product(product_type: u32) -> bool {
@@ -879,6 +946,37 @@ mod platform {
     }
 
     #[cfg(test)]
+    pub(super) fn supported_products_for_test() -> &'static [u32] {
+        SUPPORTED_WINDOWS_CLIENT_PRODUCTS
+    }
+
+    #[cfg(test)]
+    pub(super) fn supported_builds_for_test() -> &'static [u32] {
+        SUPPORTED_WINDOWS_BUILD_FAMILIES
+    }
+
+    #[cfg(test)]
+    pub(super) fn supported_host_for_test(
+        major: u32,
+        minor: u32,
+        build: u32,
+        product_family: u8,
+        product_type: u32,
+    ) -> bool {
+        is_supported_windows_host(
+            WindowsHostIdentity {
+                major,
+                minor,
+                build,
+                service_pack_major: 0,
+                service_pack_minor: 0,
+                product_family,
+            },
+            product_type,
+        )
+    }
+
+    #[cfg(test)]
     pub(super) fn ensure_supported_host_for_test() -> Result<(), WalletRuntimeError> {
         ensure_supported_wallet_host()
     }
@@ -921,28 +1019,107 @@ mod tests {
         vault::EncryptedWalletVault,
     };
     use std::fs;
+    #[cfg(windows)]
+    use windows_sys::Win32::System::{
+        SystemInformation::{
+            PRODUCT_CORE, PRODUCT_CORE_COUNTRYSPECIFIC, PRODUCT_CORE_N,
+            PRODUCT_CORE_SINGLELANGUAGE, PRODUCT_EDUCATION, PRODUCT_EDUCATION_N,
+            PRODUCT_ENTERPRISE, PRODUCT_ENTERPRISE_E, PRODUCT_ENTERPRISE_EVALUATION,
+            PRODUCT_ENTERPRISE_N, PRODUCT_ENTERPRISE_N_EVALUATION, PRODUCT_ENTERPRISE_S,
+            PRODUCT_ENTERPRISE_S_EVALUATION, PRODUCT_ENTERPRISE_S_N,
+            PRODUCT_ENTERPRISE_S_N_EVALUATION, PRODUCT_PROFESSIONAL, PRODUCT_PROFESSIONAL_N,
+            PRODUCT_PRO_WORKSTATION, PRODUCT_PRO_WORKSTATION_N, PRODUCT_STANDARD_SERVER,
+        },
+        SystemServices::{
+            PRODUCT_CLOUDEDITION, PRODUCT_CLOUDEDITIONN, PRODUCT_ENTERPRISEG, PRODUCT_ENTERPRISEGN,
+            PRODUCT_IOTENTERPRISE, PRODUCT_PRO_FOR_EDUCATION, PRODUCT_PRO_FOR_EDUCATION_N,
+            PRODUCT_PRO_SINGLE_LANGUAGE, PRODUCT_SERVERRDSH, VER_NT_SERVER, VER_NT_WORKSTATION,
+        },
+    };
 
     #[cfg(windows)]
     #[test]
-    fn wallet_host_allowlist_accepts_standard_clients_and_rejects_multisession() {
-        for product in [
-            0x04, 0x1B, 0x30, 0x31, 0x62, 0x63, 0x64, 0x65, 0x79, 0x7A, 0x7D, 0x7E, 0xA1, 0xA2,
-            0xA4, 0xA5,
-        ] {
+    fn wallet_host_allowlist_is_exact_and_rejects_evaluation_and_multisession() {
+        let expected = [
+            PRODUCT_CORE,
+            PRODUCT_CORE_N,
+            PRODUCT_CORE_COUNTRYSPECIFIC,
+            PRODUCT_CORE_SINGLELANGUAGE,
+            PRODUCT_PROFESSIONAL,
+            PRODUCT_PROFESSIONAL_N,
+            PRODUCT_PRO_WORKSTATION,
+            PRODUCT_PRO_WORKSTATION_N,
+            PRODUCT_PRO_FOR_EDUCATION,
+            PRODUCT_PRO_FOR_EDUCATION_N,
+            PRODUCT_ENTERPRISE,
+            PRODUCT_ENTERPRISE_N,
+            PRODUCT_ENTERPRISE_S,
+            PRODUCT_ENTERPRISE_S_N,
+            PRODUCT_EDUCATION,
+            PRODUCT_EDUCATION_N,
+        ];
+        assert_eq!(platform::supported_products_for_test(), expected);
+        for product in expected {
             assert!(platform::supported_product_for_test(product));
         }
         for product in [
             0x00, // Unknown
-            0x07, // Standard Server
-            0x08, // Datacenter Server
-            0x4C, // MultiPoint Standard Server
-            0x4D, // MultiPoint Premium Server
-            0xAF, // Enterprise for Virtual Desktops / multi-session
-            0xBC, // IoT Enterprise
+            PRODUCT_ENTERPRISE_EVALUATION,
+            PRODUCT_ENTERPRISE_N_EVALUATION,
+            PRODUCT_ENTERPRISE_S_EVALUATION,
+            PRODUCT_ENTERPRISE_S_N_EVALUATION,
+            PRODUCT_ENTERPRISE_E,
+            PRODUCT_ENTERPRISEG,
+            PRODUCT_ENTERPRISEGN,
+            PRODUCT_PRO_SINGLE_LANGUAGE,
+            PRODUCT_CLOUDEDITION,
+            PRODUCT_CLOUDEDITIONN,
+            PRODUCT_STANDARD_SERVER,
+            PRODUCT_SERVERRDSH,
+            PRODUCT_IOTENTERPRISE,
             u32::MAX,
         ] {
             assert!(!platform::supported_product_for_test(product));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wallet_host_version_and_family_boundary_rejects_future_back_mapping() {
+        assert_eq!(platform::supported_builds_for_test(), [26100, 26200, 28000]);
+        for build in platform::supported_builds_for_test() {
+            assert!(platform::supported_host_for_test(
+                10,
+                0,
+                *build,
+                VER_NT_WORKSTATION as u8,
+                PRODUCT_CORE,
+            ));
+        }
+
+        // Even if a future release were back-mapped to an allowlisted Home code, its unreviewed
+        // version/build family and any non-workstation family remain fail closed.
+        assert!(!platform::supported_host_for_test(
+            11,
+            0,
+            28000,
+            VER_NT_WORKSTATION as u8,
+            PRODUCT_CORE,
+        ));
+        assert!(!platform::supported_host_for_test(
+            10,
+            0,
+            29000,
+            VER_NT_WORKSTATION as u8,
+            PRODUCT_CORE,
+        ));
+        assert!(!platform::supported_host_for_test(
+            10,
+            0,
+            26200,
+            VER_NT_SERVER as u8,
+            PRODUCT_CORE,
+        ));
     }
 
     #[cfg(windows)]

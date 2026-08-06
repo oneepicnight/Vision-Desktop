@@ -38,11 +38,12 @@ the non-inheritable process lease until teardown. The name is shared across cons
 switching, and RDP sessions for the same user, while its DACL excludes other ordinary users. No
 wallet command can access the runtime yet.
 
-Wallet custody support is limited to standard Windows Client with one interactive session per
-Windows account. The global namespace remains defense in depth; it does not make concurrent
-same-account Windows Server/RDS or multi-session virtual desktop operation supported. Native
-product classification rejects Server, multi-session, IoT, unknown, and future unreviewed SKUs
-before wallet custody state is created.
+Wallet custody support is limited to the reviewed Windows 11 Client build/edition matrix in
+`WALLET_RUNTIME_SECURITY.md`, with one interactive session per Windows account. The global namespace
+remains defense in depth; it does not make concurrent same-account Windows Server/RDS or
+multi-session virtual desktop operation supported. Native actual-version, workstation-family, build,
+and product classification rejects every unlisted or future host before wallet custody state is
+created.
 
 The private runtime also owns a hidden Rust-only Windows notification window. Windows session lock,
 suspend/standby, logoff/shutdown, and native listener teardown synchronously lock the wallet session

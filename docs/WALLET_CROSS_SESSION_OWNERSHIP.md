@@ -3,10 +3,10 @@
 ## Status
 
 The private Windows wallet runtime enforces one wallet-owning Vision Desktop process for the
-current Windows user. The supported product boundary is standard Windows Client with one
-interactive session per Windows account. Concurrent same-account Windows Server/RDS, Azure
-Virtual Desktop multi-session, and other multi-session hosts are unsupported. Wallet commands and
-permissions remain unregistered.
+current Windows user. The supported product boundary is the exact Windows 11 Client build/edition
+matrix in `WALLET_RUNTIME_SECURITY.md`, with one interactive session per Windows account. Concurrent
+same-account Windows Server/RDS, Azure Virtual Desktop multi-session, and other multi-session hosts
+are unsupported. Wallet commands and permissions remain unregistered.
 
 ## Ownership object
 

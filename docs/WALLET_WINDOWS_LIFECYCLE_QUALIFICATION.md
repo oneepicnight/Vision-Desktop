@@ -70,8 +70,9 @@ Windows later resumes normally.
 
 ## Wallet process ownership
 
-The supported wallet boundary is standard Windows Client with one interactive session per Windows
-account. In that supported session, start the owner process:
+The supported wallet boundary is the exact Windows 11 Client build/edition matrix in
+`WALLET_RUNTIME_SECURITY.md`, with one interactive session per Windows account. In that supported
+session, start the owner process:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/run-wallet-windows-qualification.ps1 -Action CrossSessionOwner -EvidenceDirectory C:\Vision\wallet-qualification-evidence

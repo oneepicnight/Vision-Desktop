@@ -11,6 +11,30 @@ the WebView and no wallet command can invoke it yet.
 The runtime exists so lifecycle and exclusion controls are established before any secret-bearing
 command is designed or exposed.
 
+## Supported Windows host matrix
+
+Wallet custody is limited to one interactive session per Windows account on these Windows 11
+release families:
+
+- 24H2, build family 26100;
+- 25H2, build family 26200; and
+- 26H1, build family 28000.
+
+Within those build families, the exact non-evaluation edition allowlist is:
+
+- Home, Home N, Home China, and Home Single Language;
+- Pro and Pro N;
+- Pro for Workstations and Pro for Workstations N;
+- Pro Education and Pro Education N;
+- Enterprise and Enterprise N;
+- Enterprise LTSC and Enterprise LTSC N; and
+- Education and Education N.
+
+Windows 10, evaluation editions, Enterprise E/G, Pro Single Language, Windows SE, Cloud editions,
+Server/RDS, Enterprise multi-session, IoT, unlisted editions, unknown values, and future Windows
+versions or build families are deliberately unsupported. Supporting another host requires a code,
+test, documentation, and independent-review update; it is never inferred from a broad Client label.
+
 ## Independent process ownership
 
 The runtime atomically creates a per-user Windows kernel mutex in the global namespace:
@@ -19,9 +43,8 @@ handle for the runtime's entire lifetime. The SID is hashed before it enters the
 object DACL grants access only to the current user, Local System, and built-in administrators. A
 second process for the same Windows user cannot create wallet runtime state and fails closed with a
 fixed, non-sensitive startup error. The kernel object is global across Windows sessions as defense
-in depth, but the supported product boundary is standard Windows Client with one interactive
-session per Windows account. Concurrent same-account Windows Server/RDS and other multi-session
-environments are unsupported.
+in depth, but the supported product boundary is the exact matrix above. Concurrent same-account
+Windows Server/RDS and other multi-session environments are unsupported.
 
 This lock is independent of the Tauri single-instance plugin and closes the reviewed interval
 between that plugin's Windows mutex creation and hidden receiver-window creation. Normal duplicates
@@ -184,7 +207,9 @@ forced-termination recovery in the supported single interactive session. Concurr
 console/RDP, Fast User Switching, Windows Server/RDS, and multi-session virtual desktop operation
 remain unsupported rather than silently qualified.
 
-Runtime initialization queries the native Windows product classification and accepts only an
-explicit allowlist of standard Windows Client SKUs. Windows Server, Windows Enterprise for Virtual
-Desktops/multi-session, IoT, unknown, and future unreviewed product codes fail closed with the fixed
+Runtime initialization obtains the actual Windows major, minor, build, service-pack, and product
+family through native `RtlGetVersion`, requires the workstation family and one of the three reviewed
+build families, and passes the actual version into `GetProductInfo`. Only the exact named edition
+allowlist above is accepted. This prevents a future release from entering custody through
+`GetProductInfo` backward product mapping. Any API failure or unlisted identity returns the fixed
 `unsupported_windows_host` error before the wallet process lease or custody state is created.

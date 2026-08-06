@@ -33,11 +33,13 @@ or silently modified request may acquire signing authority.
 1. `Locked`
    - No preview or signing authority exists.
 2. `Ready`
-   - The wallet is unlocked inside Rust and the supervised Core process is proven to use the
-     approved private-loopback release.
+   - The wallet is unlocked inside Rust and the client holds a current `CoreConnectionAuthority`
+     proving both the approved private-loopback process generation and the identity of the HTTP
+     peer serving this operation.
 3. `Preparing`
-   - Rust obtains current balance, exact next canonical nonce, canonical tip, and fee information
-     directly from Core. React cannot supply an authoritative value.
+   - Rust reads the current balance, exact next canonical nonce, and canonical chain-tip height
+     from that peer. Fee policy comes from the authority's exact compatibility contract rather
+     than an unverified Core fee query. React cannot supply an authoritative value.
 4. `Reviewable`
    - Rust constructs the complete unsigned transaction and identifier.
    - React may receive a public preview plus one random opaque handle bound to the main window,
@@ -78,9 +80,13 @@ The frontend request must be bounded, deny unknown fields, and contain only:
 It must not contain sender, nonce, fee, tip, module, method, Core port, window label, session
 identifier, transaction identifier, signed bytes, retry instruction, or replacement policy.
 
-Rust derives all other fields. The first policy is fixed to `cash::transfer`, the current canonical
-nonce, zero tip, and the approved minimum fee limit. Custom tips, future nonces, replacements,
-arbitrary module/method calls, and batches require separate approval.
+Rust derives all other fields. Balance and canonical nonce are fresh reads from the exact peer
+bound by `CoreConnectionAuthority`. The first policy fixes `cash::transfer`, tip `0`, charged fee
+`1 + tip` raw units, and fee limit `201` raw units from the exact versioned compatibility contract;
+Core exposes no separate fee-policy endpoint for this contract. If the running release's fee rules
+differ, authority construction fails closed and new compatibility evidence, vectors, and review
+are required. Custom tips, future nonces, replacements, arbitrary module/method calls, and batches
+require separate approval.
 
 The preview displays exact, non-floating-point values:
 
@@ -126,22 +132,96 @@ separate security and usability decision.
 
 ## Private Core client
 
-The transaction path must not reuse the Explorer HTTP helper unchanged. It needs a Rust-only client
-that:
+The transaction path must not reuse the Explorer HTTP helper unchanged. It requires a private
+Rust-only client whose production entry points accept a `CoreConnectionAuthority` rather than a
+URL, host, port, PID, process generation, binary hash, or compatibility identifier.
 
-- obtains port and process identity from supervised Core state;
-- connects only to the approved loopback literal and refuses redirects;
-- verifies the running binary and manifest against the approved release;
-- uses explicit connect, write, first-byte, and total timeouts;
-- bounds every request and response body before parsing;
+### CoreConnectionAuthority
+
+`CoreConnectionAuthority` is an immutable, non-serializable, non-cloneable, non-debuggable Rust
+authority with private fields. Only the Core supervisor may produce it. Ordinary callers cannot
+construct, deserialize, reconstruct, or modify one from public process or network values.
+
+The authority binds:
+
+- the supervisor's monotonic process generation;
+- a held Windows process handle, PID, and process creation identity so PID reuse cannot satisfy it;
+- exact verified binary and manifest identity;
+- the approved wallet/Core contract version;
+- the literal IPv4 loopback address and supervisor-owned API port;
+- the supported peer-binding mechanism and its per-launch state; and
+- an invalidation source triggered synchronously by Core exit, restart, or compatibility change.
+
+Proving what Desktop launched is not sufficient. Before any response is trusted or signed envelope
+is sent, the client must prove that the process answering the exact connected HTTP socket is that
+same supervised process generation. The supported Core release and compatibility manifest must
+define one of these reviewed mechanisms:
+
+1. an operating-system-verifiable mapping from the exact connected socket/tuple to the held
+   process identity, checked without a path or port ownership race; or
+2. a per-connection authenticated challenge/response using a random per-launch secret delivered to
+   Core through a supervisor-controlled inherited channel, never through arguments, environment,
+   ordinary files, React, logs, or support packages.
+
+PID, configured port, binary hash, listener presence, or a pre-connect listener-owner check alone
+does not prove the connected peer. If the supported release cannot supply one complete mechanism,
+production `CoreConnectionAuthority` construction remains unavailable.
+
+For every operation the client must:
+
+1. acquire a generation-bound operation lease from the supervisor;
+2. prove that the held process is alive and still has the same creation identity;
+3. prove the current compatibility manifest and binary identity;
+4. open a fresh connection to the literal bound loopback endpoint;
+5. prove the peer identity on that same connection before exchanging trusted wallet data;
+6. execute exactly one bounded typed request without retry;
+7. revalidate supervisor generation, process liveness/identity, peer binding, and compatibility
+   after the complete response; and
+8. discard the response if any generation, process, port, peer, or compatibility value changed.
+
+Core exit or restart invalidates all leases and connections before a later generation can become
+ready. A pooled connection may never cross generations. The initial implementation uses a fresh
+connection per operation so no stale pool can survive invalidation.
+
+### Transport restrictions
+
+The client:
+
+- uses only the literal `127.0.0.1` address from the authority and performs no DNS resolution;
+- disables environment, system, PAC, and library-default proxies;
+- refuses redirects;
+- disables cookies, ambient credentials, authentication negotiation, and referrer propagation;
+- uses no automatic transport or application retry;
+- does not reuse a connection across operations or process generations;
+- pins the approved HTTP protocol behavior for the supported Core release;
+- applies explicit connect, write, first-byte, and total timeouts;
+- caps every request and response body before parsing;
 - requires exact typed responses and content types where specified;
 - returns stable wallet error codes rather than raw library or Core text;
-- never logs signed transactions, addresses, nonces, identifiers, response bodies, or
-  timing-correlated activity; and
-- remains inaccessible to React except through later reviewed commands.
+- never logs signed transactions, addresses, nonces, identifiers, response bodies, peer-binding
+  secrets, or timing-correlated activity; and
+- remains inaccessible to React except through later reviewed wallet commands.
 
-Fresh Rust-side Core reads supply balance and nonce. React state, Explorer results, the reducer, and
-the journal are never signing inputs.
+Fresh Rust-side reads through this authority supply balance, nonce, and chain-tip observations.
+React state, Explorer results, the reducer, and the journal are never signing inputs.
+
+### First private client tranche
+
+Design approval may authorize only an unregistered, read-only client tranche for exact bounded
+account-balance, account-nonce, status, canonical-chain-tip, and peer-identity operations. It must
+not implement or connect:
+
+- `POST /transactions` or any other write request;
+- signed-envelope construction or transport;
+- reconciliation-marker orchestration;
+- wallet-seed, unlocked-session, activation-proof, or signing access;
+- Tauri commands, AppManifest entries, permissions, capabilities, frontend wrappers, or forms; or
+- changes to lifecycle or signing approval flags.
+
+Production authority construction remains unavailable until a supported private-loopback Core
+release and its exact peer-binding mechanism are present in the Desktop compatibility manifest.
+Test-only mock authorities and listeners may validate parsing and failure behavior, but they cannot
+qualify the production peer-identity boundary.
 
 ## Signing
 
@@ -237,6 +317,8 @@ Before registration, tests cover:
 - preview expiry, replay, cancellation, window/session/wallet mismatch, and revocation;
 - lifecycle interruption and panic at every state;
 - all transaction validation and Core compatibility failures;
+- stale or competing listeners, PID reuse, process exit/restart, process-generation changes,
+  socket-owner mismatch, peer-authentication failure, and compatibility changes;
 - redirects, oversized/truncated bodies, bad content types, timeouts, unknown fields, mismatched
   identifiers/nonces/signatures, and replacement decisions;
 - accepted-response loss, restart during ambiguity, journal failure, and no automatic retry;
@@ -251,7 +333,7 @@ listeners do not replace this gate.
 ## Activation order
 
 1. Approve this design.
-2. Implement the private Core client without commands.
+2. Implement only the unregistered, bounded, read-only private Core client tranche.
 3. Implement private intent and preview authority.
 4. Implement and qualify native final confirmation.
 5. Connect unlocked-session signing.

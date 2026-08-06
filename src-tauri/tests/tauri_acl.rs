@@ -300,6 +300,10 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let secret_input_source = read("src/wallet/secret_input.rs");
     let secrets_source = read("src/wallet/secrets.rs");
     let ceremony_source = read("src/wallet/recovery_ceremony.rs");
+    let ceremony_production = ceremony_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("native ceremony module has production source");
     let panic_policy_source = read("src/wallet/panic_policy.rs");
     let public_request_source = read("src/wallet/public_request.rs");
     let public_request_production = public_request_source
@@ -432,6 +436,11 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(!ceremony_source.contains("wide_null(\"STATIC\")"));
     assert!(!ceremony_source.contains("GetWindowTextW"));
     assert!(!ceremony_source.contains("SetWindowTextW"));
+    assert!(ceremony_production.contains("ImmAssociateContextEx(window, null_mut(), 0)"));
+    assert!(ceremony_production.contains("ImmGetContext(window)"));
+    assert!(ceremony_production.contains("ImmReleaseContext(window, context)"));
+    assert!(ceremony_production.contains("disable_text_services(button)"));
+    assert!(!ceremony_production.contains("IACE_CHILDREN"));
     assert!(!public_request_production.contains("#[tauri::command]"));
     assert!(!public_request_production.contains("password:"));
     assert!(!public_request_production.contains("owner_window:"));

@@ -23,7 +23,7 @@ use windows_sys::Win32::{
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::{
-            Ime::{ImmAssociateContextEx, IACE_CHILDREN, IACE_IGNORENOCONTEXT},
+            Ime::{ImmAssociateContextEx, ImmGetContext, ImmReleaseContext},
             KeyboardAndMouse::{EnableWindow, SetFocus},
         },
         WindowsAndMessaging::{
@@ -497,7 +497,7 @@ fn create_button(
     width: i32,
     control_id: usize,
 ) -> HWND {
-    unsafe {
+    let button = unsafe {
         CreateWindowExW(
             0,
             class_name.as_ptr(),
@@ -512,7 +512,15 @@ fn create_button(
             GetModuleHandleW(null()) as HINSTANCE,
             null(),
         )
+    };
+    if button.is_null() {
+        return null_mut();
     }
+    if !disable_text_services(button) {
+        unsafe { DestroyWindow(button) };
+        return null_mut();
+    }
+    button
 }
 
 fn centered_position(owner: HWND) -> (i32, i32) {
@@ -1028,9 +1036,24 @@ fn create_capture_buttons(window: HWND) -> bool {
 }
 
 fn disable_text_services(window: HWND) -> bool {
-    // A null input context disassociates the IME. Applying it to children prevents a future
-    // standard child or text service from silently inheriting an input context.
-    unsafe { ImmAssociateContextEx(window, null_mut(), IACE_CHILDREN | IACE_IGNORENOCONTEXT) != 0 }
+    // With no child-only flag, this changes the association of the exact window supplied. Every
+    // focusable child is passed here immediately after creation because later children otherwise
+    // inherit the thread's default input context.
+    if window.is_null() || unsafe { ImmAssociateContextEx(window, null_mut(), 0) } == 0 {
+        return false;
+    }
+    input_context_is_absent(window)
+}
+
+fn input_context_is_absent(window: HWND) -> bool {
+    let context = unsafe { ImmGetContext(window) };
+    if context.is_null() {
+        return true;
+    }
+    // ImmGetContext requires one balanced release whenever it returns a context. The association
+    // check still fails even if releasing that unexpected context succeeds.
+    let _released = unsafe { ImmReleaseContext(window, context) };
+    false
 }
 
 const fn is_blocked_text_service_message(message: u32) -> bool {
@@ -1056,6 +1079,7 @@ const fn is_blocked_text_service_message(message: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayoutNameW;
 
     #[test]
     fn secret_controls_are_owner_drawn_and_have_no_standard_text_storage() {
@@ -1070,6 +1094,7 @@ mod tests {
     #[test]
     fn secret_message_routes_are_explicitly_blocked() {
         let source = include_str!("recovery_ceremony.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
         for blocked in [
             "WM_COPY",
             "WM_CUT",
@@ -1084,7 +1109,10 @@ mod tests {
         ] {
             assert!(source.contains(blocked), "missing {blocked} protection");
         }
-        assert!(source.contains("ImmAssociateContextEx"));
+        assert!(production.contains("ImmAssociateContextEx"));
+        assert!(production.contains("ImmGetContext"));
+        assert!(production.contains("ImmReleaseContext"));
+        assert!(!production.contains("IACE_CHILDREN"));
     }
 
     #[test]
@@ -1186,5 +1214,110 @@ mod tests {
         assert!(capture_state.input.is_empty());
         assert!(capture_state.captured.is_none());
         assert_eq!(unsafe { IsWindow(capture_window) }, 0);
+    }
+
+    #[test]
+    fn operating_system_reports_no_context_for_secret_window_or_focusable_children() {
+        let class_name = wide_null("BUTTON");
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                null(),
+                WS_POPUP,
+                0,
+                0,
+                100,
+                100,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        assert!(!parent.is_null());
+        assert!(disable_text_services(parent));
+        assert!(input_context_is_absent(parent));
+
+        let child_text = wide_null("Public test button");
+        let child = create_button(
+            parent,
+            &class_name,
+            &child_text,
+            BS_PUSHBUTTON as u32,
+            0,
+            0,
+            80,
+            CANCEL_BUTTON_ID,
+        );
+        assert!(!child.is_null());
+        assert!(input_context_is_absent(child));
+
+        unsafe {
+            DestroyWindow(child);
+            DestroyWindow(parent);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a human operator with Microsoft Pinyin or Japanese IME enabled"]
+    fn real_windows_ime_operator_qualification_harness() {
+        let qualification_label = std::env::var("VISION_WALLET_IME_QUALIFICATION_LABEL").expect(
+            "set VISION_WALLET_IME_QUALIFICATION_LABEL to microsoft-pinyin or microsoft-japanese",
+        );
+        assert!(matches!(
+            qualification_label.as_str(),
+            "microsoft-pinyin" | "microsoft-japanese"
+        ));
+        let mut keyboard_layout = [0_u16; 9];
+        assert_ne!(
+            unsafe { GetKeyboardLayoutNameW(keyboard_layout.as_mut_ptr()) },
+            0,
+            "active keyboard layout could not be recorded",
+        );
+        let keyboard_layout = String::from_utf16(&keyboard_layout[..8]).unwrap();
+        println!(
+            "VISION_WALLET_IME_QUALIFICATION label={qualification_label} keyboard_layout={keyboard_layout}"
+        );
+        println!(
+            "For each dialog, confirm no composition/candidate UI appears and enter: VisionImeTestOnly-1234"
+        );
+
+        let class_name = wide_null("BUTTON");
+        let owner_title = wide_null("Vision Wallet IME Qualification Harness");
+        let owner = unsafe {
+            CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                owner_title.as_ptr(),
+                WS_POPUP | WS_CAPTION,
+                100,
+                100,
+                520,
+                180,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        assert!(!owner.is_null());
+        unsafe { ShowWindow(owner, SW_SHOW) };
+
+        let result = (|| {
+            let captured =
+                run_native_secret_capture(owner, SecretCapturePurpose::UnlockPassword, &|| true)?;
+            drop(captured);
+
+            let expected = FixedSecretUtf16::from_ascii(b"VisionImeTestOnly-1234")
+                .map_err(|_| NativeSecretCeremonyError::InvalidInput)?;
+            run_native_ceremony(owner, expected, &|| true)
+                .map_err(|_| NativeSecretCeremonyError::NativeUiUnavailable)
+        })();
+        unsafe { DestroyWindow(owner) };
+        result.expect("operator IME qualification did not complete");
+        println!(
+            "VISION_WALLET_IME_QUALIFICATION_PASSED label={qualification_label} keyboard_layout={keyboard_layout}"
+        );
     }
 }

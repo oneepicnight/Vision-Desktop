@@ -2,8 +2,9 @@
 
 ## Scope
 
-This implementation follows the independently approved design at parent commit `bd5169a` and
-corrects the implementation findings reported against commit `d3d3134`.
+This implementation follows the independently approved design at parent commit `bd5169a`, corrects
+the implementation findings reported against commit `d3d3134`, and corrects the ineffective
+child-only IME association reported against commit `ed8340c`.
 It is deliberately unreachable from the Tauri command surface and from React.
 
 The exact implementation commit must receive another independent security review before any
@@ -21,7 +22,10 @@ added.
   main native window handle.
 - Secret display and input are owner-drawn. No secret is assigned to `STATIC`, `EDIT`, a window
   title, clipboard, accessibility text, or a WebView value.
-- Every secret window disassociates Windows IME/text services before accepting input. Clipboard,
+- Every top-level secret window is directly disassociated from Windows IME/text services before
+  accepting input. Each focusable child is separately disassociated immediately after creation.
+  Balanced `ImmGetContext`/`ImmReleaseContext` verification requires the actual association to be
+  absent for both parent and child; a call that merely reports success is insufficient. Clipboard,
   text retrieval, context-menu, all Win32 IME result/context/request/notification/control/key
   routes (including `WM_IME_CHAR` and `WM_IME_SETCONTEXT`), and input-language changes fail closed,
   wipe the ceremony, and close the native window. There is no standard native or WebView fallback.
@@ -69,6 +73,8 @@ The implementation adds coverage for:
 - unknown, duplicate, secret-bearing, oversized, and noncanonical public request fields;
 - owner-drawn secret handling and blocked native text/clipboard/IME routes;
 - direct `WM_IME_CHAR` and input-language-change injection against both secret-window procedures;
+- live Windows input-context absence checks for a top-level window and a subsequently created
+  focusable child;
 - panic before/after bounded request acceptance, capability consumption, every native secret
   ceremony, cryptographic preparation, recovery acknowledgement/publication/verification, vault
   publication, session installation, selection validation/completion, and success commitment;
@@ -76,7 +82,10 @@ The implementation adds coverage for:
 - fixed generic panic error and post-panic session invalidation; and
 - canonical lowercase recovery capability enforcement.
 
-Real operator-driven accessibility and Windows IME/international-keyboard testing, Windows
+An ignored, non-production Microsoft Pinyin/Japanese operator harness and evidence procedure are
+documented in `WALLET_IME_OPERATOR_QUALIFICATION.md`. The current US-only workstation cannot supply
+that real IME evidence, so it remains explicitly pending. Operator-driven accessibility and
+Windows IME/international-keyboard testing, Windows
 lock/suspend/teardown, dump,
 allocator, and packaged recovery qualification remains part of the final security evidence and is
 not replaced by unit tests.

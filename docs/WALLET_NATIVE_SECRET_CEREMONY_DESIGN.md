@@ -66,6 +66,9 @@ control that:
 - holds the actual UTF-16 input only in a bounded `Zeroizing<Vec<u16>>` owned by Rust;
 - renders only a fixed bullet count and never sets the secret as native window text;
 - disables clipboard paste/copy, drag-and-drop, context menus, and automatic text services;
+- directly disassociates the top-level secret window from its input context, separately
+  disassociates every focusable child immediately after creation, and verifies each association is
+  absent using balanced `ImmGetContext`/`ImmReleaseContext` handling;
 - does not expose a value through accessibility APIs;
 - supports deliberate backspace, cancellation, focus, and keyboard navigation behavior;
 - converts once into a bounded zeroizing UTF-8 secret by ownership-controlled code;

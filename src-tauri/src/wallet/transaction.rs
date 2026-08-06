@@ -6,7 +6,7 @@
     )
 )]
 
-use super::{account::derive_account_identity, secrets::WalletSeed};
+use super::{account::derive_account_identity, runtime::WalletSigningPermit, secrets::WalletSeed};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -68,6 +68,7 @@ struct CashTransferArgs<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::wallet) enum WalletTransactionError {
+    SigningUnavailable,
     InvalidRecipient,
     ZeroAmount,
     TransferToSelf,
@@ -80,6 +81,7 @@ pub(in crate::wallet) enum WalletTransactionError {
 impl fmt::Display for WalletTransactionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::SigningUnavailable => "wallet signing authority is unavailable",
             Self::InvalidRecipient => "recipient account address is invalid",
             Self::ZeroAmount => "transfer amount must be greater than zero",
             Self::TransferToSelf => "transfer recipient must differ from the sender",
@@ -117,9 +119,13 @@ pub(in crate::wallet) fn canonical_transaction_id(
 /// verified internally, but no UI may reach signing until every remaining
 /// compatibility and security gate passes.
 pub(in crate::wallet) fn sign_cash_transfer(
+    permit: &WalletSigningPermit<'_>,
     seed: &WalletSeed,
     draft: &CashTransferDraft,
 ) -> Result<VisionTransaction, WalletTransactionError> {
+    permit
+        .ensure_current()
+        .map_err(|_| WalletTransactionError::SigningUnavailable)?;
     if !is_lowercase_hex_32_bytes(&draft.recipient) {
         return Err(WalletTransactionError::InvalidRecipient);
     }
@@ -173,6 +179,7 @@ fn is_lowercase_hex_32_bytes(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wallet::runtime::WalletRuntimeState;
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
     const CORE_SAMPLE_PAYLOAD_HEX: &str = concat!(
@@ -227,6 +234,15 @@ mod tests {
         }
     }
 
+    fn sign_vector(
+        runtime: &WalletRuntimeState,
+        seed: &WalletSeed,
+        draft: &CashTransferDraft,
+    ) -> Result<VisionTransaction, WalletTransactionError> {
+        let permit = runtime.begin_signing_operation("main").unwrap();
+        sign_cash_transfer(&permit, seed, draft)
+    }
+
     #[test]
     fn canonical_payload_matches_exact_core_rc2_vector() {
         let payload = canonical_unsigned_payload(&core_sample_transaction()).unwrap();
@@ -252,8 +268,13 @@ mod tests {
 
     #[test]
     fn cash_transfer_signature_matches_independent_fixed_vector() {
-        let transaction =
-            sign_cash_transfer(&WalletSeed::from_bytes([7; 32]), &signed_vector_draft()).unwrap();
+        let runtime = WalletRuntimeState::for_test();
+        let transaction = sign_vector(
+            &runtime,
+            &WalletSeed::from_bytes([7; 32]),
+            &signed_vector_draft(),
+        )
+        .unwrap();
 
         assert_eq!(transaction.sender_pubkey, SIGNED_VECTOR_PUBLIC_KEY);
         assert_eq!(
@@ -277,65 +298,89 @@ mod tests {
     }
 
     #[test]
+    fn signing_refuses_runtime_authority_revoked_after_admission() {
+        let runtime = WalletRuntimeState::for_test();
+        let permit = runtime.begin_signing_operation("main").unwrap();
+        runtime.invalidate_all().unwrap();
+
+        assert_eq!(
+            sign_cash_transfer(
+                &permit,
+                &WalletSeed::from_bytes([7; 32]),
+                &signed_vector_draft(),
+            )
+            .unwrap_err(),
+            WalletTransactionError::SigningUnavailable
+        );
+    }
+
+    #[test]
     fn cash_transfer_builder_rejects_unsafe_shapes_before_signing() {
+        let runtime = WalletRuntimeState::for_test();
         let seed = WalletSeed::from_bytes([7; 32]);
         let mut draft = signed_vector_draft();
         draft.recipient = "AA".repeat(32);
         assert_eq!(
-            sign_cash_transfer(&seed, &draft).unwrap_err(),
+            sign_vector(&runtime, &seed, &draft).unwrap_err(),
             WalletTransactionError::InvalidRecipient
         );
 
         let mut draft = signed_vector_draft();
         draft.amount_raw_units = 0;
         assert_eq!(
-            sign_cash_transfer(&seed, &draft).unwrap_err(),
+            sign_vector(&runtime, &seed, &draft).unwrap_err(),
             WalletTransactionError::ZeroAmount
         );
 
         let mut draft = signed_vector_draft();
         draft.fee_limit_raw_units = MIN_CASH_TRANSFER_FEE_LIMIT - 1;
         assert_eq!(
-            sign_cash_transfer(&seed, &draft).unwrap_err(),
+            sign_vector(&runtime, &seed, &draft).unwrap_err(),
             WalletTransactionError::FeeLimitTooLow
         );
 
         let mut draft = signed_vector_draft();
         draft.tip_raw_units = u64::MAX;
         assert_eq!(
-            sign_cash_transfer(&seed, &draft).unwrap_err(),
+            sign_vector(&runtime, &seed, &draft).unwrap_err(),
             WalletTransactionError::FeeArithmeticOverflow
         );
 
         let mut draft = signed_vector_draft();
         draft.tip_raw_units = MIN_CASH_TRANSFER_FEE_LIMIT;
         assert_eq!(
-            sign_cash_transfer(&seed, &draft).unwrap_err(),
+            sign_vector(&runtime, &seed, &draft).unwrap_err(),
             WalletTransactionError::FeeExceedsLimit
         );
 
         let mut draft = signed_vector_draft();
         draft.recipient = derive_account_identity(&seed).address;
         assert_eq!(
-            sign_cash_transfer(&seed, &draft).unwrap_err(),
+            sign_vector(&runtime, &seed, &draft).unwrap_err(),
             WalletTransactionError::TransferToSelf
         );
     }
 
     #[test]
     fn safe_draft_uses_current_nonce_and_non_replacing_fee_policy() {
+        let runtime = WalletRuntimeState::for_test();
         let draft = CashTransferDraft::for_current_nonce(7, "22".repeat(32), 42);
 
         assert_eq!(draft.nonce, 7);
         assert_eq!(draft.tip_raw_units, 0);
         assert_eq!(draft.fee_limit_raw_units, 201);
-        sign_cash_transfer(&WalletSeed::from_bytes([7; 32]), &draft).unwrap();
+        sign_vector(&runtime, &WalletSeed::from_bytes([7; 32]), &draft).unwrap();
     }
 
     #[test]
     fn signed_transaction_json_contains_no_secret_material() {
-        let transaction =
-            sign_cash_transfer(&WalletSeed::from_bytes([7; 32]), &signed_vector_draft()).unwrap();
+        let runtime = WalletRuntimeState::for_test();
+        let transaction = sign_vector(
+            &runtime,
+            &WalletSeed::from_bytes([7; 32]),
+            &signed_vector_draft(),
+        )
+        .unwrap();
         let json = serde_json::to_string(&transaction).unwrap();
 
         for forbidden in [

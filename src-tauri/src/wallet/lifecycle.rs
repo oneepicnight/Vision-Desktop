@@ -56,6 +56,9 @@ enum WalletLifecycleCheckpoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WalletLifecycleError {
     RuntimeUnavailable,
+    SecurityReviewRequired,
+    CompatibilityRequired,
+    PrivateLoopbackRequired,
     InvalidWindow,
     OperationInProgress,
     InvalidRequest,
@@ -82,6 +85,9 @@ impl WalletLifecycleError {
     pub(in crate::wallet) const fn code(self) -> &'static str {
         match self {
             Self::RuntimeUnavailable => "wallet_runtime_unavailable",
+            Self::SecurityReviewRequired => "security_review_required",
+            Self::CompatibilityRequired => "wallet_compatibility_required",
+            Self::PrivateLoopbackRequired => "private_loopback_required",
             Self::InvalidWindow => "invalid_window",
             Self::OperationInProgress => "operation_in_progress",
             Self::InvalidRequest => "invalid_request",
@@ -110,6 +116,9 @@ impl fmt::Display for WalletLifecycleError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::RuntimeUnavailable => "secure wallet runtime is unavailable",
+            Self::SecurityReviewRequired => "wallet security review approval is required",
+            Self::CompatibilityRequired => "wallet compatibility approval is required",
+            Self::PrivateLoopbackRequired => "private loopback Core binding is required",
             Self::InvalidWindow => "wallet access is unavailable from this window",
             Self::OperationInProgress => "another wallet operation is already in progress",
             Self::InvalidRequest => "wallet request is invalid",
@@ -211,11 +220,11 @@ impl WalletLifecycleAdapters {
         recovery_secret: SecretInput,
         created_at_unix_ms: u64,
     ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
-        self.require_vault_absent()?;
         let operation = self
             .runtime
             .begin_operation(owner_window, WalletOperationKind::Create)
             .map_err(map_runtime_error)?;
+        self.require_vault_absent()?;
         let recovery_path = self
             .runtime
             .consume_recovery_path(
@@ -294,11 +303,11 @@ impl WalletLifecycleAdapters {
         recovery_secret: SecretInput,
         created_at_unix_ms: u64,
     ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
-        self.require_vault_absent()?;
         let operation = self
             .runtime
             .begin_operation(owner_window, WalletOperationKind::Restore)
             .map_err(map_runtime_error)?;
+        self.require_vault_absent()?;
         let recovery_path = self
             .runtime
             .consume_recovery_path(
@@ -462,6 +471,11 @@ fn now_unix_ms() -> Result<u64, WalletLifecycleError> {
 
 fn map_runtime_error(error: WalletRuntimeError) -> WalletLifecycleError {
     match error {
+        WalletRuntimeError::SecurityReviewRequired => WalletLifecycleError::SecurityReviewRequired,
+        WalletRuntimeError::CompatibilityRequired => WalletLifecycleError::CompatibilityRequired,
+        WalletRuntimeError::PrivateLoopbackRequired => {
+            WalletLifecycleError::PrivateLoopbackRequired
+        }
         WalletRuntimeError::InvalidWindow => WalletLifecycleError::InvalidWindow,
         WalletRuntimeError::OperationInProgress => WalletLifecycleError::OperationInProgress,
         WalletRuntimeError::InvalidRequest => WalletLifecycleError::InvalidRequest,
@@ -573,6 +587,81 @@ mod tests {
         runtime
             .complete_recovery_path_selection(permit, path.to_path_buf())
             .unwrap()
+    }
+
+    #[test]
+    fn lifecycle_adapters_refuse_each_unmet_activation_gate_before_sensitive_work() {
+        let cases = [
+            (
+                false,
+                true,
+                true,
+                WalletLifecycleError::SecurityReviewRequired,
+            ),
+            (
+                true,
+                false,
+                true,
+                WalletLifecycleError::CompatibilityRequired,
+            ),
+            (
+                true,
+                true,
+                false,
+                WalletLifecycleError::PrivateLoopbackRequired,
+            ),
+        ];
+
+        for (index, (security_review, compatibility, private_loopback, expected)) in
+            cases.into_iter().enumerate()
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = Arc::new(WalletRuntimeState::for_test_with_activation(
+                security_review,
+                compatibility,
+                private_loopback,
+            ));
+            let vault_path = directory.path().join(format!("wallet-{index}.vault.json"));
+            fs::write(
+                &vault_path,
+                b"activation must be checked before vault inspection",
+            )
+            .unwrap();
+            let adapter = WalletLifecycleAdapters::for_test(runtime, &vault_path);
+
+            assert_eq!(
+                adapter
+                    .create_at(
+                        MAIN,
+                        "blocked",
+                        "Blocked Wallet",
+                        "unused-token",
+                        secret(WALLET_PASSWORD),
+                        secret(RECOVERY_PASSWORD),
+                        1,
+                    )
+                    .unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                adapter
+                    .restore_at(
+                        MAIN,
+                        "blocked",
+                        "Blocked Wallet",
+                        "unused-token",
+                        secret(WALLET_PASSWORD),
+                        secret(RECOVERY_PASSWORD),
+                        1,
+                    )
+                    .unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                adapter.unlock(MAIN, secret(WALLET_PASSWORD)).unwrap_err(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -915,6 +1004,9 @@ mod tests {
     fn lifecycle_errors_are_fixed_and_never_disclose_paths_or_retry_timing() {
         let errors = [
             WalletLifecycleError::RuntimeUnavailable,
+            WalletLifecycleError::SecurityReviewRequired,
+            WalletLifecycleError::CompatibilityRequired,
+            WalletLifecycleError::PrivateLoopbackRequired,
             WalletLifecycleError::InvalidWindow,
             WalletLifecycleError::OperationInProgress,
             WalletLifecycleError::InvalidRequest,

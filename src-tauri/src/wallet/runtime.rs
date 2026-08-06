@@ -8,7 +8,10 @@
 
 use super::{
     account::derive_account_identity,
-    contract::{WalletAccountSummary, WalletLifecycleStatus, WalletPublicMetadata},
+    contract::{
+        wallet_contract_gate, WalletAccountSummary, WalletContractRequirement,
+        WalletLifecycleStatus, WalletPublicMetadata,
+    },
     secrets::WalletPassword,
     session::{WalletSession, WalletSessionError},
     vault::EncryptedWalletVault,
@@ -26,6 +29,7 @@ const PATH_TOKEN_BYTES: usize = 32;
 const PATH_TOKEN_HEX_BYTES: usize = PATH_TOKEN_BYTES * 2;
 const PATH_TOKEN_TTL_MS: u64 = 2 * 60 * 1000;
 const WALLET_PROCESS_MUTEX: &str = "Local\\com.vision.desktop.wallet-runtime.v1";
+const INDEPENDENT_SECURITY_REVIEW_APPROVED: bool = false;
 
 /// Rust-only wallet authority owned by the application process.
 ///
@@ -33,7 +37,18 @@ const WALLET_PROCESS_MUTEX: &str = "Local\\com.vision.desktop.wallet-runtime.v1"
 /// application manages exactly one instance, but no wallet command can access it yet.
 pub(crate) struct WalletRuntimeState {
     inner: Mutex<WalletRuntimeInner>,
+    activation: WalletActivationState,
     _process_lock: WalletProcessLock,
+}
+
+struct WalletActivationState {
+    independent_security_review_approved: bool,
+    compatibility_approved: bool,
+    private_loopback_binding_verified: bool,
+}
+
+struct WalletActivationAuthority {
+    _private: (),
 }
 
 struct WalletRuntimeInner {
@@ -74,6 +89,13 @@ pub(in crate::wallet) struct WalletOperationPermit<'a> {
     state: &'a WalletRuntimeState,
     generation: u64,
     owner_window: String,
+    _authority: WalletActivationAuthority,
+}
+
+/// Non-forgeable proof that the runtime admitted one signing operation after
+/// every activation gate passed.
+pub(in crate::wallet) struct WalletSigningPermit<'a> {
+    operation: WalletOperationPermit<'a>,
 }
 
 pub(in crate::wallet) struct RecoveryPathToken(Zeroizing<String>);
@@ -89,7 +111,7 @@ pub(in crate::wallet) enum WalletOperationKind {
     Create,
     Restore,
     Unlock,
-    Sign,
+    Signing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +124,9 @@ pub(in crate::wallet) enum RecoveryPathPurpose {
 pub(crate) enum WalletRuntimeError {
     ProcessLockUnavailable,
     RuntimeUnavailable,
+    SecurityReviewRequired,
+    CompatibilityRequired,
+    PrivateLoopbackRequired,
     InvalidWindow,
     OperationInProgress,
     InvalidRequest,
@@ -119,6 +144,9 @@ impl WalletRuntimeError {
         match self {
             Self::ProcessLockUnavailable => "wallet_process_lock_unavailable",
             Self::RuntimeUnavailable => "wallet_runtime_unavailable",
+            Self::SecurityReviewRequired => "security_review_required",
+            Self::CompatibilityRequired => "wallet_compatibility_required",
+            Self::PrivateLoopbackRequired => "private_loopback_required",
             Self::InvalidWindow => "invalid_window",
             Self::OperationInProgress => "operation_in_progress",
             Self::InvalidRequest => "invalid_request",
@@ -138,6 +166,9 @@ impl fmt::Display for WalletRuntimeError {
         formatter.write_str(match self {
             Self::ProcessLockUnavailable => "secure wallet process ownership is unavailable",
             Self::RuntimeUnavailable => "secure wallet runtime is unavailable",
+            Self::SecurityReviewRequired => "wallet security review approval is required",
+            Self::CompatibilityRequired => "wallet compatibility approval is required",
+            Self::PrivateLoopbackRequired => "private loopback Core binding is required",
             Self::InvalidWindow => "wallet access is unavailable from this window",
             Self::OperationInProgress => "another wallet operation is already in progress",
             Self::InvalidRequest => "wallet request is invalid",
@@ -156,10 +187,16 @@ impl std::error::Error for WalletRuntimeError {}
 
 impl WalletRuntimeState {
     pub(crate) fn initialize() -> Result<Self, WalletRuntimeError> {
-        Self::with_process_lock(WalletProcessLock::acquire(WALLET_PROCESS_MUTEX)?)
+        Self::with_process_lock(
+            WalletProcessLock::acquire(WALLET_PROCESS_MUTEX)?,
+            WalletActivationState::current(),
+        )
     }
 
-    fn with_process_lock(process_lock: WalletProcessLock) -> Result<Self, WalletRuntimeError> {
+    fn with_process_lock(
+        process_lock: WalletProcessLock,
+        activation: WalletActivationState,
+    ) -> Result<Self, WalletRuntimeError> {
         Ok(Self {
             inner: Mutex::new(WalletRuntimeInner {
                 started_at: Instant::now(),
@@ -170,6 +207,7 @@ impl WalletRuntimeState {
                 public_account: None,
                 next_generation: 0,
             }),
+            activation,
             _process_lock: process_lock,
         })
     }
@@ -178,6 +216,30 @@ impl WalletRuntimeState {
         &self,
         owner_window: &str,
         kind: WalletOperationKind,
+    ) -> Result<WalletOperationPermit<'_>, WalletRuntimeError> {
+        let authority = self.activation.authorize()?;
+        self.begin_authorized_operation(owner_window, kind, authority)
+    }
+
+    pub(in crate::wallet) fn begin_signing_operation(
+        &self,
+        owner_window: &str,
+    ) -> Result<WalletSigningPermit<'_>, WalletRuntimeError> {
+        let authority = self.activation.authorize()?;
+        Ok(WalletSigningPermit {
+            operation: self.begin_authorized_operation(
+                owner_window,
+                WalletOperationKind::Signing,
+                authority,
+            )?,
+        })
+    }
+
+    fn begin_authorized_operation(
+        &self,
+        owner_window: &str,
+        kind: WalletOperationKind,
+        authority: WalletActivationAuthority,
     ) -> Result<WalletOperationPermit<'_>, WalletRuntimeError> {
         require_main_window(owner_window)?;
         let mut inner = self.lock_inner()?;
@@ -195,6 +257,7 @@ impl WalletRuntimeState {
             state: self,
             generation,
             owner_window: owner_window.to_string(),
+            _authority: authority,
         })
     }
 
@@ -203,6 +266,7 @@ impl WalletRuntimeState {
         owner_window: &str,
         purpose: RecoveryPathPurpose,
     ) -> Result<RecoverySelectionPermit, WalletRuntimeError> {
+        let _authority = self.activation.authorize()?;
         require_main_window(owner_window)?;
         let mut inner = self.lock_inner()?;
         if inner.active_operation.is_some() || inner.pending_path_selection.is_some() {
@@ -435,6 +499,15 @@ impl WalletRuntimeState {
 
     #[cfg(test)]
     pub(in crate::wallet) fn for_test() -> Self {
+        Self::for_test_with_activation(true, true, true)
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn for_test_with_activation(
+        independent_security_review_approved: bool,
+        compatibility_approved: bool,
+        private_loopback_binding_verified: bool,
+    ) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         static NEXT_TEST_LOCK: AtomicU64 = AtomicU64::new(1);
@@ -444,7 +517,41 @@ impl WalletRuntimeState {
             std::process::id(),
             suffix
         );
-        Self::with_process_lock(WalletProcessLock::acquire(&name).unwrap()).unwrap()
+        Self::with_process_lock(
+            WalletProcessLock::acquire(&name).unwrap(),
+            WalletActivationState {
+                independent_security_review_approved,
+                compatibility_approved,
+                private_loopback_binding_verified,
+            },
+        )
+        .unwrap()
+    }
+}
+
+impl WalletActivationState {
+    fn current() -> Self {
+        let compatibility = wallet_contract_gate();
+        Self {
+            independent_security_review_approved: INDEPENDENT_SECURITY_REVIEW_APPROVED,
+            compatibility_approved: compatibility.unmet_requirements.is_empty(),
+            private_loopback_binding_verified: !compatibility
+                .unmet_requirements
+                .contains(&WalletContractRequirement::PrivateLoopbackBinding),
+        }
+    }
+
+    fn authorize(&self) -> Result<WalletActivationAuthority, WalletRuntimeError> {
+        if !self.independent_security_review_approved {
+            return Err(WalletRuntimeError::SecurityReviewRequired);
+        }
+        if !self.private_loopback_binding_verified {
+            return Err(WalletRuntimeError::PrivateLoopbackRequired);
+        }
+        if !self.compatibility_approved {
+            return Err(WalletRuntimeError::CompatibilityRequired);
+        }
+        Ok(WalletActivationAuthority { _private: () })
     }
 }
 
@@ -506,6 +613,13 @@ impl WalletOperationPermit<'_> {
         } else {
             Err(WalletRuntimeError::RuntimeUnavailable)
         }
+    }
+}
+
+impl WalletSigningPermit<'_> {
+    /// Revalidates that lifecycle invalidation has not revoked this signing authority.
+    pub(in crate::wallet) fn ensure_current(&self) -> Result<(), WalletRuntimeError> {
+        self.operation.ensure_current()
     }
 }
 
@@ -644,15 +758,73 @@ mod tests {
     }
 
     #[test]
+    fn every_activation_gate_blocks_lifecycle_selection_and_signing_authority() {
+        let cases = [
+            (
+                false,
+                true,
+                true,
+                WalletRuntimeError::SecurityReviewRequired,
+            ),
+            (true, false, true, WalletRuntimeError::CompatibilityRequired),
+            (
+                true,
+                true,
+                false,
+                WalletRuntimeError::PrivateLoopbackRequired,
+            ),
+        ];
+
+        for (security_review, compatibility, private_loopback, expected) in cases {
+            let runtime = WalletRuntimeState::for_test_with_activation(
+                security_review,
+                compatibility,
+                private_loopback,
+            );
+            for kind in [
+                WalletOperationKind::Create,
+                WalletOperationKind::Restore,
+                WalletOperationKind::Unlock,
+            ] {
+                assert_eq!(
+                    runtime.begin_operation(MAIN_WINDOW_LABEL, kind).err(),
+                    Some(expected)
+                );
+            }
+            assert_eq!(
+                runtime
+                    .begin_recovery_path_selection(
+                        MAIN_WINDOW_LABEL,
+                        RecoveryPathPurpose::Destination,
+                    )
+                    .err(),
+                Some(expected)
+            );
+            assert_eq!(
+                runtime.begin_signing_operation(MAIN_WINDOW_LABEL).err(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn production_activation_remains_closed_after_the_failed_security_review() {
+        let activation = WalletActivationState::current();
+
+        assert_eq!(
+            activation.authorize().err(),
+            Some(WalletRuntimeError::SecurityReviewRequired)
+        );
+    }
+
+    #[test]
     fn invalidation_revokes_operations_and_stale_permits_cannot_clear_new_work() {
         let runtime = WalletRuntimeState::for_test();
         let stale = runtime
             .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Create)
             .unwrap();
         runtime.invalidate_all().unwrap();
-        let current = runtime
-            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
-            .unwrap();
+        let current = runtime.begin_signing_operation(MAIN_WINDOW_LABEL).unwrap();
         assert_eq!(
             stale.ensure_current(),
             Err(WalletRuntimeError::RuntimeUnavailable)
@@ -882,6 +1054,9 @@ mod tests {
         let errors = [
             WalletRuntimeError::ProcessLockUnavailable,
             WalletRuntimeError::RuntimeUnavailable,
+            WalletRuntimeError::SecurityReviewRequired,
+            WalletRuntimeError::CompatibilityRequired,
+            WalletRuntimeError::PrivateLoopbackRequired,
             WalletRuntimeError::InvalidWindow,
             WalletRuntimeError::OperationInProgress,
             WalletRuntimeError::InvalidRequest,

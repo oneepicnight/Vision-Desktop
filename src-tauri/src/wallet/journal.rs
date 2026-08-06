@@ -529,6 +529,7 @@ fn is_lowercase_hex_64_bytes(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::wallet::{
+        runtime::WalletRuntimeState,
         secrets::WalletSeed,
         transaction::{sign_cash_transfer, CashTransferDraft},
     };
@@ -536,9 +537,11 @@ mod tests {
     const WALLET_ID: &str = "primary";
 
     fn accepted_transaction() -> (VisionTransaction, WalletSubmissionOutcome) {
+        let runtime = WalletRuntimeState::for_test();
+        let permit = runtime.begin_signing_operation("main").unwrap();
         let seed = WalletSeed::from_bytes([7_u8; 32]);
         let draft = CashTransferDraft::for_current_nonce(3, "22".repeat(32), 42);
-        let transaction = sign_cash_transfer(&seed, &draft).unwrap();
+        let transaction = sign_cash_transfer(&permit, &seed, &draft).unwrap();
         let tx_id = canonical_transaction_id(&transaction).unwrap();
         let outcome = WalletSubmissionOutcome::Accepted {
             tx_id,

@@ -8,12 +8,13 @@ The specification is fail-closed. An implementation must not register a partial 
 
 ## Evidence inspected
 
-Before the command ACL migration, the Desktop application:
+Before the command ACL and production-CSP migrations, the Desktop application:
 
 - registered its existing application commands directly through `tauri::Builder::invoke_handler`;
 - had one configured main window but no explicit application capability file or `AppManifest` command list;
 - does not load remote scripts or remote application pages;
-- currently permits `ipc:` and loopback HTTP connections in its production CSP;
+- permitted `ipc:` and loopback HTTP connections in its production CSP before that connectivity
+  was moved to development-only `devCsp`; production now permits Tauri IPC transports only;
 - keeps all frontend Tauri calls in `src/services/coreApi.ts`;
 - has no wallet command, frontend password form, frontend-accessible file dialog, clipboard wallet path, or wallet state in the general Desktop reducer;
 - keeps vault, recovery, session, signing, submission, receipt, journal, and onboarding code inside the private Rust wallet module.
@@ -91,7 +92,10 @@ Planned application permissions:
 - `allow-wallet-unlock`
 - `allow-wallet-lock`
 
-Transaction review, signing, and submission permissions are intentionally absent. They require a later threat model after private loopback integration.
+Transaction review, signing, and submission permissions are intentionally absent. Their required
+state machine, trusted confirmation, private Core client, ambiguous-outcome handling, and future
+command constraints are specified in `WALLET_TRANSACTION_AUTHORITY_BOUNDARY.md`; implementation,
+private-loopback integration, and independent review remain pending.
 
 The dialog plugin is initialized in Rust, but its `dialog:allow-save` and `dialog:allow-open` commands are not granted to the WebView. Private Rust adapters call `DialogExt` directly; no wallet application command invokes them yet. React never receives or submits a raw filesystem path.
 
@@ -341,7 +345,8 @@ Before activation:
     consumption at the unregistered production entry points. Exact-commit re-review is pending.
 11. Independently review the exact unreachable implementation and its adversarial evidence.
 12. Integrate and qualify a supported private-loopback Core release, signing, submission, receipt
-    tracking, recovery, and a complete spending path through their separate reviews.
+    tracking, recovery, and the complete spending path specified in
+    `WALLET_TRANSACTION_AUTHORITY_BOUNDARY.md` through their separate reviews.
 13. Obtain explicit activation review, then register only the exact approved commands and
     permissions and run adversarial, recovery, packaging, and signed-release validation.
 

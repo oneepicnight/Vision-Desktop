@@ -117,6 +117,7 @@ pub(in crate::wallet) enum RecoveryPathPurpose {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WalletRuntimeError {
     ProcessLockUnavailable,
+    UnsupportedWindowsHost,
     RuntimeUnavailable,
     ActivationUnavailable,
     InvalidWindow,
@@ -135,6 +136,7 @@ impl WalletRuntimeError {
     pub(in crate::wallet) const fn code(self) -> &'static str {
         match self {
             Self::ProcessLockUnavailable => "wallet_process_lock_unavailable",
+            Self::UnsupportedWindowsHost => "unsupported_windows_host",
             Self::RuntimeUnavailable => "wallet_runtime_unavailable",
             Self::ActivationUnavailable => "wallet_activation_unavailable",
             Self::InvalidWindow => "invalid_window",
@@ -155,6 +157,7 @@ impl fmt::Display for WalletRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::ProcessLockUnavailable => "secure wallet process ownership is unavailable",
+            Self::UnsupportedWindowsHost => "wallet custody is unavailable on this Windows edition",
             Self::RuntimeUnavailable => "secure wallet runtime is unavailable",
             Self::ActivationUnavailable => "secure wallet activation is unavailable",
             Self::InvalidWindow => "wallet access is unavailable from this window",
@@ -718,12 +721,39 @@ mod platform {
             },
             PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
         },
-        System::Threading::CreateMutexW,
+        System::{SystemInformation::GetProductInfo, Threading::CreateMutexW},
     };
+
+    // Explicit standard Windows Client allowlist. Unknown and future SKUs remain fail closed until
+    // they are reviewed. PRODUCT_SERVERRDSH (0xAF, Windows Enterprise multi-session) is
+    // intentionally absent, as are every Windows Server and IoT edition.
+    const SUPPORTED_WINDOWS_CLIENT_PRODUCTS: &[u32] = &[
+        0x04, // Enterprise
+        0x1B, // Enterprise N
+        0x30, // Professional
+        0x31, // Professional N
+        0x48, // Enterprise evaluation
+        0x54, // Enterprise N evaluation
+        0x62, // Home N
+        0x63, // Home China
+        0x64, // Home Single Language
+        0x65, // Home
+        0x79, // Education
+        0x7A, // Education N
+        0x7D, // Enterprise LTSC
+        0x7E, // Enterprise LTSC N
+        0x81, // Enterprise LTSC evaluation
+        0x82, // Enterprise LTSC N evaluation
+        0xA1, // Pro for Workstations
+        0xA2, // Pro for Workstations N
+        0xA4, // Pro Education
+        0xA5, // Pro Education N
+    ];
 
     pub(super) struct ProcessLock(isize);
 
     pub(super) fn acquire(base_name: &str) -> Result<ProcessLock, WalletRuntimeError> {
+        ensure_supported_wallet_host()?;
         let user_sid = storage_security::current_user_sid_string()
             .map_err(|_| WalletRuntimeError::ProcessLockUnavailable)?;
         let name = lock_name(base_name, &user_sid)?;
@@ -754,6 +784,22 @@ mod platform {
             return Err(WalletRuntimeError::ProcessLockUnavailable);
         }
         Ok(ProcessLock(handle as isize))
+    }
+
+    fn ensure_supported_wallet_host() -> Result<(), WalletRuntimeError> {
+        let mut product_type = 0;
+        // Windows 10 and 11 both report version 10.0 to this API. A failure or a product outside
+        // the explicit standard-client allowlist denies wallet runtime initialization.
+        // SAFETY: `product_type` is a valid writable output pointer for the duration of the call.
+        let succeeded = unsafe { GetProductInfo(10, 0, 0, 0, &mut product_type) };
+        if succeeded == 0 || !is_supported_windows_client_product(product_type) {
+            return Err(WalletRuntimeError::UnsupportedWindowsHost);
+        }
+        Ok(())
+    }
+
+    fn is_supported_windows_client_product(product_type: u32) -> bool {
+        SUPPORTED_WINDOWS_CLIENT_PRODUCTS.contains(&product_type)
     }
 
     fn lock_name(base_name: &str, user_sid: &str) -> Result<String, WalletRuntimeError> {
@@ -827,6 +873,16 @@ mod platform {
         security_descriptor_sddl(user_sid)
     }
 
+    #[cfg(test)]
+    pub(super) fn supported_product_for_test(product_type: u32) -> bool {
+        is_supported_windows_client_product(product_type)
+    }
+
+    #[cfg(test)]
+    pub(super) fn ensure_supported_host_for_test() -> Result<(), WalletRuntimeError> {
+        ensure_supported_wallet_host()
+    }
+
     impl Drop for ProcessLock {
         fn drop(&mut self) {
             let handle = self.0 as *mut std::ffi::c_void;
@@ -865,6 +921,35 @@ mod tests {
         vault::EncryptedWalletVault,
     };
     use std::fs;
+
+    #[cfg(windows)]
+    #[test]
+    fn wallet_host_allowlist_accepts_standard_clients_and_rejects_multisession() {
+        for product in [
+            0x04, 0x1B, 0x30, 0x31, 0x62, 0x63, 0x64, 0x65, 0x79, 0x7A, 0x7D, 0x7E, 0xA1, 0xA2,
+            0xA4, 0xA5,
+        ] {
+            assert!(platform::supported_product_for_test(product));
+        }
+        for product in [
+            0x00, // Unknown
+            0x07, // Standard Server
+            0x08, // Datacenter Server
+            0x4C, // MultiPoint Standard Server
+            0x4D, // MultiPoint Premium Server
+            0xAF, // Enterprise for Virtual Desktops / multi-session
+            0xBC, // IoT Enterprise
+            u32::MAX,
+        ] {
+            assert!(!platform::supported_product_for_test(product));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn current_windows_host_is_inside_the_wallet_support_boundary() {
+        platform::ensure_supported_host_for_test().unwrap();
+    }
 
     #[test]
     fn independent_process_lock_is_exclusive_and_recoverable() {
@@ -1511,6 +1596,7 @@ mod tests {
     fn error_contract_contains_only_fixed_codes_and_messages() {
         let errors = [
             WalletRuntimeError::ProcessLockUnavailable,
+            WalletRuntimeError::UnsupportedWindowsHost,
             WalletRuntimeError::RuntimeUnavailable,
             WalletRuntimeError::ActivationUnavailable,
             WalletRuntimeError::InvalidWindow,

@@ -661,7 +661,8 @@ fn map_runtime_error(error: WalletRuntimeError) -> WalletLifecycleError {
         WalletRuntimeError::SecureRandomUnavailable => {
             WalletLifecycleError::SecureRandomUnavailable
         }
-        WalletRuntimeError::ProcessLockUnavailable
+        WalletRuntimeError::UnsupportedWindowsHost
+        | WalletRuntimeError::ProcessLockUnavailable
         | WalletRuntimeError::RuntimeUnavailable
         | WalletRuntimeError::RecoverySelectionCancelled
         | WalletRuntimeError::RecoveryDestinationInvalid

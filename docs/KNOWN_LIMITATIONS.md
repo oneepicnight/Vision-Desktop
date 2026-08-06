@@ -12,6 +12,9 @@
 - Manual internet router forwarding is still required for public seed operation.
 - No production custody.
 - Test funds only.
+- Future wallet custody is supported only on standard Windows Client with one interactive session
+  per Windows account. Windows Server/RDS, Azure Virtual Desktop multi-session, and concurrent
+  same-account multi-session configurations are unsupported.
 - No automatic restart loop yet.
 - Windows MSI and NSIS packaging is implemented. The unsigned MSI passed a local elevated lifecycle, and the unsigned NSIS package passed a local silent per-user install, launch, direct-uninstall, and cleanup cycle.
 - The NSIS package creates and removes the expected current-user Windows uninstall registration.

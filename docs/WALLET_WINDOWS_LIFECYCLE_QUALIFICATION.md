@@ -68,18 +68,17 @@ does not qualify. The production hidden window explicitly opts into Desktop Acti
 suspend/resume notifications, and failure to receive the notification is a failed gate even when
 Windows later resumes normally.
 
-## Cross-session ownership
+## Wallet process ownership
 
-Use the same Windows account in two genuine Windows sessions, such as console plus RDP or Fast User
-Switching where supported.
-
-In session one:
+The supported wallet boundary is standard Windows Client with one interactive session per Windows
+account. In that supported session, start the owner process:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/run-wallet-windows-qualification.ps1 -Action CrossSessionOwner -EvidenceDirectory C:\Vision\wallet-qualification-evidence
 ```
 
-After `VISION_WALLET_QUALIFICATION_OWNER_READY`, run in session two:
+After `VISION_WALLET_QUALIFICATION_OWNER_READY`, run the contender as a second process for the same
+Windows account in the same supported interactive session:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/run-wallet-windows-qualification.ps1 -Action CrossSessionContender -EvidenceDirectory C:\Vision\wallet-qualification-evidence
@@ -92,8 +91,13 @@ normally, repeat with forced process termination, and then run:
 powershell -ExecutionPolicy Bypass -File scripts/run-wallet-windows-qualification.ps1 -Action CrossSessionRecovery -EvidenceDirectory C:\Vision\wallet-qualification-evidence
 ```
 
-Recovery must report `VISION_WALLET_QUALIFICATION_OWNERSHIP_RECOVERED`. Repeat for console/RDP,
-RDP reconnect, and Fast User Switching configurations supported for the release.
+Recovery must report `VISION_WALLET_QUALIFICATION_OWNERSHIP_RECOVERED`.
+
+Concurrent same-account console/RDP, Fast User Switching, Windows Server/RDS, Azure Virtual Desktop
+multi-session, and other multi-session configurations are unsupported. The per-user global mutex
+still spans those kernel sessions as defense in depth. Optional lab testing may prove denial there,
+but it must not be described as product support and is not substituted with a second physical
+computer or a different Windows account.
 
 ## Packaged lifecycle gate
 

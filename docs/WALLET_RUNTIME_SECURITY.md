@@ -17,8 +17,11 @@ The runtime atomically creates a per-user Windows kernel mutex in the global nam
 `Global\com.vision.desktop.wallet-runtime.v2.<BLAKE3-user-SID>`. It retains the non-inheritable
 handle for the runtime's entire lifetime. The SID is hashed before it enters the name, and the
 object DACL grants access only to the current user, Local System, and built-in administrators. A
-second process for the same Windows user in any console, fast-user-switching, or RDP session cannot
-create wallet runtime state and fails closed with a fixed, non-sensitive startup error.
+second process for the same Windows user cannot create wallet runtime state and fails closed with a
+fixed, non-sensitive startup error. The kernel object is global across Windows sessions as defense
+in depth, but the supported product boundary is standard Windows Client with one interactive
+session per Windows account. Concurrent same-account Windows Server/RDS and other multi-session
+environments are unsupported.
 
 This lock is independent of the Tauri single-instance plugin and closes the reviewed interval
 between that plugin's Windows mutex creation and hidden receiver-window creation. Normal duplicates
@@ -176,5 +179,12 @@ sole runtime owner after that mutex is released.
 Automated validation on 2026-08-03 replaced the session-local mutex with the per-user global
 process lease. A spawned child process acquired the real protected object, the parent failed closed
 while that child was alive, the child was forcibly terminated, and the parent then acquired the
-same name successfully. Release qualification still requires console/RDP and fast-user-switching
-exercises on supported Windows installations.
+same name successfully. Release qualification requires the same exclusion, normal release, and
+forced-termination recovery in the supported single interactive session. Concurrent same-account
+console/RDP, Fast User Switching, Windows Server/RDS, and multi-session virtual desktop operation
+remain unsupported rather than silently qualified.
+
+Runtime initialization queries the native Windows product classification and accepts only an
+explicit allowlist of standard Windows Client SKUs. Windows Server, Windows Enterprise for Virtual
+Desktops/multi-session, IoT, unknown, and future unreviewed product codes fail closed with the fixed
+`unsupported_windows_host` error before the wallet process lease or custody state is created.

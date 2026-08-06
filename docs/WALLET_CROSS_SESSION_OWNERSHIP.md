@@ -2,9 +2,11 @@
 
 ## Status
 
-The private Windows wallet runtime now enforces one wallet-owning Vision Desktop process for the
-current Windows user across console, fast-user-switching, and Remote Desktop sessions. Wallet
-commands and permissions remain unregistered.
+The private Windows wallet runtime enforces one wallet-owning Vision Desktop process for the
+current Windows user. The supported product boundary is standard Windows Client with one
+interactive session per Windows account. Concurrent same-account Windows Server/RDS, Azure
+Virtual Desktop multi-session, and other multi-session hosts are unsupported. Wallet commands and
+permissions remain unregistered.
 
 ## Ownership object
 
@@ -39,7 +41,8 @@ and allowing a later process to acquire ownership.
 
 This lock is independent of the Tauri single-instance plugin. The plugin retains the normal
 same-session duplicate-launch experience; the wallet process lease is the fail-closed custody
-boundary across every Windows session.
+boundary. Its `Global\` reach across sessions is defense in depth and does not make concurrent
+multi-session operation a supported configuration.
 
 ## Automated evidence
 
@@ -55,12 +58,17 @@ Tests verify:
 - a child process can own the lease, blocks the parent, and releases ownership after forced
   termination so the parent can acquire it.
 
-## Remaining validation and threat boundary
+## Supported-session qualification and threat boundary
 
-The automated cross-process test runs within one Windows session. The `Global\` namespace is the
-Windows mechanism that extends the same name across sessions, but release qualification must still
-exercise fast user switching, RDP reconnect, concurrent console/RDP launches, logoff, and forced
-termination on the supported Windows editions.
+Release qualification exercises simultaneous same-account processes, normal release, forced
+termination, and recovery within the one supported interactive Windows session. Real session lock,
+Modern Standby, hibernate, logoff, shutdown, and application teardown are separate lifecycle gates.
+
+The `Global\` namespace extends the same name across sessions, but concurrent console/RDP,
+same-account Fast User Switching, Windows Server/RDS, and multi-session virtual desktop operation
+are outside the supported product boundary. Optional lab testing may verify that the defense-in-depth
+lease denies such a launch, but lack of that unsupported-platform test is not a release claim that
+multi-session operation works.
 
 A process running as the same user, Local System, or an administrator can still pre-create or hold
 the object and deny Wallet startup. That is a fail-closed denial of service, not a path to wallet

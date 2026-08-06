@@ -109,16 +109,20 @@ reviewed non-secret metadata needed by status responses.
 
 It must not implement `Serialize`, `Clone`, or unrestricted `Debug`. Lock acquisition must fail closed if poisoned. Only one create, restore, unlock, or future signing operation may run at a time.
 
-Path tokens are random 256-bit opaque values. They are:
+Recovery selection handles are random 256-bit opaque values encoded as exactly 64 lowercase
+hexadecimal characters. The non-secret handle crosses React; the selected path and authorization
+record remain only in Rust. A handle is:
 
 - single-use;
-- held only in Rust;
-- bound to the originating main-window label;
+- bound to the actual invoking main `WebviewWindow` derived by Rust, never a caller-supplied label;
+- purpose- and generation-bound;
 - valid for no more than two minutes;
 - invalidated on use, cancel, navigation/reload, window destruction, workstation/session lock, and process shutdown;
 - never persisted, logged, included in errors, or accepted from a different window.
 
-The selected path remains in Rust state. A token is not a general filesystem capability: it authorizes exactly one create-new recovery write or one bounded recovery read.
+The handle is a narrow capability, not a secret or general filesystem token. It authorizes exactly
+one create-new recovery write or one bounded recovery read. No path, issue time, or expiry timestamp
+is returned to React.
 
 ## Proposed command interface
 
@@ -146,48 +150,53 @@ Behavior:
 - opens a Rust-side native save dialog;
 - filters and normalizes the extension to `.vision-recovery.json`;
 - rejects an existing destination, directories, unsupported URI forms, and non-local paths for the first Windows release;
-- stores the selected path in Rust and returns only a path token and its expiry;
+- stores the selected path in Rust and returns only one canonical recovery selection handle;
 - cancellation returns a fixed `cancelled` code and creates no token.
 
 ### `wallet_create`
 
 Input:
 
-- destination token;
-- bounded wallet identifier and label;
-- local vault password;
-- no recovery secret input; Rust generates a 256-bit credential for native presentation.
+- destination selection handle;
+- `WalletId`: 1-64 ASCII bytes using letters, digits, `-`, or `_`;
+- `WalletLabel`: 1-64 UTF-8 bytes, trimmed, with no control characters;
+- no secret input.
 
 Behavior:
 
-- consumes and invalidates the destination token before secret work;
-- requires the token's original window;
+- derives the actual invoking `WebviewWindow`, requires local `main`, and never accepts a caller
+  window label;
+- consumes and invalidates the destination handle before prompting or secret work;
+- opens a Rust-owned native ceremony for local password and exact confirmation;
+- generates the 256-bit portable recovery credential in Rust and uses the existing native display
+  and exact re-entry ceremony;
 - refuses to run when any compatibility, review, process-lock, vault-exists, or operation-in-progress gate is unmet;
 - creates the wallet through the existing recovery-gated onboarding coordinator;
 - writes, reads back, decrypts, and identity-verifies the portable artifact before local vault storage;
 - returns only locked public metadata with `backup_verified: true`;
 - locks and clears all intermediate state on every success, error, panic boundary, cancellation, or window loss.
 
-The command is not idempotent. Duplicate or replayed calls fail because the token is already consumed and the vault/backup paths are create-new only.
+The command is not idempotent. Duplicate or replayed calls fail because the handle is already consumed and the vault/backup paths are create-new only.
 
 ### `wallet_select_recovery_source`
 
 Input: none, plus the invoking window supplied by Rust.
 
-Behavior mirrors destination selection but uses a Rust-side open dialog restricted to one regular `.vision-recovery.json` file. It returns only an opaque source token.
+Behavior mirrors destination selection but uses a Rust-side open dialog restricted to one regular `.vision-recovery.json` file. It returns only one canonical source selection handle.
 
 ### `wallet_restore`
 
 Input:
 
-- source token;
-- new bounded wallet identifier and label;
-- the exact versioned portable recovery credential;
-- a new local vault password.
+- source selection handle;
+- the same bounded `WalletId` and `WalletLabel` public types;
+- no secret input.
 
 Behavior:
 
-- consumes the source token before secret work;
+- consumes the source handle before prompting or secret work;
+- captures the exact recovery credential, new local password, and password confirmation in one
+  Rust-owned native ceremony;
 - loads and decrypts the bounded artifact inside Rust;
 - derives the exact RC2 public identity;
 - creates a new current-user-protected local vault without changing the seed;
@@ -197,15 +206,16 @@ Behavior:
 
 ### `wallet_unlock`
 
-Input: local wallet password only.
+Input: none.
 
 Behavior:
 
+- captures the local password in a Rust-owned native ceremony;
 - requires the main window, an existing verified vault, and no conflicting operation;
 - applies the existing escalating backoff and indistinguishable wrong-password/corruption error;
 - stores the seed only in `WalletSession`;
 - returns public metadata, never the seed or vault;
-- resets the submitted frontend field regardless of result.
+- erases all native and Rust ceremony buffers regardless of result.
 
 ### `wallet_lock`
 
@@ -217,26 +227,21 @@ Behavior:
 - synchronously drops the unlocked seed and invalidates all secret-operation intents;
 - succeeds idempotently without revealing whether secret material was present.
 
-## Secret request representation
+## Request and secret representation
 
-Command requests must use a dedicated Rust `SecretInput` type with these properties:
+Every public request structure uses `#[serde(deny_unknown_fields)]`. `WalletId`, `WalletLabel`, and
+`RecoverySelectionHandle` use custom bounded deserialization and reject malformed types, duplicate
+or unknown fields, oversized input, and noncanonical handle encoding as fixed `invalid_request`.
+No request contains a window label or secret.
 
-- custom deserialization with a strict byte limit;
-- no `Serialize`, `Clone`, `Display`, or derived `Debug`;
-- redacted manual `Debug` only if required;
-- zeroization of the owned buffer on drop;
-- one conversion into `WalletPassword` by ownership transfer;
-- no inclusion in validation text, tracing fields, panic messages, or metrics.
+Lifecycle secrets are captured only by the Rust-owned native ceremonies specified in
+`WALLET_NATIVE_SECRET_CEREMONY_DESIGN.md`. Native input transfers directly into the existing
+bounded, non-serializable, non-cloneable, redacted, zeroizing secret wrappers. `SecretInput` must not
+implement Serde for lifecycle IPC. React never sees a password, confirmation, recovery credential,
+seed, ciphertext, selected path, or secret-bearing error.
 
-React cannot guarantee that JavaScript or IPC serialization buffers are zeroized. The UI must therefore minimize exposure:
-
-- use isolated password fields local to the wallet form;
-- never store secrets in shared state, reducer events, context, browser storage, query strings, attributes, analytics, or error objects;
-- disable spellcheck, autocomplete persistence where platform behavior permits, and copy controls;
-- submit once, clear fields immediately in a `finally` path, and unmount the form;
-- disable devtools and debug logging in production custody builds.
-
-This limitation must be disclosed in the independent review. Hardware-wallet support remains the preferred future way to keep signing keys outside the WebView-hosted application process.
+Hardware-wallet support remains the preferred future way to keep signing keys outside the Desktop
+process, but it is not part of this lifecycle design.
 
 ## Error contract
 
@@ -282,6 +287,13 @@ messages through a hidden Rust-owned native window. It invalidates authority syn
 not restore it on unlock or resume. Listener registration is a fail-closed startup requirement. No
 listener handle, operating-system detail, or lifecycle command is exposed to React.
 
+Every future lifecycle entry point also requires the fail-closed unwind boundary defined in
+`WALLET_NATIVE_SECRET_CEREMONY_DESIGN.md`. Its guard is armed before request processing and performs
+full runtime invalidation unless an authorized success is explicitly committed. An outer Rust
+`catch_unwind` discards panic payloads and returns one fixed generic failure only after the guard
+locks the session and revokes operations, selections, and handles. Panic injection immediately
+after session unlock is a mandatory gate.
+
 ## Production WebView hardening
 
 Before activation:
@@ -313,9 +325,17 @@ Before activation:
 6. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands. Completed for process ownership, main-window page/close/destruction events, Windows session lock, suspend/standby, logoff/shutdown, teardown, and poison. Unlock and resume do not restore authority.
 7. Implement and test destination/source token selection in Rust. Completed privately: native dialogs are main-window-parented; local paths are validated against URI, UNC/device, traversal, alternate-stream, reparse, overwrite, suffix, type, and size hazards; generation-bound cancellation and stale completion are tested; no wallet command or WebView permission is active.
 8. Implement create/restore/unlock/lock lifecycle adapters but keep them unregistered behind the activation policy. Completed privately: the fixed local vault, token-authorized recovery files, locked create/restore completion, session unlock, idempotent lock, generation checks, restart-safe public status, and fixed errors are connected and tested. No Tauri command exists.
-9. Add the isolated frontend onboarding UI and service wrappers; perform secret-leak and accessibility review.
-10. Integrate a supported loopback-only Core release through the separate compatibility workflow.
-11. Register only the reviewed wallet commands and run adversarial, recovery, packaging, and signed-release validation.
+9. Independently approve the native-secret, bounded-request, and unwind-guard design. The first
+   WebView-secret design was rejected; `WALLET_NATIVE_SECRET_CEREMONY_DESIGN.md` is the correction
+   offered for re-review.
+10. Implement native secret controls, ceremonies, bounded public request types, and unwind guards
+    while keeping the code without `#[tauri::command]`, invoke registration, AppManifest entries,
+    generated permissions, capability grants, frontend wrappers/forms, or true activation flags.
+11. Independently review the exact unreachable implementation and its adversarial evidence.
+12. Integrate and qualify a supported private-loopback Core release, signing, submission, receipt
+    tracking, recovery, and a complete spending path through their separate reviews.
+13. Obtain explicit activation review, then register only the exact approved commands and
+    permissions and run adversarial, recovery, packaging, and signed-release validation.
 
 ## Decision record
 
@@ -332,7 +352,10 @@ Approved on 2026-08-01:
 - explicit AppManifest registration and a single main-window-only Windows capability for the existing non-wallet application commands before either plugin is initialized.
 - Windows single-instance enforcement registered before all other startup work; duplicate arguments and working directories are discarded and the existing main window is activated best-effort.
 - Rust-only Windows lifecycle monitoring that fails startup closed, clears wallet authority on session lock, suspend/standby, logoff/shutdown, and teardown, and never restores authority on unlock or resume.
+- the full-wallet activation gate: lifecycle implementation may advance privately, but user-facing
+  creation remains disabled until recovery and spending are qualified end to end.
 
 Still requiring explicit review before implementation:
 
-- independent cryptographic and application-security approval.
+- the Rust-owned native secret ceremonies, fail-closed unwind guard, and exact bounded public
+  request schemas in `WALLET_NATIVE_SECRET_CEREMONY_DESIGN.md`.

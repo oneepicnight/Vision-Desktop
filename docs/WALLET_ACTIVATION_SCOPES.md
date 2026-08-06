@@ -19,9 +19,10 @@ The lifecycle scope covers only:
 - unlocking the local Rust session; and
 - deriving and returning secret-free account identity and lock status.
 
-Production lifecycle authority requires the independently reviewed key-derivation and address
-contracts plus explicit lifecycle-security approval. That approval remains `false` until the real
-Windows qualification matrix and an independent review of its evidence pass.
+The private lifecycle implementation passed its Windows qualification and independent security
+review at commit `b027d18`. Production lifecycle authority nevertheless remains `false`: native
+secret ceremonies, fail-closed unwind guards, a complete spending path, and their separate reviews
+are still required before user-facing custody.
 
 Explicit lock remains storage-independent and always revokes runtime authority; it does not require
 an activation proof.
@@ -36,15 +37,16 @@ lifecycle proof cannot satisfy the signing primitive: the signer validates signi
 the deepest authority point before it reads a seed or builds a signature. This prevents a future
 command-wiring mistake from turning lifecycle approval into signing authority.
 
-## Node B consequence
+## Full-wallet activation gate
 
-After packaged Windows lifecycle qualification and independent lifecycle-only approval, the Desktop
-may expose create, restore, status, unlock, and lock through explicit main-window-only permissions.
-That limited boundary can safely create a recoverable public reward address for Node B without
-enabling transaction signing or submission.
+Vision Desktop will not expose create, restore, unlock, or receive-capable custody merely because
+the private lifecycle foundation is approved. Wallet creation creates a reasonable expectation that
+funds and mining rewards are spendable. User-facing custody therefore waits for independently
+reviewed private-loopback Core access, native secret ceremonies, signing, submission, receipt
+tracking, recovery, and an end-to-end spending qualification.
 
-Node B must not mine to a newly generated address until the recovery artifact has been written,
-read back, decrypted, and matched to the account identity by the existing Rust onboarding flow.
+Node B must not mine to a newly generated Desktop address before that full-wallet gate. It must
+remain stopped or use an already controlled and independently spendable reward address.
 
 ## Tests and invariants
 
@@ -56,6 +58,7 @@ Automated tests prove:
 - a lifecycle activation proof is rejected by the transaction signer; and
 - the Tauri authority inventory still contains no wallet command or wallet permission.
 
-The journal-head correction in `WALLET_JOURNAL_AUTHENTICATION.md` remains subject to independent
-re-review before signing or sending. Other gates are documented in
-`WALLET_LIFECYCLE_REVOCATION.md` and `WALLET_INDEPENDENT_SECURITY_REVIEW_HANDOFF.md`.
+The revised native secret and unwind design is specified in
+`WALLET_NATIVE_SECRET_CEREMONY_DESIGN.md`. Signing and sending remain separate gates. Other controls
+are documented in `WALLET_LIFECYCLE_REVOCATION.md` and
+`WALLET_INDEPENDENT_SECURITY_REVIEW_HANDOFF.md`.

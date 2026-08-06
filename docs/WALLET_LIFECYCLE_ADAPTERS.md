@@ -115,10 +115,16 @@ followed by an accepted stale credential, unlocked status, metadata update resul
 response. Irreversible create-new or atomic publication that completed before cancellation may
 remain on disk, but the operation fails closed and must be reconciled explicitly on the next run.
 
-Before any lifecycle entry point can be exposed, it must also be enclosed by the fail-closed unwind
-guard in `WALLET_NATIVE_SECRET_CEREMONY_DESIGN.md`. The guard invalidates the complete runtime on
-every uncommitted return or panic, including a panic immediately after session unlock, and suppresses
-the panic payload behind one fixed error.
+Every private lifecycle entry point is enclosed by the fail-closed unwind guard in
+`WALLET_NATIVE_SECRET_CEREMONY_DESIGN.md`. The guard invalidates the complete runtime on every
+uncommitted return or panic, including a panic immediately after session unlock. A non-emitting
+panic policy is installed before Wallet initialization, and the boundary returns one fixed error.
+Recovery-selection initiation, callback completion, and uncommitted permit drop apply the same
+fail-closed rule.
+
+The production create and restore entry points consume the bounded public request schemas directly.
+Public validation completes before vault inspection, runtime mutation, capability consumption,
+native prompting, filesystem access, or cryptographic work. Raw-string helpers are test-only.
 
 ## Public metadata and restart behavior
 

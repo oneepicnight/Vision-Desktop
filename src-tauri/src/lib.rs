@@ -17,6 +17,9 @@ use supervisor::SupervisorState;
 use tauri::Manager;
 
 pub fn run() {
+    // Rust invokes its panic hook before any `catch_unwind` boundary. Install the non-emitting
+    // policy before builder/plugin setup can initialize private wallet state.
+    wallet::install_production_panic_policy();
     let builder = tauri::Builder::default();
 
     // This must remain the first plugin so duplicate processes are rejected before any future

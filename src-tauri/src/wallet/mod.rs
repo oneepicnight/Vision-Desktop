@@ -16,6 +16,7 @@ mod lifecycle;
 #[cfg(windows)]
 mod native_secret_buffer;
 mod onboarding;
+mod panic_policy;
 mod public_request;
 mod receipt;
 mod recovery;
@@ -43,6 +44,7 @@ pub use contract::{
 };
 #[cfg(windows)]
 pub(crate) use lifecycle::WalletLifecycleAdapters;
+pub(crate) use panic_policy::install_production_panic_policy;
 #[cfg(windows)]
 pub(crate) use recovery_ceremony::NativeRecoveryCredentialCeremony;
 #[cfg(windows)]

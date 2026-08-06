@@ -336,6 +336,9 @@ Before activation:
 10. Implement native secret controls, ceremonies, bounded public request types, and unwind guards
     while keeping the code without `#[tauri::command]`, invoke registration, AppManifest entries,
     generated permissions, capability grants, frontend wrappers/forms, or true activation flags.
+    Completed privately, including IME disassociation/fail-closed routing, pre-initialization
+    non-emitting panic policy, recovery-selection unwind/drop protection, and bounded request
+    consumption at the unregistered production entry points. Exact-commit re-review is pending.
 11. Independently review the exact unreachable implementation and its adversarial evidence.
 12. Integrate and qualify a supported private-loopback Core release, signing, submission, receipt
     tracking, recovery, and a complete spending path through their separate reviews.
@@ -361,7 +364,8 @@ Approved on 2026-08-01:
 - the full-wallet activation gate: lifecycle implementation may advance privately, but user-facing
   creation remains disabled until recovery and spending are qualified end to end.
 
-Still requiring explicit review before implementation:
+Still requiring independent approval before any command exposure or activation:
 
-- the Rust-owned native secret ceremonies, fail-closed unwind guard, and exact bounded public
-  request schemas in `WALLET_NATIVE_SECRET_CEREMONY_DESIGN.md`.
+- the exact corrected implementation of the Rust-owned native secret ceremonies, fail-closed panic
+  and selection boundaries, and bounded public request schemas in
+  `WALLET_NATIVE_SECRET_CEREMONY_DESIGN.md`.

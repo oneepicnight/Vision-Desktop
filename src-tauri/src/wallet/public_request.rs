@@ -31,7 +31,6 @@ impl PublicRequestError {
     }
 }
 
-#[derive(Debug)]
 pub(in crate::wallet) struct WalletId(String);
 
 impl WalletId {
@@ -56,7 +55,6 @@ impl<'de> Deserialize<'de> for WalletId {
     }
 }
 
-#[derive(Debug)]
 pub(in crate::wallet) struct WalletLabel(String);
 
 impl WalletLabel {
@@ -78,7 +76,6 @@ impl<'de> Deserialize<'de> for WalletLabel {
     }
 }
 
-#[derive(Debug)]
 pub(in crate::wallet) struct RecoverySelectionHandle(String);
 
 impl RecoverySelectionHandle {
@@ -104,7 +101,7 @@ impl<'de> Deserialize<'de> for RecoverySelectionHandle {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::wallet) struct WalletCreateRequest {
     pub(in crate::wallet) wallet_id: WalletId,
@@ -112,12 +109,24 @@ pub(in crate::wallet) struct WalletCreateRequest {
     pub(in crate::wallet) recovery_destination_handle: RecoverySelectionHandle,
 }
 
-#[derive(Debug, Deserialize)]
+impl WalletCreateRequest {
+    pub(in crate::wallet) fn into_parts(self) -> (WalletId, WalletLabel, RecoverySelectionHandle) {
+        (self.wallet_id, self.label, self.recovery_destination_handle)
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::wallet) struct WalletRestoreRequest {
     pub(in crate::wallet) wallet_id: WalletId,
     pub(in crate::wallet) label: WalletLabel,
     pub(in crate::wallet) recovery_source_handle: RecoverySelectionHandle,
+}
+
+impl WalletRestoreRequest {
+    pub(in crate::wallet) fn into_parts(self) -> (WalletId, WalletLabel, RecoverySelectionHandle) {
+        (self.wallet_id, self.label, self.recovery_source_handle)
+    }
 }
 
 struct BoundedString<const MAX: usize>(String);
@@ -201,7 +210,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                parse_create(request.as_str()).unwrap_err(),
+                parse_create(request.as_str()).err().unwrap(),
                 PublicRequestError::InvalidRequest
             );
         }
@@ -220,7 +229,7 @@ mod tests {
                 r#"{{"wallet_id":{wallet_id:?},"label":{label:?},"recovery_destination_handle":{handle:?}}}"#
             );
             assert_eq!(
-                parse_create(request.as_str()).unwrap_err(),
+                parse_create(request.as_str()).err().unwrap(),
                 PublicRequestError::InvalidRequest
             );
         }
@@ -235,5 +244,18 @@ mod tests {
         assert_eq!(request.wallet_id.as_str(), "restored");
         assert_eq!(request.label.as_str(), "Restored");
         assert_eq!(request.recovery_source_handle.as_str(), HANDLE);
+    }
+
+    #[test]
+    fn native_entrypoints_consume_only_bounded_request_objects() {
+        let lifecycle = include_str!("lifecycle.rs");
+        assert!(lifecycle.contains("request: WalletCreateRequest"));
+        assert!(lifecycle.contains("request: WalletRestoreRequest"));
+        assert!(!lifecycle.contains("fn create_native(\n        &self,\n        owner_window: &str,\n        wallet_id: &str"));
+        assert!(!lifecycle.contains("fn restore_native(\n        &self,\n        owner_window: &str,\n        wallet_id: &str"));
+
+        let request_source = include_str!("public_request.rs");
+        let production = request_source.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("derive(Debug, Deserialize)"));
     }
 }

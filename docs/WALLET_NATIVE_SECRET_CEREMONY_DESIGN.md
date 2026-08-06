@@ -106,8 +106,10 @@ session, revoke operations, revoke pending selections and capability handles, ad
 and clear public operation state. `wallet_lock` always invalidates and needs no success exception.
 
 The entry point catches unwind at the outer Rust boundary, allows the armed guard to invalidate,
-discards the panic payload, and returns one fixed generic failure. Production panic hooks and crash
-reporting must never format panic payloads, command arguments, native buffers, or Wallet state.
+discards the panic payload, and returns one fixed generic failure. The private implementation
+installs a non-emitting process panic hook before Tauri builder/plugin setup and before Wallet
+initialization. It never formats panic payloads, locations, command arguments, native buffers,
+paths, backtraces, or Wallet state. Crash reporting must preserve this policy.
 Process termination is acceptable when safe recovery cannot be proven; retaining an unlocked
 session after an intercepted panic is not.
 
@@ -136,6 +138,11 @@ bounded deserialization wrappers:
 Malformed types, unknown fields, duplicate fields, invalid characters, noncanonical uppercase
 handles, and oversized values map to fixed `invalid_request`. A caller never supplies a window
 label; Rust derives the actual invoking `WebviewWindow`.
+
+The unregistered production create and restore adapters accept these validated request objects
+directly. Validation therefore finishes before vault inspection, runtime mutation, capability
+consumption, native UI, filesystem access, or cryptographic work. Capability-bearing request
+types intentionally omit `Debug`; raw-string lifecycle adapters are compiled only for tests.
 
 The selection handle is accurately classified as a short-lived, non-secret, main-window-bound,
 purpose-bound, generation-bound, single-use capability that crosses React. Its authorized path,

@@ -13,6 +13,7 @@ use super::{
 use std::{
     fs,
     os::windows::{ffi::OsStrExt, fs::MetadataExt},
+    panic::{catch_unwind, AssertUnwindSafe},
     path::{Component, Path, PathBuf, Prefix},
     sync::Arc,
 };
@@ -26,6 +27,40 @@ const DEFAULT_RECOVERY_FILE_NAME: &str = "vision-wallet.vision-recovery.json";
 const MAX_WINDOWS_PATH_UNITS: usize = 32_767;
 const MAX_WINDOWS_FILE_NAME_UNITS: usize = 255;
 
+struct SelectionFailClosedGuard {
+    runtime: Arc<WalletRuntimeState>,
+    armed: bool,
+}
+
+impl SelectionFailClosedGuard {
+    fn arm(runtime: Arc<WalletRuntimeState>) -> Self {
+        Self {
+            runtime,
+            armed: true,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.armed = false;
+    }
+
+    fn invalidate_or_terminate(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match catch_unwind(AssertUnwindSafe(|| self.runtime.invalidate_all())) {
+            Ok(Ok(())) => self.armed = false,
+            Ok(Err(_)) | Err(_) => std::process::abort(),
+        }
+    }
+}
+
+impl Drop for SelectionFailClosedGuard {
+    fn drop(&mut self) {
+        self.invalidate_or_terminate();
+    }
+}
+
 pub(in crate::wallet) fn select_recovery_destination<R, F>(
     window: &WebviewWindow<R>,
     runtime: Arc<WalletRuntimeState>,
@@ -35,20 +70,41 @@ where
     R: Runtime,
     F: FnOnce(Result<RecoveryPathToken, WalletRuntimeError>) + Send + 'static,
 {
-    let owner_window = window.label().to_string();
-    let permit =
-        runtime.begin_recovery_path_selection(&owner_window, RecoveryPathPurpose::Destination)?;
-    window
-        .dialog()
-        .file()
-        .set_parent(window)
-        .set_title("Choose encrypted Vision recovery destination")
-        .set_file_name(DEFAULT_RECOVERY_FILE_NAME)
-        .add_filter("Vision encrypted recovery", RECOVERY_FILTER_EXTENSIONS)
-        .save_file(move |selected| {
-            completion(finish_destination_selection(&runtime, permit, selected));
-        });
-    Ok(())
+    let mut boundary = SelectionFailClosedGuard::arm(Arc::clone(&runtime));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let owner_window = window.label().to_string();
+        let permit = runtime
+            .begin_recovery_path_selection(&owner_window, RecoveryPathPurpose::Destination)?;
+        let callback_runtime = Arc::clone(&runtime);
+        window
+            .dialog()
+            .file()
+            .set_parent(window)
+            .set_title("Choose encrypted Vision recovery destination")
+            .set_file_name(DEFAULT_RECOVERY_FILE_NAME)
+            .add_filter("Vision encrypted recovery", RECOVERY_FILTER_EXTENSIONS)
+            .save_file(move |selected| {
+                run_selection_callback(callback_runtime, || {
+                    let result = finish_destination_selection(&runtime, permit, selected);
+                    completion(result);
+                });
+            });
+        Ok(())
+    }));
+    match result {
+        Ok(Ok(())) => {
+            boundary.commit();
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            boundary.invalidate_or_terminate();
+            Err(error)
+        }
+        Err(_) => {
+            boundary.invalidate_or_terminate();
+            Err(WalletRuntimeError::RuntimeUnavailable)
+        }
+    }
 }
 
 pub(in crate::wallet) fn select_recovery_source<R, F>(
@@ -60,19 +116,49 @@ where
     R: Runtime,
     F: FnOnce(Result<RecoveryPathToken, WalletRuntimeError>) + Send + 'static,
 {
-    let owner_window = window.label().to_string();
-    let permit =
-        runtime.begin_recovery_path_selection(&owner_window, RecoveryPathPurpose::Source)?;
-    window
-        .dialog()
-        .file()
-        .set_parent(window)
-        .set_title("Choose encrypted Vision recovery source")
-        .add_filter("Vision encrypted recovery", RECOVERY_FILTER_EXTENSIONS)
-        .pick_file(move |selected| {
-            completion(finish_source_selection(&runtime, permit, selected));
-        });
-    Ok(())
+    let mut boundary = SelectionFailClosedGuard::arm(Arc::clone(&runtime));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let owner_window = window.label().to_string();
+        let permit =
+            runtime.begin_recovery_path_selection(&owner_window, RecoveryPathPurpose::Source)?;
+        let callback_runtime = Arc::clone(&runtime);
+        window
+            .dialog()
+            .file()
+            .set_parent(window)
+            .set_title("Choose encrypted Vision recovery source")
+            .add_filter("Vision encrypted recovery", RECOVERY_FILTER_EXTENSIONS)
+            .pick_file(move |selected| {
+                run_selection_callback(callback_runtime, || {
+                    let result = finish_source_selection(&runtime, permit, selected);
+                    completion(result);
+                });
+            });
+        Ok(())
+    }));
+    match result {
+        Ok(Ok(())) => {
+            boundary.commit();
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            boundary.invalidate_or_terminate();
+            Err(error)
+        }
+        Err(_) => {
+            boundary.invalidate_or_terminate();
+            Err(WalletRuntimeError::RuntimeUnavailable)
+        }
+    }
+}
+
+fn run_selection_callback(runtime: Arc<WalletRuntimeState>, callback: impl FnOnce()) {
+    let mut boundary = SelectionFailClosedGuard::arm(runtime);
+    if catch_unwind(AssertUnwindSafe(callback)).is_ok() {
+        boundary.commit();
+    } else {
+        boundary.invalidate_or_terminate();
+    }
 }
 
 fn finish_destination_selection(
@@ -81,20 +167,13 @@ fn finish_destination_selection(
     selected: Option<FilePath>,
 ) -> Result<RecoveryPathToken, WalletRuntimeError> {
     let Some(FilePath::Path(path)) = selected else {
-        return cancel_with(
-            runtime,
-            &permit,
-            if selected.is_none() {
-                WalletRuntimeError::RecoverySelectionCancelled
-            } else {
-                WalletRuntimeError::RecoveryDestinationInvalid
-            },
-        );
+        return Err(if selected.is_none() {
+            WalletRuntimeError::RecoverySelectionCancelled
+        } else {
+            WalletRuntimeError::RecoveryDestinationInvalid
+        });
     };
-    let path = match validate_destination(path) {
-        Ok(path) => path,
-        Err(error) => return cancel_with(runtime, &permit, error),
-    };
+    let path = validate_destination(path)?;
     runtime.complete_recovery_path_selection(permit, path)
 }
 
@@ -104,30 +183,14 @@ fn finish_source_selection(
     selected: Option<FilePath>,
 ) -> Result<RecoveryPathToken, WalletRuntimeError> {
     let Some(FilePath::Path(path)) = selected else {
-        return cancel_with(
-            runtime,
-            &permit,
-            if selected.is_none() {
-                WalletRuntimeError::RecoverySelectionCancelled
-            } else {
-                WalletRuntimeError::RecoverySourceInvalid
-            },
-        );
+        return Err(if selected.is_none() {
+            WalletRuntimeError::RecoverySelectionCancelled
+        } else {
+            WalletRuntimeError::RecoverySourceInvalid
+        });
     };
-    let path = match validate_source(path) {
-        Ok(path) => path,
-        Err(error) => return cancel_with(runtime, &permit, error),
-    };
+    let path = validate_source(path)?;
     runtime.complete_recovery_path_selection(permit, path)
-}
-
-fn cancel_with<T>(
-    runtime: &WalletRuntimeState,
-    permit: &RecoverySelectionPermit,
-    intended_error: WalletRuntimeError,
-) -> Result<T, WalletRuntimeError> {
-    runtime.cancel_recovery_path_selection(permit)?;
-    Err(intended_error)
 }
 
 fn validate_destination(path: PathBuf) -> Result<PathBuf, WalletRuntimeError> {
@@ -324,7 +387,7 @@ mod tests {
 
     #[test]
     fn cancellation_and_invalid_selection_revoke_pending_authority() {
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let permit = runtime
             .begin_recovery_path_selection("main", RecoveryPathPurpose::Destination)
             .unwrap();
@@ -336,7 +399,7 @@ mod tests {
             .begin_operation("main", super::super::runtime::WalletOperationKind::Create)
             .unwrap();
 
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let permit = runtime
             .begin_recovery_path_selection("main", RecoveryPathPurpose::Source)
             .unwrap();
@@ -353,7 +416,7 @@ mod tests {
             .begin_operation("main", super::super::runtime::WalletOperationKind::Restore)
             .unwrap();
 
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let permit = runtime
             .begin_recovery_path_selection("main", RecoveryPathPurpose::Source)
             .unwrap();
@@ -373,7 +436,7 @@ mod tests {
     #[test]
     fn validated_selection_returns_only_a_consumable_runtime_token() {
         let directory = tempfile::tempdir().unwrap();
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let permit = runtime
             .begin_recovery_path_selection("main", RecoveryPathPurpose::Destination)
             .unwrap();
@@ -388,5 +451,75 @@ mod tests {
             .consume_recovery_path("main", RecoveryPathPurpose::Destination, token.as_str())
             .unwrap();
         assert_eq!(selected.file_name().unwrap(), "backup.vision-recovery.json");
+    }
+
+    #[test]
+    fn uncommitted_selection_permit_drop_fully_invalidates_authority() {
+        let runtime = Arc::new(WalletRuntimeState::for_test());
+        let permit = runtime
+            .begin_recovery_path_selection("main", RecoveryPathPurpose::Destination)
+            .unwrap();
+        drop(permit);
+
+        runtime
+            .begin_operation("main", super::super::runtime::WalletOperationKind::Create)
+            .unwrap();
+    }
+
+    #[test]
+    fn callback_panic_revokes_completed_path_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
+        let permit = runtime
+            .begin_recovery_path_selection("main", RecoveryPathPurpose::Destination)
+            .unwrap();
+        let callback_runtime = Arc::clone(&runtime);
+        let completion_runtime = Arc::clone(&runtime);
+        run_selection_callback(callback_runtime, move || {
+            completion_runtime
+                .complete_recovery_path_selection(
+                    permit,
+                    directory.path().join("panic.vision-recovery.json"),
+                )
+                .unwrap();
+            panic!("injected recovery selection callback panic");
+        });
+
+        assert_eq!(
+            runtime
+                .consume_recovery_path(
+                    "main",
+                    RecoveryPathPurpose::Destination,
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+                .unwrap_err(),
+            WalletRuntimeError::PathAuthorizationInvalid,
+        );
+        runtime
+            .begin_operation("main", super::super::runtime::WalletOperationKind::Create)
+            .unwrap();
+    }
+
+    #[test]
+    fn callback_panics_around_path_validation_revoke_pending_authority() {
+        for panic_after_validation in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = Arc::new(WalletRuntimeState::for_test());
+            let permit = runtime
+                .begin_recovery_path_selection("main", RecoveryPathPurpose::Destination)
+                .unwrap();
+            let callback_runtime = Arc::clone(&runtime);
+            run_selection_callback(callback_runtime, move || {
+                if panic_after_validation {
+                    validate_destination(directory.path().join("panic.json")).unwrap();
+                }
+                let _permit_must_drop_during_unwind = permit;
+                panic!("injected recovery selection validation panic");
+            });
+
+            runtime
+                .begin_operation("main", super::super::runtime::WalletOperationKind::Create)
+                .unwrap();
+        }
     }
 }

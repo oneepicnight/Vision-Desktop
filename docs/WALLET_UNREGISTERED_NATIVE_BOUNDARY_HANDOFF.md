@@ -2,7 +2,8 @@
 
 ## Scope
 
-This implementation follows the independently approved design at parent commit `bd5169a`.
+This implementation follows the independently approved design at parent commit `bd5169a` and
+corrects the implementation findings reported against commit `d3d3134`.
 It is deliberately unreachable from the Tauri command surface and from React.
 
 The exact implementation commit must receive another independent security review before any
@@ -20,17 +21,28 @@ added.
   main native window handle.
 - Secret display and input are owner-drawn. No secret is assigned to `STATIC`, `EDIT`, a window
   title, clipboard, accessibility text, or a WebView value.
-- Clipboard, text retrieval, context-menu, and IME message routes fail closed. There is no standard
-  native or WebView fallback.
+- Every secret window disassociates Windows IME/text services before accepting input. Clipboard,
+  text retrieval, context-menu, all Win32 IME result/context/request/notification/control/key
+  routes (including `WM_IME_CHAR` and `WM_IME_SETCONTEXT`), and input-language changes fail closed,
+  wipe the ceremony, and close the native window. There is no standard native or WebView fallback.
 - Generated recovery display and acknowledgement use the same fixed-allocation owner-drawn model.
 - Recovery acknowledgement mismatch wipes both native operands and cancels the attempt; it does not
   resume a partly completed ceremony.
-- Public create and restore schemas contain only bounded `WalletId`, `WalletLabel`, and canonical
-  lowercase `RecoverySelectionHandle` values and reject unknown and duplicate fields.
+- The unregistered production create and restore entry points consume only bounded
+  `WalletCreateRequest` and `WalletRestoreRequest` objects. Those schemas contain only validated
+  `WalletId`, `WalletLabel`, and canonical lowercase `RecoverySelectionHandle` values and reject
+  unknown and duplicate fields before runtime, filesystem, capability, native UI, or cryptographic
+  work. Raw-string lifecycle entry points exist only under `cfg(test)`.
 - Recovery capabilities are consumed before native secret ceremonies begin.
-- Status, create, restore, unlock, and lock have an outer fail-closed boundary. Uncommitted errors
+- A non-emitting process panic hook is installed before Tauri builder/plugin setup and before the
+  Wallet runtime can initialize. It never formats panic payloads, locations, paths, command data,
+  native buffers, Wallet state, or backtraces.
+- Status, create, restore, unlock, lock, recovery-selection initiation, and recovery-selection
+  callback completion have outer fail-closed boundaries. Uncommitted errors
   invalidate runtime authority. Intercepted panics return only `wallet_runtime_unavailable` after
   invalidation. The process terminates if invalidation cannot be proven.
+- Recovery-selection permits are runtime-owned and armed. Dropping any uncommitted permit fully
+  invalidates Wallet authority, and a callback panic revokes even a just-completed path token.
 - Lowercase capability-handle canonicalization is also enforced in the runtime authority layer.
 
 ## Explicitly absent
@@ -56,12 +68,16 @@ The implementation adds coverage for:
 - absence of `SecretInput` Serde deserialization;
 - unknown, duplicate, secret-bearing, oversized, and noncanonical public request fields;
 - owner-drawn secret handling and blocked native text/clipboard/IME routes;
-- panic immediately after an unlocked seed enters the session;
-- panic before request processing;
+- direct `WM_IME_CHAR` and input-language-change injection against both secret-window procedures;
+- panic before/after bounded request acceptance, capability consumption, every native secret
+  ceremony, cryptographic preparation, recovery acknowledgement/publication/verification, vault
+  publication, session installation, selection validation/completion, and success commitment;
+- uncommitted selection-permit drop and selection-callback panic;
 - fixed generic panic error and post-panic session invalidation; and
 - canonical lowercase recovery capability enforcement.
 
-Real operator-driven accessibility, international keyboard, Windows lock/suspend/teardown, dump,
+Real operator-driven accessibility and Windows IME/international-keyboard testing, Windows
+lock/suspend/teardown, dump,
 allocator, and packaged recovery qualification remains part of the final security evidence and is
 not replaced by unit tests.
 

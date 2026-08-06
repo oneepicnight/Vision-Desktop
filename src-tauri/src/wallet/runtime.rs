@@ -19,7 +19,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard,
     },
     time::Instant,
 };
@@ -95,9 +95,34 @@ pub(in crate::wallet) struct WalletActivationProof {
 pub(in crate::wallet) struct RecoveryPathToken(Zeroizing<String>);
 
 pub(in crate::wallet) struct RecoverySelectionPermit {
+    state: Arc<WalletRuntimeState>,
     generation: u64,
     owner_window: String,
     purpose: RecoveryPathPurpose,
+    armed: bool,
+}
+
+impl RecoverySelectionPermit {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn invalidate_or_terminate(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.state.invalidate_all()))
+        {
+            Ok(Ok(())) => self.armed = false,
+            Ok(Err(_)) | Err(_) => std::process::abort(),
+        }
+    }
+}
+
+impl Drop for RecoverySelectionPermit {
+    fn drop(&mut self) {
+        self.invalidate_or_terminate();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,7 +265,7 @@ impl WalletRuntimeState {
     }
 
     pub(in crate::wallet) fn begin_recovery_path_selection(
-        &self,
+        self: &Arc<Self>,
         owner_window: &str,
         purpose: RecoveryPathPurpose,
     ) -> Result<RecoverySelectionPermit, WalletRuntimeError> {
@@ -262,9 +287,11 @@ impl WalletRuntimeState {
             purpose,
         });
         Ok(RecoverySelectionPermit {
+            state: Arc::clone(self),
             generation,
             owner_window: owner_window.to_string(),
             purpose,
+            armed: true,
         })
     }
 
@@ -275,29 +302,24 @@ impl WalletRuntimeState {
     ) -> Result<RecoveryPathToken, WalletRuntimeError> {
         let mut token_bytes = Zeroizing::new([0_u8; PATH_TOKEN_BYTES]);
         if getrandom::fill(&mut *token_bytes).is_err() {
-            let _ = self.cancel_recovery_path_selection(&permit);
             return Err(WalletRuntimeError::SecureRandomUnavailable);
         }
-        let now_ms = match self.now_ms() {
-            Ok(now_ms) => now_ms,
-            Err(error) => {
-                let _ = self.cancel_recovery_path_selection(&permit);
-                return Err(error);
-            }
-        };
+        let now_ms = self.now_ms()?;
         self.complete_recovery_path_selection_at(permit, selected_path, &token_bytes, now_ms)
     }
 
     fn complete_recovery_path_selection_at(
         &self,
-        permit: RecoverySelectionPermit,
+        mut permit: RecoverySelectionPermit,
         selected_path: PathBuf,
         token_bytes: &[u8; PATH_TOKEN_BYTES],
         now_ms: u64,
     ) -> Result<RecoveryPathToken, WalletRuntimeError> {
         if selected_path.as_os_str().is_empty() {
-            let _ = self.cancel_recovery_path_selection(&permit);
             return Err(WalletRuntimeError::InvalidRequest);
+        }
+        if !std::ptr::eq(permit.state.as_ref(), self) {
+            return Err(WalletRuntimeError::PathAuthorizationInvalid);
         }
         let mut inner = self.lock_inner()?;
         if self.revocation_is_pending() {
@@ -312,20 +334,25 @@ impl WalletRuntimeState {
         }
         inner.pending_path_selection = None;
         let token = hex::encode(token_bytes);
+        let owner_window = std::mem::take(&mut permit.owner_window);
         inner.path_authorization = Some(PathAuthorization {
             token: Zeroizing::new(token.clone()),
-            owner_window: permit.owner_window,
+            owner_window,
             purpose: permit.purpose,
             selected_path,
             issued_at_ms: now_ms,
         });
+        permit.disarm();
         Ok(RecoveryPathToken(Zeroizing::new(token)))
     }
 
     pub(in crate::wallet) fn cancel_recovery_path_selection(
         &self,
-        permit: &RecoverySelectionPermit,
+        permit: &mut RecoverySelectionPermit,
     ) -> Result<(), WalletRuntimeError> {
+        if !std::ptr::eq(permit.state.as_ref(), self) {
+            return Err(WalletRuntimeError::PathAuthorizationInvalid);
+        }
         let mut inner = self.lock_inner()?;
         if self.revocation_is_pending() {
             return Err(WalletRuntimeError::RuntimeUnavailable);
@@ -339,6 +366,7 @@ impl WalletRuntimeState {
         }
         inner.pending_path_selection = None;
         inner.path_authorization = None;
+        permit.disarm();
         Ok(())
     }
 
@@ -1303,7 +1331,7 @@ mod tests {
     #[test]
     fn lifecycle_requirements_block_lifecycle_signing_and_recovery_authority() {
         for requirement in lifecycle_activation_requirements_for_test() {
-            let runtime = WalletRuntimeState::for_test_missing_activation(requirement);
+            let runtime = Arc::new(WalletRuntimeState::for_test_missing_activation(requirement));
             for kind in [
                 WalletOperationKind::Create,
                 WalletOperationKind::Restore,
@@ -1350,7 +1378,7 @@ mod tests {
                 "missing requirement: {requirement:?}",
             );
 
-            let runtime = WalletRuntimeState::for_test_missing_activation(requirement);
+            let runtime = Arc::new(WalletRuntimeState::for_test_missing_activation(requirement));
             runtime
                 .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
                 .unwrap();
@@ -1359,7 +1387,7 @@ mod tests {
 
     #[test]
     fn production_activation_policy_issues_no_sensitive_authority() {
-        let runtime = WalletRuntimeState::for_test_with_production_activation();
+        let runtime = Arc::new(WalletRuntimeState::for_test_with_production_activation());
 
         assert_eq!(
             runtime
@@ -1487,7 +1515,7 @@ mod tests {
 
     #[test]
     fn pending_revocation_rejects_new_authority() {
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         runtime.pending_revocations.store(1, Ordering::Release);
 
         assert_eq!(
@@ -1564,7 +1592,7 @@ mod tests {
 
     #[test]
     fn recovery_path_tokens_are_window_bound_single_use_and_expiring() {
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let selected = PathBuf::from(r"C:\safe\wallet.vision-recovery.json");
         let permit = runtime
             .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
@@ -1650,7 +1678,7 @@ mod tests {
 
     #[test]
     fn window_invalidation_revokes_every_path_authorization() {
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let permit = runtime
             .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Source)
             .unwrap();
@@ -1678,7 +1706,7 @@ mod tests {
 
     #[test]
     fn random_path_token_round_trip_uses_the_monotonic_runtime_clock() {
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let selected = PathBuf::from(r"C:\safe\generated.vision-recovery.json");
         let permit = runtime
             .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
@@ -1701,7 +1729,7 @@ mod tests {
 
     #[test]
     fn pending_selection_excludes_operations_and_stale_completion_cannot_win() {
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let stale = runtime
             .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
             .unwrap();
@@ -1719,7 +1747,7 @@ mod tests {
         );
 
         runtime.invalidate_all().unwrap();
-        let current = runtime
+        let mut current = runtime
             .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Source)
             .unwrap();
         assert_eq!(
@@ -1731,7 +1759,11 @@ mod tests {
                 .err(),
             Some(WalletRuntimeError::PathAuthorizationInvalid)
         );
-        runtime.cancel_recovery_path_selection(&current).unwrap();
+        assert_eq!(
+            runtime.cancel_recovery_path_selection(&mut current),
+            Err(WalletRuntimeError::PathAuthorizationInvalid),
+        );
+        drop(current);
         runtime
             .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Restore)
             .unwrap();

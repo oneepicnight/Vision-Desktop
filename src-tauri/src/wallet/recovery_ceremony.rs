@@ -22,7 +22,10 @@ use windows_sys::Win32::{
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::{
-        Input::KeyboardAndMouse::{EnableWindow, SetFocus},
+        Input::{
+            Ime::{ImmAssociateContextEx, IACE_CHILDREN, IACE_IGNORENOCONTEXT},
+            KeyboardAndMouse::{EnableWindow, SetFocus},
+        },
         WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
             GetWindowLongPtrW, GetWindowRect, IsDialogMessageW, IsWindow, KillTimer, LoadCursorW,
@@ -31,9 +34,12 @@ use windows_sys::Win32::{
             BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA,
             IDC_ARROW, MB_ICONWARNING, MB_OK, MSG, SW_SHOW, WM_CHAR, WM_CLEAR, WM_CLOSE,
             WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_CUT, WM_GETTEXT, WM_GETTEXTLENGTH,
-            WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_NCCREATE,
-            WM_NCDESTROY, WM_PAINT, WM_PASTE, WM_SETTEXT, WM_TIMER, WNDCLASSEXW, WS_CAPTION,
-            WS_CHILD, WS_EX_DLGMODALFRAME, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+            WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_COMPOSITIONFULL, WM_IME_CONTROL,
+            WM_IME_ENDCOMPOSITION, WM_IME_KEYDOWN, WM_IME_KEYUP, WM_IME_NOTIFY, WM_IME_REQUEST,
+            WM_IME_SELECT, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_INPUTLANGCHANGE,
+            WM_INPUTLANGCHANGEREQUEST, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_PASTE, WM_SETTEXT,
+            WM_TIMER, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_DLGMODALFRAME, WS_POPUP, WS_SYSMENU,
+            WS_TABSTOP, WS_VISIBLE,
         },
     },
 };
@@ -261,7 +267,7 @@ unsafe extern "system" fn ceremony_window_proc(
 
     match message {
         WM_CREATE => {
-            if !create_dialog_buttons(window) {
+            if !disable_text_services(window) || !create_dialog_buttons(window) {
                 state.outcome = CeremonyOutcome::Failed;
                 return -1;
             }
@@ -335,7 +341,7 @@ unsafe extern "system" fn ceremony_window_proc(
         }
         WM_COPY | WM_CUT | WM_PASTE | WM_CLEAR | WM_CONTEXTMENU | WM_GETTEXT | WM_GETTEXTLENGTH
         | WM_SETTEXT => 0,
-        WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION => {
+        message if is_blocked_text_service_message(message) => {
             state.outcome = CeremonyOutcome::Failed;
             state.wipe();
             unsafe { DestroyWindow(window) };
@@ -860,7 +866,7 @@ unsafe extern "system" fn secret_capture_window_proc(
     let state = unsafe { &mut *state };
     match message {
         WM_CREATE => {
-            if !create_capture_buttons(window) {
+            if !disable_text_services(window) || !create_capture_buttons(window) {
                 state.outcome = CeremonyOutcome::Failed;
                 return -1;
             }
@@ -925,7 +931,7 @@ unsafe extern "system" fn secret_capture_window_proc(
         }
         WM_COPY | WM_CUT | WM_PASTE | WM_CLEAR | WM_CONTEXTMENU | WM_GETTEXT | WM_GETTEXTLENGTH
         | WM_SETTEXT => 0,
-        WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION => {
+        message if is_blocked_text_service_message(message) => {
             state.outcome = CeremonyOutcome::Failed;
             state.wipe();
             unsafe { DestroyWindow(window) };
@@ -1021,8 +1027,36 @@ fn create_capture_buttons(window: HWND) -> bool {
     !submit_button.is_null() && !cancel_button.is_null()
 }
 
+fn disable_text_services(window: HWND) -> bool {
+    // A null input context disassociates the IME. Applying it to children prevents a future
+    // standard child or text service from silently inheriting an input context.
+    unsafe { ImmAssociateContextEx(window, null_mut(), IACE_CHILDREN | IACE_IGNORENOCONTEXT) != 0 }
+}
+
+const fn is_blocked_text_service_message(message: u32) -> bool {
+    matches!(
+        message,
+        WM_IME_STARTCOMPOSITION
+            | WM_IME_ENDCOMPOSITION
+            | WM_IME_COMPOSITION
+            | WM_IME_SETCONTEXT
+            | WM_IME_NOTIFY
+            | WM_IME_CONTROL
+            | WM_IME_COMPOSITIONFULL
+            | WM_IME_SELECT
+            | WM_IME_CHAR
+            | WM_IME_REQUEST
+            | WM_IME_KEYDOWN
+            | WM_IME_KEYUP
+            | WM_INPUTLANGCHANGEREQUEST
+            | WM_INPUTLANGCHANGE
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn secret_controls_are_owner_drawn_and_have_no_standard_text_storage() {
         let source = include_str!("recovery_ceremony.rs");
@@ -1044,8 +1078,113 @@ mod tests {
             "WM_GETTEXT",
             "WM_GETTEXTLENGTH",
             "WM_IME_STARTCOMPOSITION",
+            "WM_IME_CHAR",
+            "WM_IME_SETCONTEXT",
+            "WM_INPUTLANGCHANGE",
         ] {
             assert!(source.contains(blocked), "missing {blocked} protection");
         }
+        assert!(source.contains("ImmAssociateContextEx"));
+    }
+
+    #[test]
+    fn every_ime_and_input_language_route_is_classified_fail_closed() {
+        for message in [
+            WM_IME_STARTCOMPOSITION,
+            WM_IME_ENDCOMPOSITION,
+            WM_IME_COMPOSITION,
+            WM_IME_SETCONTEXT,
+            WM_IME_NOTIFY,
+            WM_IME_CONTROL,
+            WM_IME_COMPOSITIONFULL,
+            WM_IME_SELECT,
+            WM_IME_CHAR,
+            WM_IME_REQUEST,
+            WM_IME_KEYDOWN,
+            WM_IME_KEYUP,
+            WM_INPUTLANGCHANGEREQUEST,
+            WM_INPUTLANGCHANGE,
+        ] {
+            assert!(is_blocked_text_service_message(message));
+        }
+        assert!(!is_blocked_text_service_message(WM_CHAR));
+    }
+
+    #[test]
+    fn ime_result_injection_wipes_and_closes_both_secret_windows() {
+        let class_name = wide_null("BUTTON");
+        let window = unsafe {
+            CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                null(),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        assert!(!window.is_null());
+
+        let expected = FixedSecretUtf16::from_ascii(b"expected-secret").unwrap();
+        let input = FixedSecretUtf16::from_ascii(b"typed-secret").unwrap();
+        let mut ceremony_state = CeremonyDialogState {
+            expected,
+            input,
+            outcome: CeremonyOutcome::Pending,
+        };
+        unsafe {
+            SetWindowLongPtrW(
+                window,
+                GWLP_USERDATA,
+                (&mut ceremony_state as *mut CeremonyDialogState) as isize,
+            );
+            ceremony_window_proc(window, WM_IME_CHAR, usize::from(b'x'), 0);
+        }
+        assert_eq!(ceremony_state.outcome, CeremonyOutcome::Failed);
+        assert!(ceremony_state.expected.is_empty());
+        assert!(ceremony_state.input.is_empty());
+        assert_eq!(unsafe { IsWindow(window) }, 0);
+
+        let capture_window = unsafe {
+            CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                null(),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        assert!(!capture_window.is_null());
+        let mut capture_state = SecretCaptureState {
+            input: FixedSecretUtf16::from_ascii(b"typed-password").unwrap(),
+            captured: None,
+            purpose: SecretCapturePurpose::UnlockPassword,
+            outcome: CeremonyOutcome::Pending,
+        };
+        unsafe {
+            SetWindowLongPtrW(
+                capture_window,
+                GWLP_USERDATA,
+                (&mut capture_state as *mut SecretCaptureState) as isize,
+            );
+            secret_capture_window_proc(capture_window, WM_INPUTLANGCHANGE, 0, 0);
+        }
+        assert_eq!(capture_state.outcome, CeremonyOutcome::Failed);
+        assert!(capture_state.input.is_empty());
+        assert!(capture_state.captured.is_none());
+        assert_eq!(unsafe { IsWindow(capture_window) }, 0);
     }
 }

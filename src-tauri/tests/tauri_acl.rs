@@ -300,6 +300,7 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let secret_input_source = read("src/wallet/secret_input.rs");
     let secrets_source = read("src/wallet/secrets.rs");
     let ceremony_source = read("src/wallet/recovery_ceremony.rs");
+    let panic_policy_source = read("src/wallet/panic_policy.rs");
     let public_request_source = read("src/wallet/public_request.rs");
     let public_request_production = public_request_source
         .split("#[cfg(test)]")
@@ -308,6 +309,21 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let capability_source = read("capabilities/main-desktop.json");
 
     assert!(lib_source.contains("wallet::WalletRuntimeState::initialize()"));
+    let panic_policy = lib_source
+        .find("wallet::install_production_panic_policy()")
+        .expect("silent panic policy is installed");
+    let wallet_runtime_initialization = lib_source
+        .find("wallet::WalletRuntimeState::initialize()")
+        .expect("wallet runtime is initialized");
+    assert!(panic_policy < wallet_runtime_initialization);
+    let panic_policy_production = panic_policy_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("panic policy has production source");
+    assert!(panic_policy_production.contains("std::panic::set_hook"));
+    assert!(!panic_policy_production.contains("eprintln!"));
+    assert!(!panic_policy_production.contains("println!"));
+    assert!(!panic_policy_production.contains("format!("));
     assert!(lib_source.contains("wallet::WindowsWalletLifecycle::register("));
     assert!(lib_source.contains("WindowsWalletLifecycle::register(Arc::clone("));
     assert!(lib_source.contains("&wallet_runtime"));
@@ -400,7 +416,8 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(recovery_selection_source.contains("FILE_ATTRIBUTE_REPARSE_POINT"));
     assert!(recovery_selection_source.contains("begin_recovery_path_selection"));
     assert!(recovery_selection_source.contains("complete_recovery_path_selection"));
-    assert!(recovery_selection_source.contains("cancel_recovery_path_selection"));
+    assert!(recovery_selection_source.contains("SelectionFailClosedGuard"));
+    assert!(runtime_source.contains("impl Drop for RecoverySelectionPermit"));
     assert!(!secret_input_source.contains("#[tauri::command]"));
     assert!(!secret_input_source.contains("impl Serialize"));
     assert!(!secret_input_source.contains("impl<'de> Deserialize"));
@@ -418,6 +435,9 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(!public_request_production.contains("#[tauri::command]"));
     assert!(!public_request_production.contains("password:"));
     assert!(!public_request_production.contains("owner_window:"));
+    assert!(wallet_adapter_production.contains("request: WalletCreateRequest"));
+    assert!(wallet_adapter_production.contains("request: WalletRestoreRequest"));
+    assert!(!public_request_production.contains("derive(Debug, Deserialize)"));
     assert!(!capability_source.contains("wallet"));
     assert!(!capability_source.contains("dialog:"));
     assert!(!read("../src/services/coreApi.ts").contains("wallet_"));

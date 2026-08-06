@@ -71,7 +71,9 @@ No custody command may be registered until all of these are true:
 5. `build.rs` declares every application command through `tauri_build::AppManifest` so custom commands participate in ACL resolution. Completed for the existing command surface; automated tests enforce inventory parity.
 6. One explicit capability applies to the `main` window. It lists only individually approved application commands and has no `remote.urls`, wildcard window, shell, generic filesystem, HTTP, clipboard, plugin, or wallet permission. Completed for the existing command surface.
 7. The Rust side of the official dialog plugin performs recovery save/open selection. Its JavaScript package is not installed and dialog permissions are not exposed to React.
-8. Every secret-bearing request type is non-serializable in the response direction, non-cloneable, non-debuggable, bounded before expensive work, and zeroized on drop. Implemented for the private `SecretInput`; frontend/IPC activation remains gated.
+8. Lifecycle secrets are not request fields. `SecretInput` is a Rust-native, non-Serde,
+   non-cloneable, non-debuggable ownership type created only by the fixed-allocation native
+   ceremony. Frontend/IPC activation remains gated.
 9. Wallet state is held in a dedicated Rust `WalletRuntimeState`; it never enters `DesktopState`, reducer events, browser storage, URL state, or support packages. Implemented privately with no registered command or capability.
 10. Create, restore, lock, unlock, duplicate invocation, cancellation, crash, corrupt backup, wrong password, path race, stale token, window mismatch, and process shutdown tests pass.
 
@@ -322,7 +324,10 @@ Before activation:
 3. Add `AppManifest`, explicit application permissions, and one main-window capability; migrate existing commands without changing behavior. Completed; the 19-command inventory is protected by automated parity tests, while dialog permissions and wallet commands remain inactive.
 4. Split production CSP from `devCsp` and prove no frontend direct-Core requests are required. Completed; production permits only Tauri IPC transports and the frontend source boundary is tested.
 5. Initialize the single-instance plugin first, discard duplicate launch data, restore the primary main window, and prove ordinary duplicate-launch and process-lock recovery behavior. Completed on Windows; source review retains a dedicated custody-lock requirement for step 6.
-6. Implement `SecretInput`, `WalletRuntimeState`, process/window binding, operation exclusion, and lifecycle locking with no registered wallet commands. Completed for process ownership, main-window page/close/destruction events, Windows session lock, suspend/standby, logoff/shutdown, teardown, and poison. Unlock and resume do not restore authority.
+6. Implement the Rust-native `SecretInput`, `WalletRuntimeState`, process/window binding, operation
+   exclusion, and lifecycle locking with no registered wallet commands. Completed for process
+   ownership, main-window page/close/destruction events, Windows session lock, suspend/standby,
+   logoff/shutdown, teardown, and poison. Unlock and resume do not restore authority.
 7. Implement and test destination/source token selection in Rust. Completed privately: native dialogs are main-window-parented; local paths are validated against URI, UNC/device, traversal, alternate-stream, reparse, overwrite, suffix, type, and size hazards; generation-bound cancellation and stale completion are tested; no wallet command or WebView permission is active.
 8. Implement create/restore/unlock/lock lifecycle adapters but keep them unregistered behind the activation policy. Completed privately: the fixed local vault, token-authorized recovery files, locked create/restore completion, session unlock, idempotent lock, generation checks, restart-safe public status, and fixed errors are connected and tested. No Tauri command exists.
 9. Independently approve the native-secret, bounded-request, and unwind-guard design. The first
@@ -345,7 +350,8 @@ Approved on 2026-08-01:
 - the existing local wallet password policy;
 - a Rust-generated 256-bit portable recovery credential with exact version and checksum validation;
 - one backend-controlled onboarding operation after destination authorization;
-- immediate frontend field clearing with no shared-state or persistence;
+- no frontend secret fields; passwords and recovery credentials remain inside Rust-owned native
+  ceremonies and fixed-allocation zeroizing buffers;
 - no user-facing wallet creation until private loopback operation is available;
 - no mnemonic, clipboard recovery, automatic cloud backup, arbitrary filesystem access, or send activation.
 - exact-version, Windows-only Rust dependencies for official Tauri dialog and single-instance support, with no JavaScript packages, plugin permissions, or wallet commands;

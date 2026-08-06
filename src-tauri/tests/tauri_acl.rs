@@ -298,6 +298,13 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let vault_source = read("src/wallet/vault.rs");
     let device_protection_source = read("src/wallet/device_protection.rs");
     let secret_input_source = read("src/wallet/secret_input.rs");
+    let secrets_source = read("src/wallet/secrets.rs");
+    let ceremony_source = read("src/wallet/recovery_ceremony.rs");
+    let public_request_source = read("src/wallet/public_request.rs");
+    let public_request_production = public_request_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("public request module has production source");
     let capability_source = read("capabilities/main-desktop.json");
 
     assert!(lib_source.contains("wallet::WalletRuntimeState::initialize()"));
@@ -307,6 +314,7 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(lib_source.contains("app.manage(wallet_runtime)"));
     assert!(lib_source.contains("app.manage(wallet_lifecycle)"));
     assert!(lib_source.contains("wallet::WalletLifecycleAdapters::initialize("));
+    assert!(lib_source.contains("wallet::NativeWalletSecretCeremony::new("));
     assert!(lib_source.contains("app.path().local_data_dir()"));
     let wallet_adapter_production = wallet_adapter_source
         .split("#[cfg(test)]\nmod tests")
@@ -377,7 +385,7 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
         wallet_adapter_production
             .match_indices(".run_authorized(")
             .count(),
-        12
+        13
     );
     assert_eq!(
         wallet_adapter_production
@@ -395,9 +403,21 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(recovery_selection_source.contains("cancel_recovery_path_selection"));
     assert!(!secret_input_source.contains("#[tauri::command]"));
     assert!(!secret_input_source.contains("impl Serialize"));
-    assert!(!secret_input_source.contains("#[derive("));
+    assert!(!secret_input_source.contains("impl<'de> Deserialize"));
+    assert!(!secret_input_source.contains("serde_json"));
     assert!(!secret_input_source.contains("impl Clone"));
     assert!(!secret_input_source.contains("impl fmt::Debug"));
+    assert!(!secrets_source.contains("SecretString"));
+    assert!(secrets_source.contains("bytes: Zeroizing<Vec<u8>>"));
+    assert!(secrets_source.contains("logical_len: usize"));
+    assert!(!ceremony_source.contains("#[tauri::command]"));
+    assert!(!ceremony_source.contains("wide_null(\"EDIT\")"));
+    assert!(!ceremony_source.contains("wide_null(\"STATIC\")"));
+    assert!(!ceremony_source.contains("GetWindowTextW"));
+    assert!(!ceremony_source.contains("SetWindowTextW"));
+    assert!(!public_request_production.contains("#[tauri::command]"));
+    assert!(!public_request_production.contains("password:"));
+    assert!(!public_request_production.contains("owner_window:"));
     assert!(!capability_source.contains("wallet"));
     assert!(!capability_source.contains("dialog:"));
     assert!(!read("../src/services/coreApi.ts").contains("wallet_"));

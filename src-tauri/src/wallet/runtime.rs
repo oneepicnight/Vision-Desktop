@@ -361,7 +361,9 @@ impl WalletRuntimeState {
     ) -> Result<PathBuf, WalletRuntimeError> {
         require_main_window(owner_window)?;
         if token.len() != PATH_TOKEN_HEX_BYTES
-            || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
             return Err(WalletRuntimeError::InvalidRequest);
         }
@@ -1571,11 +1573,23 @@ mod tests {
             .complete_recovery_path_selection_at(
                 permit,
                 selected.clone(),
-                &[7; PATH_TOKEN_BYTES],
+                &[0xab; PATH_TOKEN_BYTES],
                 100,
             )
             .unwrap();
         assert_eq!(token.as_str().len(), PATH_TOKEN_HEX_BYTES);
+        let uppercase = token.as_str().to_ascii_uppercase();
+        assert_eq!(
+            runtime
+                .consume_recovery_path_at(
+                    MAIN_WINDOW_LABEL,
+                    RecoveryPathPurpose::Destination,
+                    uppercase.as_str(),
+                    101,
+                )
+                .unwrap_err(),
+            WalletRuntimeError::InvalidRequest
+        );
         assert_eq!(
             runtime
                 .consume_recovery_path_at(
@@ -1726,7 +1740,7 @@ mod tests {
     #[test]
     fn poisoned_runtime_fails_closed_and_clears_authority() {
         let runtime = WalletRuntimeState::for_test();
-        let password = WalletPassword::new("correct horse battery staple".to_string());
+        let password = WalletPassword::for_test("correct horse battery staple");
         let vault = EncryptedWalletVault::encrypt_for_test(
             "poison_test",
             1,

@@ -13,7 +13,10 @@ mod journal;
 mod kdf;
 #[cfg(windows)]
 mod lifecycle;
+#[cfg(windows)]
+mod native_secret_buffer;
 mod onboarding;
+mod public_request;
 mod receipt;
 mod recovery;
 #[cfg(windows)]
@@ -42,6 +45,8 @@ pub use contract::{
 pub(crate) use lifecycle::WalletLifecycleAdapters;
 #[cfg(windows)]
 pub(crate) use recovery_ceremony::NativeRecoveryCredentialCeremony;
+#[cfg(windows)]
+pub(crate) use recovery_ceremony::NativeWalletSecretCeremony;
 pub(crate) use runtime::WalletRuntimeState;
 pub use secrets::WalletSeed;
 #[cfg(windows)]

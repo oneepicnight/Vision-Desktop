@@ -90,17 +90,18 @@ The adapters are managed only as private Rust state. No Tauri command exposes th
 
 ## Secret input
 
-`SecretInput` is a dedicated custom-deserialized Rust type with a 1,024-byte UTF-8 ceiling. It:
+`SecretInput` is a Rust-native ownership type with a 1,024-byte UTF-8 ceiling. It is constructed
+only by a fixed-allocation native ceremony and:
 
-- accepts only a string value;
-- owns a zeroizing buffer;
-- moves that buffer into the existing `WalletPassword` wrapper;
+- has no Serde implementation and cannot be constructed from Tauri JSON;
+- preallocates the maximum UTF-8 buffer before controlled UTF-16 conversion and never grows it;
+- moves the controlled allocation into the existing `WalletPassword` wrapper;
 - implements no response serialization, clone, display, or debug interface;
 - returns no submitted value, length, or content in its validation error.
 
-This bounds the Rust-owned command value but cannot erase copies created by JavaScript, WebView IPC,
-or the upstream JSON parser. Frontend custody remains disabled until isolated password forms and
-immediate clearing receive independent review.
+No secret crosses JavaScript, WebView IPC, the upstream JSON parser, frontend state, or DOM controls.
+Frontend custody remains disabled until the native ceremony implementation and complete lifecycle
+boundary receive independent review.
 
 ## Recovery selection and authorization
 

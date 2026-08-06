@@ -1,5 +1,5 @@
 use super::runtime::WalletActivationProof;
-use secrecy::{ExposeSecret, SecretBox, SecretString};
+use secrecy::{ExposeSecret, SecretBox};
 use std::fmt;
 use zeroize::Zeroizing;
 
@@ -53,15 +53,34 @@ impl WalletSeed {
 /// A user-supplied wallet password held only inside the Rust custody boundary.
 ///
 /// This type deliberately has no serialization or display implementation.
-pub struct WalletPassword(SecretString);
+pub struct WalletPassword {
+    bytes: Zeroizing<Vec<u8>>,
+    logical_len: usize,
+}
 
 impl WalletPassword {
-    pub(in crate::wallet) fn new(password: String) -> Self {
-        Self(SecretString::from(password))
+    pub(in crate::wallet) fn from_fixed_utf8(
+        bytes: Zeroizing<Vec<u8>>,
+        logical_len: usize,
+    ) -> Self {
+        debug_assert!(logical_len <= bytes.len());
+        Self { bytes, logical_len }
     }
 
     pub(in crate::wallet) fn with_exposed<R>(&self, operation: impl FnOnce(&[u8]) -> R) -> R {
-        operation(self.0.expose_secret().as_bytes())
+        operation(&self.bytes[..self.logical_len])
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn for_test(value: &str) -> Self {
+        let mut bytes = Zeroizing::new(vec![0_u8; value.len().max(1024)]);
+        bytes[..value.len()].copy_from_slice(value.as_bytes());
+        Self::from_fixed_utf8(bytes, value.len())
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn allocation_for_test(&self) -> (usize, usize) {
+        (self.bytes.len(), self.bytes.capacity())
     }
 }
 
@@ -115,7 +134,7 @@ mod tests {
 
     #[test]
     fn password_debug_output_is_redacted() {
-        let password = WalletPassword::new("do-not-print-this-password".to_string());
+        let password = WalletPassword::for_test("do-not-print-this-password");
 
         assert_eq!(format!("{password:?}"), "WalletPassword([REDACTED])");
     }

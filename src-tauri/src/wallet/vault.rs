@@ -601,7 +601,7 @@ mod tests {
     use super::*;
 
     fn password(value: &str) -> WalletPassword {
-        WalletPassword::new(value.to_string())
+        WalletPassword::for_test(value)
     }
 
     fn test_vault() -> EncryptedWalletVault {

@@ -1,3 +1,12 @@
+#![cfg_attr(
+    test,
+    allow(
+        dead_code,
+        reason = "native modal entry points cannot be opened by automated unit tests"
+    )
+)]
+
+use super::native_secret_buffer::FixedSecretUtf16;
 use std::{
     ffi::c_void,
     mem::size_of,
@@ -5,22 +14,26 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use windows_sys::Win32::{
-    Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-    Graphics::Gdi::{GetStockObject, GetSysColorBrush, COLOR_WINDOW, DEFAULT_GUI_FONT},
+    Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Graphics::Gdi::{
+        BeginPaint, DrawTextW, EndPaint, GetStockObject, GetSysColorBrush, InvalidateRect,
+        SelectObject, SetBkMode, COLOR_WINDOW, DEFAULT_GUI_FONT, DT_LEFT, DT_SINGLELINE,
+        DT_WORDBREAK, PAINTSTRUCT, TRANSPARENT,
+    },
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::{EnableWindow, SetFocus},
         WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-            GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-            IsDialogMessageW, IsWindow, KillTimer, LoadCursorW, MessageBoxW, PostQuitMessage,
-            RegisterClassExW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-            SetWindowTextW, ShowWindow, TranslateMessage, UnregisterClassW, BN_CLICKED,
-            BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL,
-            ES_PASSWORD, GWLP_USERDATA, IDC_ARROW, MB_ICONWARNING, MB_OK, MSG, SW_SHOW, WM_CLOSE,
-            WM_COMMAND, WM_CREATE, WM_NCCREATE, WM_NCDESTROY, WM_SETFONT, WM_TIMER, WNDCLASSEXW,
-            WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_DLGMODALFRAME, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
-            WS_VISIBLE,
+            GetWindowLongPtrW, GetWindowRect, IsDialogMessageW, IsWindow, KillTimer, LoadCursorW,
+            MessageBoxW, PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer,
+            SetWindowLongPtrW, ShowWindow, TranslateMessage, UnregisterClassW, BN_CLICKED,
+            BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA,
+            IDC_ARROW, MB_ICONWARNING, MB_OK, MSG, SW_SHOW, WM_CHAR, WM_CLEAR, WM_CLOSE,
+            WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_CUT, WM_GETTEXT, WM_GETTEXTLENGTH,
+            WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_NCCREATE,
+            WM_NCDESTROY, WM_PAINT, WM_PASTE, WM_SETTEXT, WM_TIMER, WNDCLASSEXW, WS_CAPTION,
+            WS_CHILD, WS_EX_DLGMODALFRAME, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
         },
     },
 };
@@ -32,8 +45,7 @@ const AUTHORITY_TIMER_ID: usize = 1;
 const AUTHORITY_TIMER_MS: u32 = 200;
 const VERIFY_BUTTON_ID: usize = 1001;
 const CANCEL_BUTTON_ID: usize = 1002;
-const MAX_CREDENTIAL_UTF16_UNITS: usize = 256;
-const EMPTY_WIDE: [u16; 1] = [0];
+const FIXED_BULLET_COUNT: usize = 24;
 
 static CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -52,10 +64,8 @@ pub(in crate::wallet) trait RecoveryCredentialCeremony: Send + Sync {
     ) -> Result<(), RecoveryCeremonyError>;
 }
 
-/// Rust-owned native Windows presentation boundary for the portable recovery credential.
-///
-/// The credential is rendered and re-entered only in Win32 controls. It is never returned to
-/// React, serialized through Tauri, logged, placed on the clipboard, or stored by this boundary.
+/// Rust-owned recovery acknowledgement that never assigns either secret operand to a native
+/// `STATIC`, `EDIT`, title, clipboard, or accessibility value buffer.
 pub(crate) struct NativeRecoveryCredentialCeremony {
     owner_window: isize,
 }
@@ -78,17 +88,9 @@ impl RecoveryCredentialCeremony for NativeRecoveryCredentialCeremony {
         if !authority_is_current() {
             return Err(RecoveryCeremonyError::AuthorityRevoked);
         }
-        let mut credential_wide =
-            Zeroizing::new(encoded_credential.encode_utf16().collect::<Vec<_>>());
-        if credential_wide.is_empty() || credential_wide.len() > MAX_CREDENTIAL_UTF16_UNITS {
-            return Err(RecoveryCeremonyError::NativeUiUnavailable);
-        }
-        credential_wide.push(0);
-        run_native_ceremony(
-            self.owner_window as HWND,
-            credential_wide.as_slice(),
-            authority_is_current,
-        )
+        let expected = FixedSecretUtf16::from_ascii(encoded_credential.as_bytes())
+            .map_err(|_| RecoveryCeremonyError::NativeUiUnavailable)?;
+        run_native_ceremony(self.owner_window as HWND, expected, authority_is_current)
     }
 }
 
@@ -102,15 +104,21 @@ enum CeremonyOutcome {
 }
 
 struct CeremonyDialogState {
-    expected: *const u16,
-    expected_len: usize,
-    input: HWND,
+    expected: FixedSecretUtf16,
+    input: FixedSecretUtf16,
     outcome: CeremonyOutcome,
+}
+
+impl CeremonyDialogState {
+    fn wipe(&mut self) {
+        self.expected.wipe();
+        self.input.wipe();
+    }
 }
 
 fn run_native_ceremony(
     owner_window: HWND,
-    expected_with_nul: &[u16],
+    expected: FixedSecretUtf16,
     authority_is_current: &dyn Fn() -> bool,
 ) -> Result<(), RecoveryCeremonyError> {
     let instance = unsafe { GetModuleHandleW(null()) } as HINSTANCE;
@@ -145,22 +153,10 @@ fn run_native_ceremony(
         class_name: &class_name,
     };
 
-    let mut owner_rect = windows_sys::Win32::Foundation::RECT::default();
-    let centered = unsafe { GetWindowRect(owner_window, &mut owner_rect) } != 0;
-    let x = if centered {
-        owner_rect.left + ((owner_rect.right - owner_rect.left - DIALOG_WIDTH) / 2).max(0)
-    } else {
-        windows_sys::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT
-    };
-    let y = if centered {
-        owner_rect.top + ((owner_rect.bottom - owner_rect.top - DIALOG_HEIGHT) / 2).max(0)
-    } else {
-        windows_sys::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT
-    };
+    let (x, y) = centered_position(owner_window);
     let mut state = CeremonyDialogState {
-        expected: expected_with_nul.as_ptr(),
-        expected_len: expected_with_nul.len().saturating_sub(1),
-        input: null_mut(),
+        expected,
+        input: FixedSecretUtf16::empty(),
         outcome: CeremonyOutcome::Pending,
     };
     let title = wide_null("Vision Wallet Recovery Credential");
@@ -181,19 +177,19 @@ fn run_native_ceremony(
         )
     };
     if dialog.is_null() {
+        state.wipe();
         return Err(RecoveryCeremonyError::NativeUiUnavailable);
     }
     let _modal_owner = DisabledOwner::new(owner_window);
     if unsafe { SetTimer(dialog, AUTHORITY_TIMER_ID, AUTHORITY_TIMER_MS, None) } == 0 {
+        state.wipe();
         unsafe { DestroyWindow(dialog) };
         return Err(RecoveryCeremonyError::NativeUiUnavailable);
     }
     unsafe {
         ShowWindow(dialog, SW_SHOW);
         SetForegroundWindow(dialog);
-        if !state.input.is_null() {
-            SetFocus(state.input);
-        }
+        SetFocus(dialog);
     }
 
     let mut message = MSG::default();
@@ -201,6 +197,7 @@ fn run_native_ceremony(
         let status = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
         if status <= 0 {
             state.outcome = CeremonyOutcome::Failed;
+            state.wipe();
             if unsafe { IsWindow(dialog) } != 0 {
                 unsafe { DestroyWindow(dialog) };
             }
@@ -215,7 +212,7 @@ fn run_native_ceremony(
             && !authority_is_current()
         {
             state.outcome = CeremonyOutcome::AuthorityRevoked;
-            clear_input(&state);
+            state.wipe();
             unsafe { DestroyWindow(dialog) };
             continue;
         }
@@ -227,6 +224,7 @@ fn run_native_ceremony(
         }
     }
     unsafe { KillTimer(dialog, AUTHORITY_TIMER_ID) };
+    state.wipe();
 
     match state.outcome {
         CeremonyOutcome::Verified if authority_is_current() => Ok(()),
@@ -263,10 +261,34 @@ unsafe extern "system" fn ceremony_window_proc(
 
     match message {
         WM_CREATE => {
-            if !create_dialog_controls(window, state) {
+            if !create_dialog_buttons(window) {
                 state.outcome = CeremonyOutcome::Failed;
                 return -1;
             }
+            0
+        }
+        WM_CHAR => {
+            let unit = u16::try_from(wparam).unwrap_or_default();
+            match unit {
+                8 => state.input.pop_unit(),
+                0x20..=0x7e => {
+                    if state.input.push_unit(unit).is_err() {
+                        state.outcome = CeremonyOutcome::Failed;
+                        state.wipe();
+                        unsafe { DestroyWindow(window) };
+                        return 0;
+                    }
+                }
+                _ => {
+                    // Recovery credentials are canonical ASCII. An unsupported IME or
+                    // international input route fails closed; there is no standard-control fallback.
+                    state.outcome = CeremonyOutcome::Failed;
+                    state.wipe();
+                    unsafe { DestroyWindow(window) };
+                    return 0;
+                }
+            }
+            unsafe { InvalidateRect(window, null(), 0) };
             0
         }
         WM_COMMAND => {
@@ -277,13 +299,13 @@ unsafe extern "system" fn ceremony_window_proc(
             }
             match control_id {
                 VERIFY_BUTTON_ID => {
-                    if input_matches(state) {
+                    let matched = state.expected.matches_and_wipe(&mut state.input);
+                    if matched {
                         state.outcome = CeremonyOutcome::Verified;
-                        clear_input(state);
-                        unsafe { DestroyWindow(window) };
                     } else {
+                        state.outcome = CeremonyOutcome::Cancelled;
                         let text = wide_null(
-                            "The recovery credential did not match. Re-enter it exactly, or cancel wallet creation.",
+                            "The recovery credential did not match. Wallet creation was cancelled; start again.",
                         );
                         let caption = wide_null("Recovery credential mismatch");
                         unsafe {
@@ -292,29 +314,41 @@ unsafe extern "system" fn ceremony_window_proc(
                                 text.as_ptr(),
                                 caption.as_ptr(),
                                 MB_OK | MB_ICONWARNING,
-                            );
-                            SetWindowTextW(state.input, EMPTY_WIDE.as_ptr());
-                            SetFocus(state.input);
-                        }
+                            )
+                        };
                     }
+                    unsafe { DestroyWindow(window) };
                     0
                 }
                 CANCEL_BUTTON_ID => {
                     state.outcome = CeremonyOutcome::Cancelled;
-                    clear_input(state);
+                    state.wipe();
                     unsafe { DestroyWindow(window) };
                     0
                 }
                 _ => unsafe { DefWindowProcW(window, message, wparam, lparam) },
             }
         }
+        WM_PAINT => {
+            paint_dialog(window, state);
+            0
+        }
+        WM_COPY | WM_CUT | WM_PASTE | WM_CLEAR | WM_CONTEXTMENU | WM_GETTEXT | WM_GETTEXTLENGTH
+        | WM_SETTEXT => 0,
+        WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION => {
+            state.outcome = CeremonyOutcome::Failed;
+            state.wipe();
+            unsafe { DestroyWindow(window) };
+            0
+        }
         WM_CLOSE => {
             state.outcome = CeremonyOutcome::Cancelled;
-            clear_input(state);
+            state.wipe();
             unsafe { DestroyWindow(window) };
             0
         }
         WM_NCDESTROY => {
+            state.wipe();
             unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
@@ -322,116 +356,139 @@ unsafe extern "system" fn ceremony_window_proc(
     }
 }
 
-fn create_dialog_controls(window: HWND, state: &mut CeremonyDialogState) -> bool {
-    let expected = unsafe { std::slice::from_raw_parts(state.expected, state.expected_len + 1) };
-    let heading = wide_null(
-        "Write this recovery credential down and store it offline. It is required to restore this wallet.",
-    );
-    let instruction = wide_null(
-        "Then re-enter the complete credential below. The wallet and recovery file do not exist until verification succeeds.",
-    );
-    let verify = wide_null("Verify and create wallet");
-    let cancel = wide_null("Cancel");
-    let static_class = wide_null("STATIC");
-    let edit_class = wide_null("EDIT");
-    let button_class = wide_null("BUTTON");
+fn paint_dialog(window: HWND, state: &CeremonyDialogState) {
+    let mut paint = PAINTSTRUCT::default();
+    let device = unsafe { BeginPaint(window, &mut paint) };
+    if device.is_null() {
+        return;
+    }
+    let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+    let previous = unsafe { SelectObject(device, font) };
+    unsafe { SetBkMode(device, i32::try_from(TRANSPARENT).unwrap_or(1)) };
 
-    let controls = [
-        create_control(
-            window,
-            &static_class,
-            &heading,
-            WS_CHILD | WS_VISIBLE,
-            24,
-            22,
-            640,
-            40,
-            0,
-        ),
-        create_control(
-            window,
-            &static_class,
-            expected,
-            WS_CHILD | WS_VISIBLE | WS_BORDER,
-            24,
-            72,
-            640,
-            42,
-            0,
-        ),
-        create_control(
-            window,
-            &static_class,
-            &instruction,
-            WS_CHILD | WS_VISIBLE,
-            24,
-            132,
-            640,
-            42,
-            0,
-        ),
-    ];
-    if controls.iter().any(|control| control.is_null()) {
-        return false;
+    draw_public_text(
+        device,
+        "Write this recovery credential down and store it offline. It is required to restore this wallet.",
+        RECT { left: 24, top: 22, right: 664, bottom: 62 },
+        DT_LEFT | DT_WORDBREAK,
+    );
+    draw_secret_text(
+        device,
+        state.expected.as_units(),
+        RECT {
+            left: 24,
+            top: 76,
+            right: 664,
+            bottom: 116,
+        },
+    );
+    draw_public_text(
+        device,
+        "Re-enter the complete credential using the keyboard. Clipboard and accessibility text access are disabled.",
+        RECT { left: 24, top: 136, right: 664, bottom: 176 },
+        DT_LEFT | DT_WORDBREAK,
+    );
+    let bullets = [0x2022_u16; FIXED_BULLET_COUNT];
+    draw_secret_text(
+        device,
+        &bullets,
+        RECT {
+            left: 24,
+            top: 198,
+            right: 664,
+            bottom: 232,
+        },
+    );
+    if state.input.is_empty() {
+        draw_public_text(
+            device,
+            "Input is hidden; the fixed bullets do not reveal its length.",
+            RECT {
+                left: 24,
+                top: 236,
+                right: 664,
+                bottom: 258,
+            },
+            DT_LEFT | DT_SINGLELINE,
+        );
     }
 
-    state.input = create_control(
-        window,
-        &edit_class,
-        &EMPTY_WIDE,
-        WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_PASSWORD as u32 | ES_AUTOHSCROLL as u32,
-        24,
-        190,
-        640,
-        32,
-        0,
-    );
-    let verify_button = create_control(
+    unsafe {
+        SelectObject(device, previous);
+        EndPaint(window, &paint);
+    }
+}
+
+fn draw_public_text(
+    device: windows_sys::Win32::Graphics::Gdi::HDC,
+    text: &str,
+    mut bounds: RECT,
+    format: u32,
+) {
+    let wide = wide_without_nul(text);
+    unsafe {
+        DrawTextW(
+            device,
+            wide.as_ptr(),
+            i32::try_from(wide.len()).unwrap_or(i32::MAX),
+            &mut bounds,
+            format,
+        )
+    };
+}
+
+fn draw_secret_text(
+    device: windows_sys::Win32::Graphics::Gdi::HDC,
+    text: &[u16],
+    mut bounds: RECT,
+) {
+    unsafe {
+        DrawTextW(
+            device,
+            text.as_ptr(),
+            i32::try_from(text.len()).unwrap_or(i32::MAX),
+            &mut bounds,
+            DT_LEFT | DT_SINGLELINE,
+        )
+    };
+}
+
+fn create_dialog_buttons(window: HWND) -> bool {
+    let button_class = wide_null("BUTTON");
+    let verify = wide_null("Verify and create wallet");
+    let cancel = wide_null("Cancel");
+    let verify_button = create_button(
         window,
         &button_class,
         &verify,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+        BS_DEFPUSHBUTTON as u32,
         370,
-        270,
+        290,
         190,
-        38,
         VERIFY_BUTTON_ID,
     );
-    let cancel_button = create_control(
+    let cancel_button = create_button(
         window,
         &button_class,
         &cancel,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32,
+        BS_PUSHBUTTON as u32,
         574,
-        270,
+        290,
         90,
-        38,
         CANCEL_BUTTON_ID,
     );
-    if state.input.is_null() || verify_button.is_null() || cancel_button.is_null() {
-        return false;
-    }
-
-    let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) } as usize;
-    for control in controls
-        .into_iter()
-        .chain([state.input, verify_button, cancel_button])
-    {
-        unsafe { SendMessageW(control, WM_SETFONT, font, 1) };
-    }
-    true
+    !verify_button.is_null() && !cancel_button.is_null()
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create_control(
+fn create_button(
     parent: HWND,
     class_name: &[u16],
     text: &[u16],
-    style: u32,
+    button_style: u32,
     x: i32,
     y: i32,
     width: i32,
-    height: i32,
     control_id: usize,
 ) -> HWND {
     unsafe {
@@ -439,11 +496,11 @@ fn create_control(
             0,
             class_name.as_ptr(),
             text.as_ptr(),
-            style,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | button_style,
             x,
             y,
             width,
-            height,
+            38,
             parent,
             control_id as *mut c_void,
             GetModuleHandleW(null()) as HINSTANCE,
@@ -452,42 +509,18 @@ fn create_control(
     }
 }
 
-fn input_matches(state: &CeremonyDialogState) -> bool {
-    let length = unsafe { GetWindowTextLengthW(state.input) };
-    if length < 0 || usize::try_from(length).ok() != Some(state.expected_len) {
-        return false;
+fn centered_position(owner: HWND) -> (i32, i32) {
+    let mut owner_rect = RECT::default();
+    if unsafe { GetWindowRect(owner, &mut owner_rect) } == 0 {
+        return (
+            windows_sys::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT,
+            windows_sys::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT,
+        );
     }
-    let mut input = Zeroizing::new(vec![0_u16; state.expected_len + 1]);
-    let copied = unsafe {
-        GetWindowTextW(
-            state.input,
-            input.as_mut_ptr(),
-            i32::try_from(input.len()).unwrap_or(i32::MAX),
-        )
-    };
-    if usize::try_from(copied).ok() != Some(state.expected_len) {
-        return false;
-    }
-    let expected = unsafe { std::slice::from_raw_parts(state.expected, state.expected_len) };
-    expected
-        .iter()
-        .zip(input.iter())
-        .fold(0_u16, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
-}
-
-fn clear_input(state: &CeremonyDialogState) {
-    if !state.input.is_null() {
-        unsafe { SetWindowTextW(state.input, EMPTY_WIDE.as_ptr()) };
-    }
-}
-
-fn wide_null(value: &str) -> Zeroizing<Vec<u16>> {
-    let mut wide = Zeroizing::new(value.encode_utf16().collect::<Vec<_>>());
-    wide.push(0);
-    wide
+    (
+        owner_rect.left + ((owner_rect.right - owner_rect.left - DIALOG_WIDTH) / 2).max(0),
+        owner_rect.top + ((owner_rect.bottom - owner_rect.top - DIALOG_HEIGHT) / 2).max(0),
+    )
 }
 
 struct DisabledOwner(HWND);
@@ -519,41 +552,500 @@ impl Drop for RegisteredWindowClass<'_> {
     }
 }
 
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn wide_without_nul(value: &str) -> Vec<u16> {
+    value.encode_utf16().collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeSecretCeremonyError {
+    Cancelled,
+    AuthorityRevoked,
+    InvalidInput,
+    NativeUiUnavailable,
+}
+
+pub(in crate::wallet) struct NativeCreateSecrets {
+    pub(in crate::wallet) wallet_password: super::secret_input::SecretInput,
+}
+
+pub(in crate::wallet) struct NativeRestoreSecrets {
+    pub(in crate::wallet) wallet_password: super::secret_input::SecretInput,
+    pub(in crate::wallet) recovery_credential: super::secret_input::SecretInput,
+}
+
+pub(in crate::wallet) trait WalletSecretCeremony: Send + Sync {
+    fn capture_create(
+        &self,
+        authority_is_current: &dyn Fn() -> bool,
+    ) -> Result<NativeCreateSecrets, NativeSecretCeremonyError>;
+
+    fn capture_restore(
+        &self,
+        authority_is_current: &dyn Fn() -> bool,
+    ) -> Result<NativeRestoreSecrets, NativeSecretCeremonyError>;
+
+    fn capture_unlock(
+        &self,
+        authority_is_current: &dyn Fn() -> bool,
+    ) -> Result<super::secret_input::SecretInput, NativeSecretCeremonyError>;
+}
+
+pub(crate) struct NativeWalletSecretCeremony {
+    owner_window: isize,
+}
+
+impl NativeWalletSecretCeremony {
+    pub(crate) fn new(owner_window: isize) -> Result<Self, NativeSecretCeremonyError> {
+        if owner_window == 0 || unsafe { IsWindow(owner_window as HWND) } == 0 {
+            return Err(NativeSecretCeremonyError::NativeUiUnavailable);
+        }
+        Ok(Self { owner_window })
+    }
+
+    fn capture_confirmed_password(
+        &self,
+        authority_is_current: &dyn Fn() -> bool,
+    ) -> Result<super::secret_input::SecretInput, NativeSecretCeremonyError> {
+        let password = run_native_secret_capture(
+            self.owner_window as HWND,
+            SecretCapturePurpose::NewPassword,
+            authority_is_current,
+        )?;
+        let confirmation = run_native_secret_capture(
+            self.owner_window as HWND,
+            SecretCapturePurpose::ConfirmPassword,
+            authority_is_current,
+        )?;
+        let password = password
+            .confirm_with(confirmation)
+            .map_err(|_| NativeSecretCeremonyError::InvalidInput)?;
+        if password.byte_len() < 16 {
+            return Err(NativeSecretCeremonyError::InvalidInput);
+        }
+        Ok(password)
+    }
+}
+
+impl WalletSecretCeremony for NativeWalletSecretCeremony {
+    fn capture_create(
+        &self,
+        authority_is_current: &dyn Fn() -> bool,
+    ) -> Result<NativeCreateSecrets, NativeSecretCeremonyError> {
+        Ok(NativeCreateSecrets {
+            wallet_password: self.capture_confirmed_password(authority_is_current)?,
+        })
+    }
+
+    fn capture_restore(
+        &self,
+        authority_is_current: &dyn Fn() -> bool,
+    ) -> Result<NativeRestoreSecrets, NativeSecretCeremonyError> {
+        let recovery_credential = run_native_secret_capture(
+            self.owner_window as HWND,
+            SecretCapturePurpose::RecoveryCredential,
+            authority_is_current,
+        )?;
+        let wallet_password = self.capture_confirmed_password(authority_is_current)?;
+        Ok(NativeRestoreSecrets {
+            wallet_password,
+            recovery_credential,
+        })
+    }
+
+    fn capture_unlock(
+        &self,
+        authority_is_current: &dyn Fn() -> bool,
+    ) -> Result<super::secret_input::SecretInput, NativeSecretCeremonyError> {
+        run_native_secret_capture(
+            self.owner_window as HWND,
+            SecretCapturePurpose::UnlockPassword,
+            authority_is_current,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SecretCapturePurpose {
+    NewPassword,
+    ConfirmPassword,
+    RecoveryCredential,
+    UnlockPassword,
+}
+
+impl SecretCapturePurpose {
+    const fn title(self) -> &'static str {
+        match self {
+            Self::NewPassword => "Vision Wallet Password",
+            Self::ConfirmPassword => "Confirm Vision Wallet Password",
+            Self::RecoveryCredential => "Vision Wallet Recovery Credential",
+            Self::UnlockPassword => "Unlock Vision Wallet",
+        }
+    }
+
+    const fn instruction(self) -> &'static str {
+        match self {
+            Self::NewPassword => "Enter a new local wallet password of at least 16 UTF-8 bytes.",
+            Self::ConfirmPassword => "Re-enter the new local wallet password exactly.",
+            Self::RecoveryCredential => "Enter the complete portable recovery credential.",
+            Self::UnlockPassword => "Enter the local wallet password.",
+        }
+    }
+}
+
+struct SecretCaptureState {
+    input: FixedSecretUtf16,
+    captured: Option<super::secret_input::SecretInput>,
+    purpose: SecretCapturePurpose,
+    outcome: CeremonyOutcome,
+}
+
+impl SecretCaptureState {
+    fn wipe(&mut self) {
+        self.input.wipe();
+        self.captured = None;
+    }
+}
+
+fn run_native_secret_capture(
+    owner_window: HWND,
+    purpose: SecretCapturePurpose,
+    authority_is_current: &dyn Fn() -> bool,
+) -> Result<super::secret_input::SecretInput, NativeSecretCeremonyError> {
+    if !authority_is_current() {
+        return Err(NativeSecretCeremonyError::AuthorityRevoked);
+    }
+    let instance = unsafe { GetModuleHandleW(null()) } as HINSTANCE;
+    if instance.is_null() || unsafe { IsWindow(owner_window) } == 0 {
+        return Err(NativeSecretCeremonyError::NativeUiUnavailable);
+    }
+    let sequence = CLASS_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let class_name = wide_null(&format!(
+        "VisionDesktopNativeSecretCapture-{}-{sequence}",
+        std::process::id()
+    ));
+    let class = WNDCLASSEXW {
+        cbSize: u32::try_from(size_of::<WNDCLASSEXW>()).unwrap_or(u32::MAX),
+        style: CS_HREDRAW | CS_VREDRAW,
+        lpfnWndProc: Some(secret_capture_window_proc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: instance,
+        hIcon: null_mut(),
+        hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
+        hbrBackground: unsafe { GetSysColorBrush(COLOR_WINDOW) },
+        lpszMenuName: null(),
+        lpszClassName: class_name.as_ptr(),
+        hIconSm: null_mut(),
+    };
+    if unsafe { RegisterClassExW(&class) } == 0 {
+        return Err(NativeSecretCeremonyError::NativeUiUnavailable);
+    }
+    let _registration = RegisteredWindowClass {
+        instance,
+        class_name: &class_name,
+    };
+    let (x, y) = centered_position(owner_window);
+    let mut state = SecretCaptureState {
+        input: FixedSecretUtf16::empty(),
+        captured: None,
+        purpose,
+        outcome: CeremonyOutcome::Pending,
+    };
+    let title = wide_null(purpose.title());
+    let dialog = unsafe {
+        CreateWindowExW(
+            WS_EX_DLGMODALFRAME,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            x,
+            y,
+            DIALOG_WIDTH,
+            290,
+            owner_window,
+            null_mut(),
+            instance,
+            (&mut state as *mut SecretCaptureState).cast::<c_void>(),
+        )
+    };
+    if dialog.is_null() {
+        state.wipe();
+        return Err(NativeSecretCeremonyError::NativeUiUnavailable);
+    }
+    let _modal_owner = DisabledOwner::new(owner_window);
+    if unsafe { SetTimer(dialog, AUTHORITY_TIMER_ID, AUTHORITY_TIMER_MS, None) } == 0 {
+        state.wipe();
+        unsafe { DestroyWindow(dialog) };
+        return Err(NativeSecretCeremonyError::NativeUiUnavailable);
+    }
+    unsafe {
+        ShowWindow(dialog, SW_SHOW);
+        SetForegroundWindow(dialog);
+        SetFocus(dialog);
+    }
+    let mut message = MSG::default();
+    while unsafe { IsWindow(dialog) } != 0 {
+        let status = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
+        if status <= 0 {
+            state.outcome = CeremonyOutcome::Failed;
+            state.wipe();
+            if unsafe { IsWindow(dialog) } != 0 {
+                unsafe { DestroyWindow(dialog) };
+            }
+            if status == 0 {
+                unsafe { PostQuitMessage(i32::try_from(message.wParam).unwrap_or_default()) };
+            }
+            break;
+        }
+        if message.hwnd == dialog
+            && message.message == WM_TIMER
+            && message.wParam == AUTHORITY_TIMER_ID
+            && !authority_is_current()
+        {
+            state.outcome = CeremonyOutcome::AuthorityRevoked;
+            state.wipe();
+            unsafe { DestroyWindow(dialog) };
+            continue;
+        }
+        if unsafe { IsDialogMessageW(dialog, &message) } == 0 {
+            unsafe {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+    }
+    unsafe { KillTimer(dialog, AUTHORITY_TIMER_ID) };
+    match state.outcome {
+        CeremonyOutcome::Verified if authority_is_current() => state
+            .captured
+            .take()
+            .ok_or(NativeSecretCeremonyError::NativeUiUnavailable),
+        CeremonyOutcome::Verified | CeremonyOutcome::AuthorityRevoked => {
+            state.wipe();
+            Err(NativeSecretCeremonyError::AuthorityRevoked)
+        }
+        CeremonyOutcome::Cancelled => {
+            state.wipe();
+            Err(NativeSecretCeremonyError::Cancelled)
+        }
+        CeremonyOutcome::Pending | CeremonyOutcome::Failed => {
+            state.wipe();
+            Err(NativeSecretCeremonyError::NativeUiUnavailable)
+        }
+    }
+}
+
+unsafe extern "system" fn secret_capture_window_proc(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == WM_NCCREATE {
+        let create = lparam as *const CREATESTRUCTW;
+        if create.is_null() || unsafe { (*create).lpCreateParams }.is_null() {
+            return 0;
+        }
+        unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, (*create).lpCreateParams as isize) };
+        return 1;
+    }
+    let state = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut SecretCaptureState;
+    if state.is_null() {
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    }
+    let state = unsafe { &mut *state };
+    match message {
+        WM_CREATE => {
+            if !create_capture_buttons(window) {
+                state.outcome = CeremonyOutcome::Failed;
+                return -1;
+            }
+            0
+        }
+        WM_CHAR => {
+            let unit = u16::try_from(wparam).unwrap_or_default();
+            match unit {
+                8 => state.input.pop_unit(),
+                0x20..=0xffff => {
+                    if state.input.push_unit(unit).is_err() {
+                        state.outcome = CeremonyOutcome::Failed;
+                        state.wipe();
+                        unsafe { DestroyWindow(window) };
+                        return 0;
+                    }
+                }
+                _ => {
+                    state.outcome = CeremonyOutcome::Failed;
+                    state.wipe();
+                    unsafe { DestroyWindow(window) };
+                    return 0;
+                }
+            }
+            unsafe { InvalidateRect(window, null(), 0) };
+            0
+        }
+        WM_COMMAND => {
+            let control_id = wparam & 0xffff;
+            let notification = (wparam >> 16) & 0xffff;
+            if notification != BN_CLICKED as usize {
+                return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+            }
+            match control_id {
+                VERIFY_BUTTON_ID => {
+                    let input = std::mem::replace(&mut state.input, FixedSecretUtf16::empty());
+                    match input.into_secret_input() {
+                        Ok(secret) => {
+                            state.captured = Some(secret);
+                            state.outcome = CeremonyOutcome::Verified;
+                        }
+                        Err(_) => {
+                            state.wipe();
+                            state.outcome = CeremonyOutcome::Failed;
+                        }
+                    }
+                    unsafe { DestroyWindow(window) };
+                    0
+                }
+                CANCEL_BUTTON_ID => {
+                    state.outcome = CeremonyOutcome::Cancelled;
+                    state.wipe();
+                    unsafe { DestroyWindow(window) };
+                    0
+                }
+                _ => unsafe { DefWindowProcW(window, message, wparam, lparam) },
+            }
+        }
+        WM_PAINT => {
+            paint_secret_capture(window, state);
+            0
+        }
+        WM_COPY | WM_CUT | WM_PASTE | WM_CLEAR | WM_CONTEXTMENU | WM_GETTEXT | WM_GETTEXTLENGTH
+        | WM_SETTEXT => 0,
+        WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION => {
+            state.outcome = CeremonyOutcome::Failed;
+            state.wipe();
+            unsafe { DestroyWindow(window) };
+            0
+        }
+        WM_CLOSE => {
+            state.outcome = CeremonyOutcome::Cancelled;
+            state.wipe();
+            unsafe { DestroyWindow(window) };
+            0
+        }
+        WM_NCDESTROY => {
+            state.input.wipe();
+            unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
+        _ => unsafe { DefWindowProcW(window, message, wparam, lparam) },
+    }
+}
+
+fn paint_secret_capture(window: HWND, state: &SecretCaptureState) {
+    let mut paint = PAINTSTRUCT::default();
+    let device = unsafe { BeginPaint(window, &mut paint) };
+    if device.is_null() {
+        return;
+    }
+    let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+    let previous = unsafe { SelectObject(device, font) };
+    unsafe { SetBkMode(device, i32::try_from(TRANSPARENT).unwrap_or(1)) };
+    draw_public_text(
+        device,
+        state.purpose.instruction(),
+        RECT {
+            left: 24,
+            top: 26,
+            right: 664,
+            bottom: 68,
+        },
+        DT_LEFT | DT_WORDBREAK,
+    );
+    let bullets = [0x2022_u16; FIXED_BULLET_COUNT];
+    draw_secret_text(
+        device,
+        &bullets,
+        RECT {
+            left: 24,
+            top: 92,
+            right: 664,
+            bottom: 126,
+        },
+    );
+    draw_public_text(
+        device,
+        "Input stays in Rust-owned fixed memory. The fixed bullets do not reveal its length.",
+        RECT {
+            left: 24,
+            top: 132,
+            right: 664,
+            bottom: 168,
+        },
+        DT_LEFT | DT_WORDBREAK,
+    );
+    unsafe {
+        SelectObject(device, previous);
+        EndPaint(window, &paint);
+    }
+}
+
+fn create_capture_buttons(window: HWND) -> bool {
+    let button_class = wide_null("BUTTON");
+    let submit = wide_null("Continue");
+    let cancel = wide_null("Cancel");
+    let submit_button = create_button(
+        window,
+        &button_class,
+        &submit,
+        BS_DEFPUSHBUTTON as u32,
+        470,
+        190,
+        90,
+        VERIFY_BUTTON_ID,
+    );
+    let cancel_button = create_button(
+        window,
+        &button_class,
+        &cancel,
+        BS_PUSHBUTTON as u32,
+        574,
+        190,
+        90,
+        CANCEL_BUTTON_ID,
+    );
+    !submit_button.is_null() && !cancel_button.is_null()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn utf16_verification_is_exact_and_constant_work_for_equal_lengths() {
-        let expected = wide_null("vision-recovery-v1-deadbeef-01020304");
-        let exact = &expected[..expected.len() - 1];
-        let changed = wide_null("vision-recovery-v1-deadbeef-01020305");
-        let changed = &changed[..changed.len() - 1];
-        assert_eq!(exact.len(), changed.len());
-        assert!(
-            exact
-                .iter()
-                .zip(exact)
-                .fold(0_u16, |difference, (left, right)| difference
-                    | (left ^ right))
-                == 0
-        );
-        assert!(
-            exact
-                .iter()
-                .zip(changed)
-                .fold(0_u16, |difference, (left, right)| difference
-                    | (left ^ right))
-                != 0
-        );
+    fn secret_controls_are_owner_drawn_and_have_no_standard_text_storage() {
+        let source = include_str!("recovery_ceremony.rs");
+        assert!(!source.contains(concat!("wide_null(\"", "EDIT\")")));
+        assert!(!source.contains(concat!("wide_null(\"", "STATIC\")")));
+        assert!(!source.contains(concat!("GetWindow", "TextW")));
+        assert!(!source.contains(concat!("SetWindow", "TextW")));
+        assert!(!source.contains(concat!("ES_", "PASSWORD")));
     }
 
     #[test]
-    fn native_ceremony_source_contains_no_clipboard_path() {
+    fn secret_message_routes_are_explicitly_blocked() {
         let source = include_str!("recovery_ceremony.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
-        for forbidden in ["SetClipboardData", "OpenClipboard"] {
-            assert!(!production.contains(forbidden));
+        for blocked in [
+            "WM_COPY",
+            "WM_CUT",
+            "WM_PASTE",
+            "WM_CONTEXTMENU",
+            "WM_GETTEXT",
+            "WM_GETTEXTLENGTH",
+            "WM_IME_STARTCOMPOSITION",
+        ] {
+            assert!(source.contains(blocked), "missing {blocked} protection");
         }
     }
 }

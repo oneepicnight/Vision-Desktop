@@ -63,10 +63,17 @@ pub fn run() {
                             std::io::Error::other("secure recovery acknowledgement is unavailable")
                         })?,
                 );
+                let secret_ceremony = Arc::new(
+                    wallet::NativeWalletSecretCeremony::new(main_window_handle.0 as isize)
+                        .map_err(|_| {
+                            std::io::Error::other("secure wallet secret ceremony is unavailable")
+                        })?,
+                );
                 let wallet_adapters = wallet::WalletLifecycleAdapters::initialize(
                     Arc::clone(&wallet_runtime),
                     &wallet_local_data,
                     recovery_ceremony,
+                    secret_ceremony,
                 )
                 .map_err(|_| {
                     std::io::Error::other("secure wallet lifecycle adapters are unavailable")

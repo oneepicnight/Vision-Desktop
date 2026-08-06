@@ -249,7 +249,7 @@ mod tests {
     const CORRECT_PASSWORD: &str = "correct horse battery staple";
 
     fn password(value: &str) -> WalletPassword {
-        WalletPassword::new(value.to_string())
+        WalletPassword::for_test(value)
     }
 
     fn test_vault(wallet_id: &str, seed_byte: u8) -> EncryptedWalletVault {

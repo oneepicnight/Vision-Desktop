@@ -2,9 +2,9 @@
 
 ## Status
 
-This is a pre-implementation security design. Commit `b027d18` is independently approved only for
-private lifecycle integration. No Wallet command, permission, frontend form, service wrapper, or
-production activation flag is authorized by this document.
+The design in commit `bd5169a` was independently approved for an unreachable implementation. The
+current Rust implementation remains private and unregistered: no Wallet command, permission,
+frontend form, service wrapper, or production activation flag is authorized by this document.
 
 Every lifecycle secret remains outside React, the DOM, JavaScript strings, Tauri JSON arguments,
 frontend state, browser storage, clipboard APIs, logs, events, support packages, and command-line
@@ -154,10 +154,10 @@ or use an already controlled and independently spendable address.
 
 ## Implementation and review sequence
 
-1. Independently approve this revised design.
+1. Independently approve this revised design. Completed for design commit `bd5169a`.
 2. Implement native secret controls, ceremonies, public bounded types, and unwind guards without
    `#[tauri::command]`, invoke registration, AppManifest entries, permissions, frontend wrappers,
-   forms, or true activation flags.
+   forms, or true activation flags. Implemented privately; exact-commit re-review remains required.
 3. Run adversarial, panic-injection, memory, cancellation, lifecycle, and accessibility tests.
 4. Independently review the exact unreachable implementation.
 5. Integrate and qualify private-loopback Core, signing, submission, receipts, spending, and clean

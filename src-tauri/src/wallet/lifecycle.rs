@@ -5,22 +5,35 @@
         reason = "wallet lifecycle adapters remain private until the command boundary passes review"
     )
 )]
+#![cfg_attr(
+    test,
+    allow(
+        dead_code,
+        reason = "unregistered production lifecycle entry points are exercised after command review"
+    )
+)]
 
 use super::{
     contract::{WalletLifecycleStatus, WalletLockResult},
     onboarding::{prepare_new_wallet, prepare_restored_wallet, WalletOnboardingError},
     recovery::RecoveryArtifactError,
     recovery_ceremony::{
-        NativeRecoveryCredentialCeremony, RecoveryCeremonyError, RecoveryCredentialCeremony,
+        NativeCreateSecrets, NativeRecoveryCredentialCeremony, NativeRestoreSecrets,
+        NativeSecretCeremonyError, NativeWalletSecretCeremony, RecoveryCeremonyError,
+        RecoveryCredentialCeremony, WalletSecretCeremony,
     },
-    runtime::{RecoveryPathPurpose, WalletOperationKind, WalletRuntimeError, WalletRuntimeState},
+    runtime::{
+        RecoveryPathPurpose, WalletOperationKind, WalletOperationPermit, WalletRuntimeError,
+        WalletRuntimeState,
+    },
     secret_input::SecretInput,
     session::WalletSessionError,
-    vault::{load_vault, WalletVaultError},
+    vault::{load_vault, EncryptedWalletVault, WalletVaultError},
 };
 use std::{
     fmt,
     os::windows::{ffi::OsStrExt, fs::MetadataExt},
+    panic::{catch_unwind, AssertUnwindSafe},
     path::{Component, Path, PathBuf, Prefix},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -43,8 +56,11 @@ pub(crate) struct WalletLifecycleAdapters {
     runtime: Arc<WalletRuntimeState>,
     vault_path: PathBuf,
     recovery_ceremony: Arc<dyn RecoveryCredentialCeremony>,
+    secret_ceremony: Arc<dyn WalletSecretCeremony>,
     #[cfg(test)]
     interruption_checkpoint: Option<WalletLifecycleCheckpoint>,
+    #[cfg(test)]
+    panic_checkpoint: Option<WalletLifecyclePanicCheckpoint>,
     #[cfg(test)]
     test_recovery_ceremony: Arc<TestRecoveryCredentialCeremony>,
 }
@@ -143,6 +159,75 @@ enum WalletLifecycleCheckpoint {
     RestoreSourceConsumed,
     RestorePrepared,
     RestoreVaultStored,
+}
+
+#[cfg(test)]
+struct TestWalletSecretCeremony;
+
+#[cfg(test)]
+impl WalletSecretCeremony for TestWalletSecretCeremony {
+    fn capture_create(
+        &self,
+        _authority_is_current: &dyn Fn() -> bool,
+    ) -> Result<NativeCreateSecrets, NativeSecretCeremonyError> {
+        Err(NativeSecretCeremonyError::NativeUiUnavailable)
+    }
+
+    fn capture_restore(
+        &self,
+        _authority_is_current: &dyn Fn() -> bool,
+    ) -> Result<NativeRestoreSecrets, NativeSecretCeremonyError> {
+        Err(NativeSecretCeremonyError::NativeUiUnavailable)
+    }
+
+    fn capture_unlock(
+        &self,
+        _authority_is_current: &dyn Fn() -> bool,
+    ) -> Result<SecretInput, NativeSecretCeremonyError> {
+        Err(NativeSecretCeremonyError::NativeUiUnavailable)
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalletLifecyclePanicCheckpoint {
+    BeforeRequest,
+    AfterUnlockSessionInstalled,
+    BeforeSuccessCommit,
+}
+
+struct LifecycleFailClosedGuard<'a> {
+    runtime: &'a WalletRuntimeState,
+    armed: bool,
+}
+
+impl<'a> LifecycleFailClosedGuard<'a> {
+    fn arm(runtime: &'a WalletRuntimeState) -> Self {
+        Self {
+            runtime,
+            armed: true,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.armed = false;
+    }
+
+    fn invalidate_or_terminate(&mut self) {
+        let invalidated = catch_unwind(AssertUnwindSafe(|| self.runtime.invalidate_all()));
+        match invalidated {
+            Ok(Ok(())) => self.armed = false,
+            Ok(Err(_)) | Err(_) => std::process::abort(),
+        }
+    }
+}
+
+impl Drop for LifecycleFailClosedGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.invalidate_or_terminate();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +332,7 @@ impl WalletLifecycleAdapters {
         runtime: Arc<WalletRuntimeState>,
         local_app_data: &Path,
         recovery_ceremony: Arc<NativeRecoveryCredentialCeremony>,
+        secret_ceremony: Arc<NativeWalletSecretCeremony>,
     ) -> Result<Self, WalletLifecycleError> {
         validate_local_custody_root(local_app_data)?;
         let vault_path = local_app_data
@@ -263,14 +349,28 @@ impl WalletLifecycleAdapters {
             runtime,
             vault_path,
             recovery_ceremony,
+            secret_ceremony,
             #[cfg(test)]
             interruption_checkpoint: None,
+            #[cfg(test)]
+            panic_checkpoint: None,
             #[cfg(test)]
             test_recovery_ceremony: Arc::new(TestRecoveryCredentialCeremony::verified()),
         })
     }
 
     pub(in crate::wallet) fn status(&self) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
+        self.run_fail_closed(|| {
+            #[cfg(test)]
+            self.panic_at(WalletLifecyclePanicCheckpoint::BeforeRequest);
+            let status = self.status_inner()?;
+            #[cfg(test)]
+            self.panic_at(WalletLifecyclePanicCheckpoint::BeforeSuccessCommit);
+            Ok(status)
+        })
+    }
+
+    fn status_inner(&self) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
         match self.vault_path.try_exists() {
             Ok(false) => self
                 .runtime
@@ -286,6 +386,44 @@ impl WalletLifecycleAdapters {
         }
     }
 
+    /// Unregistered production path. The one-time destination capability is consumed before the
+    /// native password ceremony opens, so cancellation or panic cannot replay it.
+    pub(in crate::wallet) fn create_native(
+        &self,
+        owner_window: &str,
+        wallet_id: &str,
+        label: &str,
+        recovery_destination_token: &str,
+    ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
+        self.run_fail_closed(|| {
+            self.require_vault_absent()?;
+            let operation = self
+                .runtime
+                .begin_operation(owner_window, WalletOperationKind::Create)
+                .map_err(map_runtime_error)?;
+            let recovery_path = self
+                .runtime
+                .consume_recovery_path(
+                    owner_window,
+                    RecoveryPathPurpose::Destination,
+                    recovery_destination_token,
+                )
+                .map_err(map_runtime_error)?;
+            let NativeCreateSecrets { wallet_password } = self
+                .secret_ceremony
+                .capture_create(&|| operation.ensure_current().is_ok())
+                .map_err(map_native_secret_ceremony_error)?;
+            self.create_authorized(
+                operation,
+                recovery_path,
+                wallet_id,
+                label,
+                wallet_password,
+                now_unix_ms()?,
+            )
+        })
+    }
+
     pub(in crate::wallet) fn create(
         &self,
         owner_window: &str,
@@ -294,14 +432,21 @@ impl WalletLifecycleAdapters {
         recovery_destination_token: &str,
         wallet_secret: SecretInput,
     ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
-        self.create_at(
-            owner_window,
-            wallet_id,
-            label,
-            recovery_destination_token,
-            wallet_secret,
-            now_unix_ms()?,
-        )
+        self.run_fail_closed(|| {
+            #[cfg(test)]
+            self.panic_at(WalletLifecyclePanicCheckpoint::BeforeRequest);
+            let status = self.create_at(
+                owner_window,
+                wallet_id,
+                label,
+                recovery_destination_token,
+                wallet_secret,
+                now_unix_ms()?,
+            )?;
+            #[cfg(test)]
+            self.panic_at(WalletLifecyclePanicCheckpoint::BeforeSuccessCommit);
+            Ok(status)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -329,6 +474,25 @@ impl WalletLifecycleAdapters {
             .map_err(map_runtime_error)?;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::CreateDestinationConsumed)?;
+        self.create_authorized(
+            operation,
+            recovery_path,
+            wallet_id,
+            label,
+            wallet_secret,
+            created_at_unix_ms,
+        )
+    }
+
+    fn create_authorized(
+        &self,
+        operation: WalletOperationPermit<'_>,
+        recovery_path: PathBuf,
+        wallet_id: &str,
+        label: &str,
+        wallet_secret: SecretInput,
+        created_at_unix_ms: u64,
+    ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
         let wallet_password = wallet_secret.into_wallet_password();
         let mut prepared = operation
             .run_authorized(|activation| {
@@ -400,6 +564,48 @@ impl WalletLifecycleAdapters {
         operation.complete(status).map_err(map_runtime_error)
     }
 
+    /// Unregistered production path. The source capability is consumed before any recovery or
+    /// password input is accepted by the native ceremony.
+    pub(in crate::wallet) fn restore_native(
+        &self,
+        owner_window: &str,
+        wallet_id: &str,
+        label: &str,
+        recovery_source_token: &str,
+    ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
+        self.run_fail_closed(|| {
+            self.require_vault_absent()?;
+            let operation = self
+                .runtime
+                .begin_operation(owner_window, WalletOperationKind::Restore)
+                .map_err(map_runtime_error)?;
+            let recovery_path = self
+                .runtime
+                .consume_recovery_path(
+                    owner_window,
+                    RecoveryPathPurpose::Source,
+                    recovery_source_token,
+                )
+                .map_err(map_runtime_error)?;
+            let NativeRestoreSecrets {
+                wallet_password,
+                recovery_credential,
+            } = self
+                .secret_ceremony
+                .capture_restore(&|| operation.ensure_current().is_ok())
+                .map_err(map_native_secret_ceremony_error)?;
+            self.restore_authorized(
+                operation,
+                recovery_path,
+                wallet_id,
+                label,
+                wallet_password,
+                recovery_credential,
+                now_unix_ms()?,
+            )
+        })
+    }
+
     pub(in crate::wallet) fn restore(
         &self,
         owner_window: &str,
@@ -409,15 +615,22 @@ impl WalletLifecycleAdapters {
         new_wallet_secret: SecretInput,
         recovery_secret: SecretInput,
     ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
-        self.restore_at(
-            owner_window,
-            wallet_id,
-            label,
-            recovery_source_token,
-            new_wallet_secret,
-            recovery_secret,
-            now_unix_ms()?,
-        )
+        self.run_fail_closed(|| {
+            #[cfg(test)]
+            self.panic_at(WalletLifecyclePanicCheckpoint::BeforeRequest);
+            let status = self.restore_at(
+                owner_window,
+                wallet_id,
+                label,
+                recovery_source_token,
+                new_wallet_secret,
+                recovery_secret,
+                now_unix_ms()?,
+            )?;
+            #[cfg(test)]
+            self.panic_at(WalletLifecyclePanicCheckpoint::BeforeSuccessCommit);
+            Ok(status)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -446,6 +659,28 @@ impl WalletLifecycleAdapters {
             .map_err(map_runtime_error)?;
         #[cfg(test)]
         self.interrupt_at(WalletLifecycleCheckpoint::RestoreSourceConsumed)?;
+        self.restore_authorized(
+            operation,
+            recovery_path,
+            wallet_id,
+            label,
+            new_wallet_secret,
+            recovery_secret,
+            created_at_unix_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn restore_authorized(
+        &self,
+        operation: WalletOperationPermit<'_>,
+        recovery_path: PathBuf,
+        wallet_id: &str,
+        label: &str,
+        new_wallet_secret: SecretInput,
+        recovery_secret: SecretInput,
+        created_at_unix_ms: u64,
+    ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
         let wallet_password = new_wallet_secret.into_wallet_password();
         let recovery_credential = recovery_secret
             .into_recovery_credential()
@@ -485,19 +720,61 @@ impl WalletLifecycleAdapters {
         operation.complete(status).map_err(map_runtime_error)
     }
 
+    pub(in crate::wallet) fn unlock_native(
+        &self,
+        owner_window: &str,
+    ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
+        self.run_fail_closed(|| {
+            let operation = self
+                .runtime
+                .begin_operation(owner_window, WalletOperationKind::Unlock)
+                .map_err(map_runtime_error)?;
+            let vault = operation
+                .run_authorized(|_| load_vault(&self.vault_path).map_err(map_vault_load_error))
+                .map_err(map_runtime_error)??;
+            let wallet_secret = self
+                .secret_ceremony
+                .capture_unlock(&|| operation.ensure_current().is_ok())
+                .map_err(map_native_secret_ceremony_error)?;
+            self.unlock_authorized(operation, vault, wallet_secret)
+        })
+    }
+
     pub(in crate::wallet) fn unlock(
         &self,
         owner_window: &str,
         wallet_secret: SecretInput,
     ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
-        let operation = self
-            .runtime
-            .begin_operation(owner_window, WalletOperationKind::Unlock)
-            .map_err(map_runtime_error)?;
-        let vault = operation
-            .run_authorized(|_| load_vault(&self.vault_path).map_err(map_vault_load_error))
-            .map_err(map_runtime_error)??;
-        let wallet_password = wallet_secret.into_wallet_password();
+        self.run_fail_closed(|| {
+            #[cfg(test)]
+            self.panic_at(WalletLifecyclePanicCheckpoint::BeforeRequest);
+            let operation = self
+                .runtime
+                .begin_operation(owner_window, WalletOperationKind::Unlock)
+                .map_err(map_runtime_error)?;
+            let vault = operation
+                .run_authorized(|_| load_vault(&self.vault_path).map_err(map_vault_load_error))
+                .map_err(map_runtime_error)??;
+            let wallet_password = wallet_secret.into_wallet_password();
+            self.unlock_authorized_with_password(operation, vault, wallet_password)
+        })
+    }
+
+    fn unlock_authorized(
+        &self,
+        operation: WalletOperationPermit<'_>,
+        vault: EncryptedWalletVault,
+        wallet_secret: SecretInput,
+    ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
+        self.unlock_authorized_with_password(operation, vault, wallet_secret.into_wallet_password())
+    }
+
+    fn unlock_authorized_with_password(
+        &self,
+        operation: WalletOperationPermit<'_>,
+        vault: EncryptedWalletVault,
+        wallet_password: super::secrets::WalletPassword,
+    ) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
         let status = operation
             .run_authorized(|activation| {
                 self.runtime
@@ -505,12 +782,40 @@ impl WalletLifecycleAdapters {
                     .map_err(map_session_error)
             })
             .map_err(map_runtime_error)??;
-        operation.complete(status).map_err(map_runtime_error)
+        #[cfg(test)]
+        self.panic_at(WalletLifecyclePanicCheckpoint::AfterUnlockSessionInstalled);
+        let completed = operation.complete(status).map_err(map_runtime_error)?;
+        #[cfg(test)]
+        self.panic_at(WalletLifecyclePanicCheckpoint::BeforeSuccessCommit);
+        Ok(completed)
     }
 
     pub(in crate::wallet) fn lock(&self) -> Result<WalletLockResult, WalletLifecycleError> {
-        self.runtime.invalidate_all().map_err(map_runtime_error)?;
-        Ok(WalletLockResult { locked: true })
+        match catch_unwind(AssertUnwindSafe(|| self.runtime.invalidate_all())) {
+            Ok(Ok(())) => Ok(WalletLockResult { locked: true }),
+            Ok(Err(_)) | Err(_) => std::process::abort(),
+        }
+    }
+
+    fn run_fail_closed<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, WalletLifecycleError>,
+    ) -> Result<T, WalletLifecycleError> {
+        let mut guard = LifecycleFailClosedGuard::arm(&self.runtime);
+        match catch_unwind(AssertUnwindSafe(operation)) {
+            Ok(Ok(value)) => {
+                guard.commit();
+                Ok(value)
+            }
+            Ok(Err(error)) => {
+                guard.invalidate_or_terminate();
+                Err(error)
+            }
+            Err(_) => {
+                guard.invalidate_or_terminate();
+                Err(WalletLifecycleError::RuntimeUnavailable)
+            }
+        }
     }
 
     fn require_vault_absent(&self) -> Result<(), WalletLifecycleError> {
@@ -529,7 +834,9 @@ impl WalletLifecycleAdapters {
             vault_path: vault_path.to_path_buf(),
             recovery_ceremony: Arc::clone(&test_recovery_ceremony)
                 as Arc<dyn RecoveryCredentialCeremony>,
+            secret_ceremony: Arc::new(TestWalletSecretCeremony),
             interruption_checkpoint: None,
+            panic_checkpoint: None,
             test_recovery_ceremony,
         }
     }
@@ -546,7 +853,9 @@ impl WalletLifecycleAdapters {
             vault_path: vault_path.to_path_buf(),
             recovery_ceremony: Arc::clone(&test_recovery_ceremony)
                 as Arc<dyn RecoveryCredentialCeremony>,
+            secret_ceremony: Arc::new(TestWalletSecretCeremony),
             interruption_checkpoint: Some(checkpoint),
+            panic_checkpoint: None,
             test_recovery_ceremony,
         }
     }
@@ -566,7 +875,9 @@ impl WalletLifecycleAdapters {
             vault_path: vault_path.to_path_buf(),
             recovery_ceremony: Arc::clone(&test_recovery_ceremony)
                 as Arc<dyn RecoveryCredentialCeremony>,
+            secret_ceremony: Arc::new(TestWalletSecretCeremony),
             interruption_checkpoint: None,
+            panic_checkpoint: None,
             test_recovery_ceremony,
         }
     }
@@ -574,6 +885,24 @@ impl WalletLifecycleAdapters {
     #[cfg(test)]
     fn take_test_recovery_credential(&self) -> Option<Zeroizing<String>> {
         self.test_recovery_ceremony.take_credential()
+    }
+
+    #[cfg(test)]
+    fn for_test_with_panic(
+        runtime: Arc<WalletRuntimeState>,
+        vault_path: &std::path::Path,
+        checkpoint: WalletLifecyclePanicCheckpoint,
+    ) -> Self {
+        let mut adapters = Self::for_test(runtime, vault_path);
+        adapters.panic_checkpoint = Some(checkpoint);
+        adapters
+    }
+
+    #[cfg(test)]
+    fn panic_at(&self, checkpoint: WalletLifecyclePanicCheckpoint) {
+        if self.panic_checkpoint == Some(checkpoint) {
+            panic!("injected wallet lifecycle panic");
+        }
     }
 
     #[cfg(test)]
@@ -714,6 +1043,17 @@ fn map_recovery_ceremony_error(error: RecoveryCeremonyError) -> WalletLifecycleE
     }
 }
 
+fn map_native_secret_ceremony_error(error: NativeSecretCeremonyError) -> WalletLifecycleError {
+    match error {
+        NativeSecretCeremonyError::Cancelled => {
+            WalletLifecycleError::RecoveryAcknowledgementCancelled
+        }
+        NativeSecretCeremonyError::AuthorityRevoked => WalletLifecycleError::RuntimeUnavailable,
+        NativeSecretCeremonyError::InvalidInput => WalletLifecycleError::PasswordPolicy,
+        NativeSecretCeremonyError::NativeUiUnavailable => WalletLifecycleError::RuntimeUnavailable,
+    }
+}
+
 fn map_recovery_credential_error(_error: RecoveryArtifactError) -> WalletLifecycleError {
     WalletLifecycleError::InvalidPasswordOrDamage
 }
@@ -763,7 +1103,7 @@ mod tests {
     const INVALID_LEGACY_RECOVERY_PASSWORD: &str = "different recovery password";
 
     fn secret(value: &str) -> SecretInput {
-        serde_json::from_str(&serde_json::to_string(value).unwrap()).unwrap()
+        SecretInput::for_test(value)
     }
 
     fn selection_token(
@@ -1078,6 +1418,59 @@ mod tests {
         assert_eq!(adapter.lock().unwrap(), WalletLockResult { locked: true });
         assert!(runtime.lifecycle_status(true).unwrap().locked);
         assert_eq!(adapter.lock().unwrap(), WalletLockResult { locked: true });
+    }
+
+    #[test]
+    fn panic_after_unlock_installs_session_is_caught_and_fully_invalidated() {
+        let directory = tempfile::tempdir().unwrap();
+        let recovery_path = directory.path().join("panic.vision-recovery.json");
+        let vault_path = directory.path().join("wallet").join(WALLET_VAULT_FILE);
+        let runtime = Arc::new(WalletRuntimeState::for_test());
+        let creator = WalletLifecycleAdapters::for_test(Arc::clone(&runtime), &vault_path);
+        let token = selection_token(&runtime, RecoveryPathPurpose::Destination, &recovery_path);
+        creator
+            .create_at(
+                MAIN,
+                "panic-guard",
+                "Panic Guard",
+                token.as_str(),
+                secret(WALLET_PASSWORD),
+                1,
+            )
+            .unwrap();
+
+        let guarded = WalletLifecycleAdapters::for_test_with_panic(
+            Arc::clone(&runtime),
+            &vault_path,
+            WalletLifecyclePanicCheckpoint::AfterUnlockSessionInstalled,
+        );
+        assert_eq!(
+            guarded.unlock(MAIN, secret(WALLET_PASSWORD)).unwrap_err(),
+            WalletLifecycleError::RuntimeUnavailable
+        );
+        let vault = load_vault(&vault_path).unwrap();
+        let status = runtime.lifecycle_status_for_vault(&vault).unwrap();
+        assert!(status.locked);
+        assert!(status.account.is_some());
+        assert!(runtime
+            .begin_operation(MAIN, WalletOperationKind::Unlock)
+            .is_ok());
+    }
+
+    #[test]
+    fn panic_before_request_returns_only_the_fixed_runtime_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
+        let guarded = WalletLifecycleAdapters::for_test_with_panic(
+            Arc::clone(&runtime),
+            &directory.path().join(WALLET_VAULT_FILE),
+            WalletLifecyclePanicCheckpoint::BeforeRequest,
+        );
+
+        let error = guarded.status().unwrap_err();
+        assert_eq!(error, WalletLifecycleError::RuntimeUnavailable);
+        assert_eq!(error.code(), "wallet_runtime_unavailable");
+        assert!(runtime.lifecycle_status(false).unwrap().locked);
     }
 
     #[test]

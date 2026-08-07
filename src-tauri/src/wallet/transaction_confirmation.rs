@@ -555,6 +555,13 @@ unsafe extern "system" fn confirmation_window_proc(
         WM_COPY | WM_CUT | WM_PASTE | WM_CLEAR | WM_CONTEXTMENU | WM_GETTEXT | WM_GETTEXTLENGTH
         | WM_SETTEXT => 0,
         WM_CHAR => fail_closed_window(window, state),
+        WM_IME_SETCONTEXT => {
+            if input_context_is_absent(window) {
+                0
+            } else {
+                fail_closed_window(window, state)
+            }
+        }
         message if is_blocked_text_service_message(message) => fail_closed_window(window, state),
         WM_CLOSE => {
             state.outcome = ConfirmationOutcome::Cancelled;
@@ -933,7 +940,6 @@ const fn is_blocked_text_service_message(message: u32) -> bool {
         WM_IME_STARTCOMPOSITION
             | WM_IME_ENDCOMPOSITION
             | WM_IME_COMPOSITION
-            | WM_IME_SETCONTEXT
             | WM_IME_NOTIFY
             | WM_IME_CONTROL
             | WM_IME_COMPOSITIONFULL
@@ -1010,10 +1016,28 @@ mod tests {
         secrets::{WalletPassword, WalletSeed},
         vault::EncryptedWalletVault,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::{
+        mem::size_of,
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
+            Arc,
+        },
+        thread,
+        time::Duration,
+    };
     use windows_sys::Win32::{
-        Graphics::Gdi::{CreateCompatibleDC, DeleteDC},
-        UI::Input::IMO_INJECTED,
+        Graphics::Gdi::{
+            CreateCompatibleDC, DeleteDC, GetDC, GetDeviceCaps, ReleaseDC, LOGPIXELSX,
+        },
+        UI::Input::{
+            Ime::{ImmAssociateContext, ImmCreateContext, ImmDestroyContext},
+            KeyboardAndMouse::{
+                GetKeyboardLayoutNameW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+                KEYEVENTF_KEYUP,
+            },
+            IMO_INJECTED,
+        },
+        UI::WindowsAndMessaging::{FindWindowW, GetForegroundWindow},
     };
 
     const MAIN: &str = "main";
@@ -1356,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn native_window_rejects_missing_owner_and_all_text_service_routes() {
+    fn native_window_rejects_missing_owner_and_dangerous_text_service_routes() {
         assert_eq!(
             NativeTransactionConfirmationCeremony::new(0).err().unwrap(),
             NativeConfirmationError::NativeUiUnavailable
@@ -1365,7 +1389,6 @@ mod tests {
             WM_IME_STARTCOMPOSITION,
             WM_IME_ENDCOMPOSITION,
             WM_IME_COMPOSITION,
-            WM_IME_SETCONTEXT,
             WM_IME_NOTIFY,
             WM_IME_CONTROL,
             WM_IME_COMPOSITIONFULL,
@@ -1379,6 +1402,7 @@ mod tests {
         ] {
             assert!(is_blocked_text_service_message(message));
         }
+        assert!(!is_blocked_text_service_message(WM_IME_SETCONTEXT));
     }
 
     #[test]
@@ -1398,6 +1422,44 @@ mod tests {
         assert_eq!(state.outcome, ConfirmationOutcome::Failed);
         assert!(state.display.is_wiped());
         assert_eq!(unsafe { IsWindow(window) }, 0);
+    }
+
+    #[test]
+    fn ime_focus_transition_requires_the_window_to_remain_disassociated() {
+        let window = hidden_test_window();
+        assert!(!window.is_null());
+        assert!(disable_text_services(window));
+        let mut state = dialog_state_for_test();
+        unsafe {
+            SetWindowLongPtrW(
+                window,
+                GWLP_USERDATA,
+                (&mut state as *mut ConfirmationDialogState) as isize,
+            );
+            confirmation_window_proc(window, WM_IME_SETCONTEXT, 1, 0);
+        }
+        assert_eq!(state.outcome, ConfirmationOutcome::Pending);
+        assert_ne!(unsafe { IsWindow(window) }, 0);
+        unsafe { DestroyWindow(window) };
+
+        let associated_window = hidden_test_window();
+        assert!(!associated_window.is_null());
+        assert!(disable_text_services(associated_window));
+        let input_context = unsafe { ImmCreateContext() };
+        assert!(!input_context.is_null());
+        assert!(unsafe { ImmAssociateContext(associated_window, input_context) }.is_null());
+        let mut associated_state = dialog_state_for_test();
+        unsafe {
+            SetWindowLongPtrW(
+                associated_window,
+                GWLP_USERDATA,
+                (&mut associated_state as *mut ConfirmationDialogState) as isize,
+            );
+            confirmation_window_proc(associated_window, WM_IME_SETCONTEXT, 1, 0);
+        }
+        assert_eq!(associated_state.outcome, ConfirmationOutcome::Failed);
+        assert_eq!(unsafe { IsWindow(associated_window) }, 0);
+        assert_ne!(unsafe { ImmDestroyContext(input_context) }, 0);
     }
 
     #[test]
@@ -1538,6 +1600,276 @@ mod tests {
             SelectObject(device, previous);
             DeleteDC(device);
         }
+    }
+
+    #[test]
+    fn complete_confirmation_layout_fits_and_arms_on_windows() {
+        let device = unsafe { CreateCompatibleDC(null_mut()) };
+        assert!(!device.is_null());
+        let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+        let previous = unsafe { SelectObject(device, font) };
+        assert!(!previous.is_null());
+        assert_ne!(
+            unsafe { SetBkMode(device, i32::try_from(TRANSPARENT).unwrap()) },
+            0
+        );
+        let state = dialog_state_for_test();
+        assert!(draw_literal(
+            device,
+            "Verify every value. This confirms only this exact unsigned transaction; it does not sign or submit it.",
+            RECT { left: 24, top: 18, right: 816, bottom: 54 },
+            DT_LEFT | DT_WORDBREAK,
+        ));
+        for (label, top) in [
+            ("Sender", 70),
+            ("Recipient", 142),
+            ("Amount", 214),
+            ("Fees", 270),
+            ("Total debit", 328),
+            ("Nonce", 384),
+            ("Transaction identifier", 440),
+        ] {
+            assert!(draw_label(device, label, top), "label did not fit: {label}");
+        }
+        for (name, text, top, bottom) in [
+            ("sender", state.display.sender.as_slice(), 92, 132),
+            ("recipient", state.display.recipient.as_slice(), 164, 204),
+            ("amount", state.display.amount.as_slice(), 236, 260),
+            ("fee", state.display.fee.as_slice(), 292, 318),
+            ("total", state.display.total.as_slice(), 350, 374),
+            ("nonce", state.display.nonce.as_slice(), 406, 430),
+            (
+                "transaction_id",
+                state.display.transaction_id.as_slice(),
+                462,
+                502,
+            ),
+        ] {
+            assert!(
+                draw_buffer(device, text, top, bottom),
+                "value did not fit: {name}"
+            );
+        }
+        assert!(draw_literal(
+            device,
+            "Mined transactions can reorganize and are never presented as irreversible.",
+            RECT {
+                left: 24,
+                top: 514,
+                right: 816,
+                bottom: 544
+            },
+            DT_LEFT | DT_WORDBREAK,
+        ));
+        unsafe {
+            SelectObject(device, previous);
+            DeleteDC(device);
+        }
+
+        let window = hidden_test_window();
+        assert!(!window.is_null());
+        unsafe { ShowWindow(window, SW_SHOW) };
+        let (confirm, cancel) = create_buttons(window).unwrap();
+        let mut state = dialog_state_for_test();
+        state.confirm_button = confirm;
+        state.cancel_button = cancel;
+        assert!(arm_confirmation(&mut state));
+        unsafe { DestroyWindow(window) };
+    }
+
+    /// Manual, non-production qualification probe for the exact native confirmation window.
+    ///
+    /// The harness uses only fixed public test values and the private `cfg(test)` entry point. It
+    /// cannot create or unlock a wallet, access a seed, sign, submit, or acquire Tauri authority.
+    #[test]
+    #[ignore = "requires a human operator to qualify real Windows confirmation input and layout"]
+    fn real_windows_transaction_confirmation_operator_harness() {
+        let scenario = std::env::var("VISION_WALLET_CONFIRMATION_SCENARIO").expect(
+            "set VISION_WALLET_CONFIRMATION_SCENARIO to mouse, keyboard, held-enter, injected-enter, cancel, or revoke",
+        );
+        assert!(matches!(
+            scenario.as_str(),
+            "mouse" | "keyboard" | "held-enter" | "injected-enter" | "cancel" | "revoke"
+        ));
+        let evidence_label = std::env::var("VISION_WALLET_CONFIRMATION_EVIDENCE_LABEL")
+            .ok()
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+            .expect("set a 1-64 character alphanumeric, dash, or underscore evidence label");
+
+        let mut keyboard_layout = [0_u16; 9];
+        assert_ne!(
+            unsafe { GetKeyboardLayoutNameW(keyboard_layout.as_mut_ptr()) },
+            0,
+            "active keyboard layout could not be recorded",
+        );
+        let keyboard_layout = String::from_utf16(&keyboard_layout[..8]).unwrap();
+
+        let owner = hidden_test_window();
+        assert!(!owner.is_null());
+        let owner_title = wide_null("Vision Wallet Confirmation Qualification Harness");
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+                owner,
+                owner_title.as_ptr(),
+            );
+            ShowWindow(owner, SW_SHOW);
+        }
+        let device = unsafe { GetDC(owner) };
+        assert!(!device.is_null());
+        let dpi = unsafe { GetDeviceCaps(device, i32::try_from(LOGPIXELSX).unwrap()) };
+        assert_ne!(unsafe { ReleaseDC(owner, device) }, 0);
+        assert!(dpi > 0);
+
+        println!(
+            "VISION_WALLET_CONFIRMATION_QUALIFICATION_READY scenario={scenario} label={evidence_label} keyboard_layout={keyboard_layout} dpi={dpi} pid={}",
+            std::process::id()
+        );
+        match scenario.as_str() {
+            "mouse" => println!(
+                "Inspect every value and button for clipping, then click Confirm exact transaction once with a physical mouse."
+            ),
+            "keyboard" => println!(
+                "Inspect every value and button for clipping, then press and release Enter once on the focused Confirm control."
+            ),
+            "held-enter" => println!(
+                "Keep the command-launch Enter key held through dialog display. Repeats and release must not confirm. Then press and release Enter once freshly."
+            ),
+            "injected-enter" => println!(
+                "Do not touch mouse or keyboard until VISION_WALLET_INJECTED_INPUT_REJECTED appears; then confirm once with physical input."
+            ),
+            "cancel" => println!("Inspect the complete dialog, then click Cancel or close the window."),
+            "revoke" => println!(
+                "Do not interact. Test authority will be revoked and the dialog must close without confirmation."
+            ),
+            _ => unreachable!(),
+        }
+
+        let authority_current = Arc::new(AtomicBool::new(true));
+        let dialog_completed = Arc::new(AtomicBool::new(false));
+        let injected_input_accepted = Arc::new(AtomicBool::new(false));
+        let helper_failed = Arc::new(AtomicBool::new(false));
+        let helper = match scenario.as_str() {
+            "revoke" => {
+                let authority_current = Arc::clone(&authority_current);
+                Some(thread::spawn(move || {
+                    thread::sleep(Duration::from_secs(2));
+                    authority_current.store(false, AtomicOrdering::SeqCst);
+                }))
+            }
+            "injected-enter" => {
+                let dialog_completed = Arc::clone(&dialog_completed);
+                let injected_input_accepted = Arc::clone(&injected_input_accepted);
+                let helper_failed = Arc::clone(&helper_failed);
+                let authority_current = Arc::clone(&authority_current);
+                Some(thread::spawn(move || {
+                    thread::sleep(Duration::from_secs(2));
+                    let title = wide_null("Confirm Vision Transaction");
+                    let dialog = unsafe { FindWindowW(null(), title.as_ptr()) };
+                    if dialog.is_null() || unsafe { GetForegroundWindow() } != dialog {
+                        helper_failed.store(true, AtomicOrdering::SeqCst);
+                        authority_current.store(false, AtomicOrdering::SeqCst);
+                        return;
+                    }
+                    let inputs = [
+                        INPUT {
+                            r#type: INPUT_KEYBOARD,
+                            Anonymous: INPUT_0 {
+                                ki: KEYBDINPUT {
+                                    wVk: VK_RETURN,
+                                    wScan: 0,
+                                    dwFlags: 0,
+                                    time: 0,
+                                    dwExtraInfo: 0,
+                                },
+                            },
+                        },
+                        INPUT {
+                            r#type: INPUT_KEYBOARD,
+                            Anonymous: INPUT_0 {
+                                ki: KEYBDINPUT {
+                                    wVk: VK_RETURN,
+                                    wScan: 0,
+                                    dwFlags: KEYEVENTF_KEYUP,
+                                    time: 0,
+                                    dwExtraInfo: 0,
+                                },
+                            },
+                        },
+                    ];
+                    let expected = u32::try_from(inputs.len()).unwrap();
+                    if unsafe {
+                        SendInput(
+                            expected,
+                            inputs.as_ptr(),
+                            i32::try_from(size_of::<INPUT>()).unwrap(),
+                        )
+                    } != expected
+                    {
+                        helper_failed.store(true, AtomicOrdering::SeqCst);
+                        authority_current.store(false, AtomicOrdering::SeqCst);
+                        return;
+                    }
+                    thread::sleep(Duration::from_secs(3));
+                    if dialog_completed.load(AtomicOrdering::SeqCst) {
+                        injected_input_accepted.store(true, AtomicOrdering::SeqCst);
+                    } else {
+                        println!(
+                            "VISION_WALLET_INJECTED_INPUT_REJECTED physical_input_now_allowed"
+                        );
+                    }
+                }))
+            }
+            _ => None,
+        };
+
+        let sender = "1".repeat(64);
+        let recipient = "2".repeat(64);
+        let transaction_id = "3".repeat(64);
+        let result = run_native_confirmation(
+            owner,
+            TransferConfirmationFields {
+                sender_address: &sender,
+                recipient_address: &recipient,
+                amount_raw_units: 1_234_567_890,
+                charged_fee_raw_units: 1,
+                fee_limit_raw_units: 201,
+                total_debit_raw_units: 1_234_567_891,
+                nonce: 42,
+                transaction_id: &transaction_id,
+            },
+            &|| authority_current.load(AtomicOrdering::SeqCst),
+        );
+        dialog_completed.store(true, AtomicOrdering::SeqCst);
+        if let Some(helper) = helper {
+            helper.join().expect("qualification helper failed");
+        }
+        unsafe { DestroyWindow(owner) };
+
+        assert!(
+            !injected_input_accepted.load(AtomicOrdering::SeqCst),
+            "ordinary non-UIAccess SendInput completed confirmation"
+        );
+        assert!(
+            !helper_failed.load(AtomicOrdering::SeqCst),
+            "qualification helper could not identify the foreground dialog or deliver input"
+        );
+        match scenario.as_str() {
+            "mouse" | "keyboard" | "held-enter" | "injected-enter" => {
+                assert_eq!(result, Ok(()));
+            }
+            "cancel" => assert_eq!(result, Err(NativeConfirmationError::Cancelled)),
+            "revoke" => assert_eq!(result, Err(NativeConfirmationError::AuthorityRevoked)),
+            _ => unreachable!(),
+        }
+        println!(
+            "VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS scenario={scenario} label={evidence_label} keyboard_layout={keyboard_layout} dpi={dpi}"
+        );
     }
 
     #[test]

@@ -70,7 +70,10 @@ owner-drawn Windows dialog displays the complete sender, recipient, amount, char
 fee, total debit, nonce, and transaction identifier. The dialog contains no editable transaction
 field, disassociates IME contexts from itself and both focusable buttons, rejects text-service and
 clipboard message routes, polls runtime and Core authority while open, and requires one explicit
-confirm action. Its temporary UTF-16 transaction buffers are zeroized on every exit.
+confirm action. Windows' normal focus-time `WM_IME_SETCONTEXT` notification is suppressed only
+after a balanced live check proves that the window remains disassociated; an associated context or
+any composition/input-language route fails closed. Its temporary UTF-16 transaction buffers are
+zeroized on every exit.
 
 Cancellation, owner loss, UI failure, panic, Core exit or generation change, wallet/runtime
 revocation, and stale authority destroy the consumed intent without producing confirmation

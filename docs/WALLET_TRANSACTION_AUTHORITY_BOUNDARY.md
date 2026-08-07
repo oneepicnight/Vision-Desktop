@@ -84,6 +84,9 @@ revocation, and stale authority destroy the consumed intent without producing co
 authority. Panic containment invalidates the wallet runtime or terminates if invalidation cannot be
 proven. The Confirm control begins disabled and non-default. It is armed only after every required
 value has been measured to fit its fixed bounds and every checked Win32 draw operation completes.
+Startup never focuses the non-button dialog after arming. If verified paint completes before
+foreground activation returns, the post-foreground step restores and revalidates focus on the exact
+Confirm control; if paint completes later, the ordinary arming path establishes that focus.
 Approval then requires a complete, fresh, post-display hardware keyboard or mouse press delivered
 by the exact armed control. Mouse and keyboard press state cannot be combined. A keyboard command
 generated on key-down is not authority and cannot consume the pending physical press; only a

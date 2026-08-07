@@ -40,7 +40,8 @@ expected Windows keyboard-layout identifier. Every successful run prints
 `VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS` with its scenario, evidence label, declared input
 profile, active keyboard-layout identifier, DPI-awareness context, and actual confirmation-window
 DPI. It also records the accepted physical input device. A `keyboard` or `held-enter` run fails if
-a mouse completed confirmation, and a `mouse` run fails if a keyboard completed it.
+a mouse completed confirmation, and a `mouse` run fails if a keyboard completed it. Every run also
+requires evidence that post-foreground focus was verified on the exact Confirm control.
 
 ## Production-equivalent DPI boundary
 

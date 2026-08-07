@@ -95,6 +95,10 @@ static QUALIFICATION_CONFIRMATION_DPI: std::sync::atomic::AtomicU32 =
 static QUALIFICATION_ACCEPTED_INPUT_DEVICE: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
 
+#[cfg(test)]
+static QUALIFICATION_CONFIRM_FOCUS_VERIFIED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// A non-forgeable proof issued only after this module's native ceremony reports an explicit,
 /// post-render hardware approval. Sibling wallet modules can name and consume this type, but its
 /// private non-zero-sized field prevents them from constructing it in safe Rust.
@@ -597,7 +601,11 @@ fn run_native_confirmation(
     unsafe {
         ShowWindow(dialog, SW_SHOW);
         SetForegroundWindow(dialog);
-        SetFocus(dialog);
+    }
+    if !restore_armed_confirmation_focus(dialog, &state) {
+        state.wipe();
+        unsafe { DestroyWindow(dialog) };
+        return Err(NativeConfirmationError::NativeUiUnavailable);
     }
 
     let mut message = MSG::default();
@@ -802,7 +810,25 @@ fn arm_confirmation(window: HWND, state: &mut ConfirmationDialogState) -> bool {
     }
     state.display_verified = true;
     state.display_verified_at = Some(unsafe { GetTickCount() });
+    #[cfg(test)]
+    if std::env::var_os("VISION_WALLET_CONFIRMATION_SCENARIO").is_some() {
+        QUALIFICATION_CONFIRM_FOCUS_VERIFIED.store(true, Ordering::SeqCst);
+    }
     true
+}
+
+fn restore_armed_confirmation_focus(window: HWND, state: &ConfirmationDialogState) -> bool {
+    if !state.display_verified {
+        return true;
+    }
+    unsafe { SetFocus(state.confirm_button) };
+    let valid = unsafe { GetFocus() } == state.confirm_button
+        && confirmation_input_contexts_are_absent(window, state);
+    #[cfg(test)]
+    if valid && std::env::var_os("VISION_WALLET_CONFIRMATION_SCENARIO").is_some() {
+        QUALIFICATION_CONFIRM_FOCUS_VERIFIED.store(true, Ordering::SeqCst);
+    }
+    valid
 }
 
 fn record_fresh_confirmation_input(state: &mut ConfirmationDialogState, message: &MSG) -> bool {
@@ -2054,6 +2080,33 @@ mod tests {
         unsafe { DestroyWindow(window) };
     }
 
+    #[test]
+    fn post_foreground_step_restores_only_an_already_armed_confirm_control() {
+        let window = hidden_test_window();
+        assert!(!window.is_null());
+        assert!(disable_text_services(window));
+        let (confirm, cancel) = create_buttons(window).unwrap();
+        let mut state = dialog_state_for_test();
+        state.confirm_button = confirm;
+        state.cancel_button = cancel;
+
+        unsafe {
+            ShowWindow(window, SW_SHOW);
+            SetFocus(window);
+        }
+        assert!(restore_armed_confirmation_focus(window, &state));
+        assert_eq!(unsafe { GetFocus() }, window);
+
+        assert!(arm_confirmation(window, &mut state));
+        assert_eq!(unsafe { GetFocus() }, confirm);
+        unsafe { SetFocus(window) };
+        assert_eq!(unsafe { GetFocus() }, window);
+        assert!(restore_armed_confirmation_focus(window, &state));
+        assert_eq!(unsafe { GetFocus() }, confirm);
+        assert!(confirmation_input_contexts_are_absent(window, &state));
+        unsafe { DestroyWindow(window) };
+    }
+
     /// Manual, non-production qualification probe for the exact native confirmation window.
     ///
     /// The harness uses only fixed public test values and the private `cfg(test)` entry point. It
@@ -2091,6 +2144,7 @@ mod tests {
         establish_production_dpi_context_for_qualification();
         QUALIFICATION_CONFIRMATION_DPI.store(0, AtomicOrdering::SeqCst);
         QUALIFICATION_ACCEPTED_INPUT_DEVICE.store(0, AtomicOrdering::SeqCst);
+        QUALIFICATION_CONFIRM_FOCUS_VERIFIED.store(false, AtomicOrdering::SeqCst);
 
         let mut keyboard_layout = [0_u16; 9];
         assert_ne!(
@@ -2254,6 +2308,10 @@ mod tests {
             "qualification helper could not identify the foreground dialog or deliver input"
         );
         let accepted_input_device = QUALIFICATION_ACCEPTED_INPUT_DEVICE.load(Ordering::SeqCst);
+        assert!(
+            QUALIFICATION_CONFIRM_FOCUS_VERIFIED.load(Ordering::SeqCst),
+            "exact Confirm control focus was never verified after foreground activation"
+        );
         match scenario.as_str() {
             "mouse" => {
                 assert_eq!(result, Ok(()));
@@ -2287,7 +2345,7 @@ mod tests {
             _ => unreachable!(),
         }
         println!(
-            "VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS scenario={scenario} label={evidence_label} input_profile={input_profile} keyboard_layout={keyboard_layout} dpi_context=PerMonitorV2 confirmation_dpi={confirmation_dpi} accepted_input_device={accepted_input_device}"
+            "VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS scenario={scenario} label={evidence_label} input_profile={input_profile} keyboard_layout={keyboard_layout} dpi_context=PerMonitorV2 confirmation_dpi={confirmation_dpi} confirm_focus_verified=true accepted_input_device={accepted_input_device}"
         );
     }
 
@@ -2310,6 +2368,8 @@ mod tests {
         assert!(production.contains("ImmGetContext"));
         assert!(production.contains("ImmReleaseContext"));
         assert!(production.contains("NativeConfirmationApproval::issue()"));
+        assert!(!production.contains("SetFocus(dialog)"));
+        assert!(production.contains("restore_armed_confirmation_focus(dialog, &state)"));
         let preview_source = include_str!("preview.rs");
         assert!(!preview_source.contains("pub(in crate::wallet) fn confirm("));
         assert!(preview_source

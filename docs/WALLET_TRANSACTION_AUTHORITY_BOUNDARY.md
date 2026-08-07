@@ -78,8 +78,15 @@ authority. Panic containment invalidates the wallet runtime or terminates if inv
 proven. The Confirm control begins disabled and non-default. It is armed only after every required
 value has been measured to fit its fixed bounds and every checked Win32 draw operation completes.
 Approval then requires a complete, fresh, post-display hardware keyboard or mouse press delivered
-by the exact armed control; pre-display, repeated-key, injected, wrong-control, and synthetic
-command paths fail closed. Only the native-confirmation module can construct the private,
+by the exact armed control. Pre-display and repeated-key input, ordinary non-UIAccess `SendInput`
+injection, system-origin input, unavailable-origin input, wrong-control input, and synthetic command
+paths fail closed. Windows also classifies input injected by an application whose manifest has
+`uiAccess="true"` as `IMO_HARDWARE`; Vision Desktop therefore treats trusted Windows UIAccess
+processes as part of the operating-system trusted-computing boundary and does not claim to
+distinguish their injected input from physical hardware. This boundary follows Microsoft's
+[`INPUT_MESSAGE_ORIGIN_ID`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ne-winuser-input_message_origin_id)
+contract and must be included in activation review and endpoint qualification. Only the
+native-confirmation module can construct the private,
 non-forgeable approval capability consumed by the preview boundary, so a future sibling wallet
 module cannot complete the intent directly. A successful final authority check then releases a
 distinct Rust-only confirmed-intent type; that type is not signing authority and has no Clone,

@@ -18,8 +18,12 @@ process handle, the Windows process-creation identity, the exact API port, and t
 compatibility-manifest digest. The authority cannot be cloned, debug-formatted, serialized, or
 constructed from caller-supplied connection values.
 
-The private wallet Core client supports bounded `GET` reads for account balance, account nonce, and
-node status/canonical tip. Every operation creates a fresh literal `127.0.0.1` TCP connection,
+The private wallet Core client supports bounded `GET` reads for one combined account snapshot and
+node status/canonical tip. Balance and nonce wire reads are private implementation details; the
+client releases them only after their echoed addresses and existence states agree, and a nonexistent
+account must report both values as zero. Status requires the exact supported version and canonical
+lowercase 32-byte hexadecimal hash shapes. Production result types do not expose unrestricted
+`Debug` formatting. Every operation creates a fresh literal `127.0.0.1` TCP connection,
 verifies that the server side of that exact connection belongs to the supervised PID through the
 Windows TCP owner table, validates authority before and after the read, applies one total deadline,
 requires bounded HTTP/1.1 JSON with an exact typed schema, and returns fixed internal errors.

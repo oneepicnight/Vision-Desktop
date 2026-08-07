@@ -33,6 +33,7 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_TCP_TABLE_BYTES: usize = 4 * 1024 * 1024;
+const SUPPORTED_STATUS_VERSION: &str = "3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WalletCoreClientError {
@@ -45,27 +46,24 @@ pub(super) enum WalletCoreClientError {
     ResponseRejected,
     ResponseTooLarge,
     AccountIdentityMismatch,
+    AccountStateRejected,
 }
 
 pub(super) struct WalletCoreReadClient<'a> {
     authority: CoreConnectionAuthority<'a>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct WalletCoreBalance {
+#[cfg_attr(test, derive(Debug))]
+#[derive(PartialEq, Eq)]
+pub(super) struct WalletCoreAccountSnapshot {
     pub address: String,
     pub exists: bool,
     pub balance: u128,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct WalletCoreNonce {
-    pub address: String,
-    pub exists: bool,
     pub nonce: u64,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+#[derive(PartialEq, Eq)]
 pub(super) struct WalletCoreStatus {
     pub version: String,
     pub canonical_tip_height: u64,
@@ -178,18 +176,11 @@ impl<'a> WalletCoreReadClient<'a> {
         Ok(Self { authority })
     }
 
-    pub(super) fn account_balance(
+    pub(super) fn account_snapshot(
         &self,
         address: &str,
-    ) -> Result<WalletCoreBalance, WalletCoreClientError> {
-        account_balance_with(&self.authority, address)
-    }
-
-    pub(super) fn account_nonce(
-        &self,
-        address: &str,
-    ) -> Result<WalletCoreNonce, WalletCoreClientError> {
-        account_nonce_with(&self.authority, address)
+    ) -> Result<WalletCoreAccountSnapshot, WalletCoreClientError> {
+        account_snapshot_with(&self.authority, address)
     }
 
     pub(super) fn status(&self) -> Result<WalletCoreStatus, WalletCoreClientError> {
@@ -197,43 +188,46 @@ impl<'a> WalletCoreReadClient<'a> {
     }
 }
 
-fn account_balance_with<A: ReadAuthority>(
+fn account_snapshot_with<A: ReadAuthority>(
     authority: &A,
     address: &str,
-) -> Result<WalletCoreBalance, WalletCoreClientError> {
+) -> Result<WalletCoreAccountSnapshot, WalletCoreClientError> {
     validate_address(address)?;
-    let path = format!("/balance/{address}");
-    let response: AccountBalanceWire = read_json(authority, &path)?;
-    if response.address != address {
+    let balance = read_balance_wire(authority, address)?;
+    let nonce = read_nonce_wire(authority, address)?;
+    if balance.address != address || nonce.address != address || balance.address != nonce.address {
         return Err(WalletCoreClientError::AccountIdentityMismatch);
     }
-    Ok(WalletCoreBalance {
-        address: response.address,
-        exists: response.exists,
-        balance: response.balance,
+    if balance.exists != nonce.exists
+        || (!balance.exists && (balance.balance != 0 || nonce.nonce != 0))
+    {
+        return Err(WalletCoreClientError::AccountStateRejected);
+    }
+    Ok(WalletCoreAccountSnapshot {
+        address: balance.address,
+        exists: balance.exists,
+        balance: balance.balance,
+        nonce: nonce.nonce,
     })
 }
 
-fn account_nonce_with<A: ReadAuthority>(
+fn read_balance_wire<A: ReadAuthority>(
     authority: &A,
     address: &str,
-) -> Result<WalletCoreNonce, WalletCoreClientError> {
-    validate_address(address)?;
-    let path = format!("/nonce/{address}");
-    let response: AccountNonceWire = read_json(authority, &path)?;
-    if response.address != address {
-        return Err(WalletCoreClientError::AccountIdentityMismatch);
-    }
-    Ok(WalletCoreNonce {
-        address: response.address,
-        exists: response.exists,
-        nonce: response.nonce,
-    })
+) -> Result<AccountBalanceWire, WalletCoreClientError> {
+    read_json(authority, &format!("/balance/{address}"))
+}
+
+fn read_nonce_wire<A: ReadAuthority>(
+    authority: &A,
+    address: &str,
+) -> Result<AccountNonceWire, WalletCoreClientError> {
+    read_json(authority, &format!("/nonce/{address}"))
 }
 
 fn status_with<A: ReadAuthority>(authority: &A) -> Result<WalletCoreStatus, WalletCoreClientError> {
     let response: StatusWire = read_json(authority, "/status")?;
-    validate_status_bounds(&response)?;
+    validate_status_contract(&response)?;
     Ok(WalletCoreStatus {
         version: response.version,
         canonical_tip_height: response.canonical_tip_height,
@@ -244,24 +238,27 @@ fn status_with<A: ReadAuthority>(authority: &A) -> Result<WalletCoreStatus, Wall
 }
 
 fn validate_address(address: &str) -> Result<(), WalletCoreClientError> {
-    if address.len() == 64
-        && address
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if is_canonical_lower_hex_32(address) {
         Ok(())
     } else {
         Err(WalletCoreClientError::InvalidAddress)
     }
 }
 
-fn validate_status_bounds(status: &StatusWire) -> Result<(), WalletCoreClientError> {
-    let bounded = status.version.len() <= 64
-        && status.canonical_tip_hash.len() <= 128
+fn is_canonical_lower_hex_32(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_status_contract(status: &StatusWire) -> Result<(), WalletCoreClientError> {
+    let valid = status.version == SUPPORTED_STATUS_VERSION
+        && is_canonical_lower_hex_32(&status.canonical_tip_hash)
         && status
             .cached_state_root
             .as_ref()
-            .is_none_or(|value| value.len() <= 128)
+            .is_none_or(|value| is_canonical_lower_hex_32(value))
         && status.mining.recovery_state.len() <= 64
         && status
             .mining
@@ -278,18 +275,18 @@ fn validate_status_bounds(status: &StatusWire) -> Result<(), WalletCoreClientErr
             .recovery
             .local_tip_hash
             .as_ref()
-            .is_none_or(|value| value.len() <= 128)
+            .is_none_or(|value| is_canonical_lower_hex_32(value))
         && status
             .recovery
             .remote_tip_hash
             .as_ref()
-            .is_none_or(|value| value.len() <= 128)
+            .is_none_or(|value| is_canonical_lower_hex_32(value))
         && status
             .recovery
             .reason
             .as_ref()
             .is_none_or(|value| value.len() <= 512);
-    if bounded {
+    if valid {
         Ok(())
     } else {
         Err(WalletCoreClientError::ResponseRejected)
@@ -633,8 +630,77 @@ mod tests {
         (authority, server)
     }
 
+    fn serve_json_sequence(
+        bodies: Vec<String>,
+    ) -> (TestAuthority, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = match listener.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!(),
+        };
+        let authority = TestAuthority {
+            endpoint,
+            generation: Arc::new(AtomicU64::new(7)),
+            expected_generation: 7,
+            expected_pid: std::process::id(),
+        };
+        let server = thread::spawn(move || {
+            let mut requests = Vec::with_capacity(bodies.len());
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let count = stream.read(&mut request).unwrap();
+                requests.push(String::from_utf8(request[..count].to_vec()).unwrap());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                thread::sleep(Duration::from_millis(100));
+            }
+            requests
+        });
+        (authority, server)
+    }
+
+    fn status_json_with(version: &str, canonical_tip_hash: &str) -> String {
+        serde_json::json!({
+            "version": version,
+            "canonical_tip_height": 7,
+            "canonical_tip_hash": canonical_tip_hash,
+            "cached_state_root_height": 7,
+            "cached_state_root": "2".repeat(64),
+            "mempool_size": 0,
+            "peer_count": 2,
+            "durable_peer_count": 2,
+            "active_inbound_sessions": 1,
+            "active_outbound_sessions": 1,
+            "transient_peer_count": 0,
+            "dialable_peer_count": 2,
+            "mining": {
+                "available": true,
+                "active": false,
+                "blocks_found": 0,
+                "recovery_state": "normal",
+                "paused_reason": null
+            },
+            "recovery": {
+                "state": "normal",
+                "peer_addr": null,
+                "local_height": null,
+                "local_work": null,
+                "local_tip_hash": null,
+                "remote_height": null,
+                "remote_work": null,
+                "remote_tip_hash": null,
+                "reason": null
+            }
+        })
+        .to_string()
+    }
+
     fn status_json() -> String {
-        r#"{"version":"3","canonical_tip_height":7,"canonical_tip_hash":"abc","cached_state_root_height":7,"cached_state_root":"def","mempool_size":0,"peer_count":2,"durable_peer_count":2,"active_inbound_sessions":1,"active_outbound_sessions":1,"transient_peer_count":0,"dialable_peer_count":2,"mining":{"available":true,"active":false,"blocks_found":0,"recovery_state":"normal","paused_reason":null},"recovery":{"state":"normal","peer_addr":null,"local_height":null,"local_work":null,"local_tip_hash":null,"remote_height":null,"remote_work":null,"remote_tip_hash":null,"reason":null}}"#.to_string()
+        status_json_with(SUPPORTED_STATUS_VERSION, &"1".repeat(64))
     }
 
     #[test]
@@ -648,39 +714,86 @@ mod tests {
     }
 
     #[test]
-    fn reads_balance_over_fresh_loopback_connection_with_peer_proof() {
+    fn reads_one_consistent_account_snapshot_over_fresh_peer_proven_connections() {
         let address = "a".repeat(64);
-        let body = format!(
+        let balance = format!(
             "{{\"address\":\"{address}\",\"exists\":true,\"balance\":12345678901234567890}}"
         );
-        let (authority, server) = serve_once(body, "200 OK", "", None);
-        let result = account_balance_with(&authority, &address).unwrap();
-        let request = server.join().unwrap();
-        assert!(request.starts_with(&format!("GET /balance/{address} HTTP/1.1\r\n")));
-        assert!(request.contains("\r\nHost: 127.0.0.1:"));
-        assert!(request.contains("\r\nConnection: close\r\n"));
-        assert_eq!(result.balance, 12_345_678_901_234_567_890);
+        let nonce = format!("{{\"address\":\"{address}\",\"exists\":true,\"nonce\":9}}");
+        let (authority, server) = serve_json_sequence(vec![balance, nonce]);
+        let snapshot = account_snapshot_with(&authority, &address).unwrap();
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with(&format!("GET /balance/{address} HTTP/1.1\r\n")));
+        assert!(requests[1].starts_with(&format!("GET /nonce/{address} HTTP/1.1\r\n")));
+        for request in requests {
+            assert!(request.contains("\r\nHost: 127.0.0.1:"));
+            assert!(request.contains("\r\nConnection: close\r\n"));
+        }
+        assert_eq!(snapshot.address, address);
+        assert!(snapshot.exists);
+        assert_eq!(snapshot.balance, 12_345_678_901_234_567_890);
+        assert_eq!(snapshot.nonce, 9);
     }
 
     #[test]
-    fn reads_nonce_and_exact_status() {
-        let address = "b".repeat(64);
-        let nonce_body = format!("{{\"address\":\"{address}\",\"exists\":true,\"nonce\":9}}");
-        let (nonce_authority, nonce_server) = serve_once(nonce_body, "200 OK", "", None);
-        assert_eq!(
-            account_nonce_with(&nonce_authority, &address)
-                .unwrap()
-                .nonce,
-            9
-        );
-        nonce_server.join().unwrap();
-
+    fn reads_exact_supported_status() {
         let (status_authority, status_server) = serve_once(status_json(), "200 OK", "", None);
         let status = status_with(&status_authority).unwrap();
         status_server.join().unwrap();
+        assert_eq!(status.version, SUPPORTED_STATUS_VERSION);
         assert_eq!(status.canonical_tip_height, 7);
+        assert_eq!(status.canonical_tip_hash, "1".repeat(64));
         assert_eq!(status.peer_count, 2);
         assert_eq!(status.recovery_state, "normal");
+    }
+
+    #[test]
+    fn rejects_cross_contract_account_inconsistency() {
+        let address = "b".repeat(64);
+        let other_address = "c".repeat(64);
+        let cases = [
+            (
+                format!("{{\"address\":\"{address}\",\"exists\":true,\"balance\":1}}"),
+                format!("{{\"address\":\"{other_address}\",\"exists\":true,\"nonce\":1}}"),
+                WalletCoreClientError::AccountIdentityMismatch,
+            ),
+            (
+                format!("{{\"address\":\"{address}\",\"exists\":true,\"balance\":1}}"),
+                format!("{{\"address\":\"{address}\",\"exists\":false,\"nonce\":0}}"),
+                WalletCoreClientError::AccountStateRejected,
+            ),
+            (
+                format!("{{\"address\":\"{address}\",\"exists\":false,\"balance\":1}}"),
+                format!("{{\"address\":\"{address}\",\"exists\":false,\"nonce\":0}}"),
+                WalletCoreClientError::AccountStateRejected,
+            ),
+            (
+                format!("{{\"address\":\"{address}\",\"exists\":false,\"balance\":0}}"),
+                format!("{{\"address\":\"{address}\",\"exists\":false,\"nonce\":1}}"),
+                WalletCoreClientError::AccountStateRejected,
+            ),
+        ];
+        for (balance, nonce, expected) in cases {
+            let (authority, server) = serve_json_sequence(vec![balance, nonce]);
+            assert_eq!(account_snapshot_with(&authority, &address), Err(expected));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_status_version_and_noncanonical_tip_hash() {
+        for body in [
+            status_json_with("4", &"1".repeat(64)),
+            status_json_with(SUPPORTED_STATUS_VERSION, &"A".repeat(64)),
+            status_json_with(SUPPORTED_STATUS_VERSION, &"1".repeat(63)),
+        ] {
+            let (authority, server) = serve_once(body, "200 OK", "", None);
+            assert_eq!(
+                status_with(&authority),
+                Err(WalletCoreClientError::ResponseRejected)
+            );
+            server.join().unwrap();
+        }
     }
 
     #[test]
@@ -723,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_redirects_chunking_unknown_fields_and_identity_mismatch() {
+    fn rejects_redirects_chunking_and_unknown_fields() {
         let address = "c".repeat(64);
         let cases = [
             (
@@ -744,19 +857,13 @@ mod tests {
                 "",
                 WalletCoreClientError::ResponseRejected,
             ),
-            (
-                format!(
-                    "{{\"address\":\"{}\",\"exists\":true,\"balance\":1}}",
-                    "d".repeat(64)
-                ),
-                "200 OK",
-                "",
-                WalletCoreClientError::AccountIdentityMismatch,
-            ),
         ];
         for (body, status, headers, expected) in cases {
             let (authority, server) = serve_once(body, status, headers, None);
-            assert_eq!(account_balance_with(&authority, &address), Err(expected));
+            match read_balance_wire(&authority, &address) {
+                Err(error) => assert_eq!(error, expected),
+                Ok(_) => panic!("invalid response was accepted"),
+            }
             server.join().unwrap();
         }
     }
@@ -788,5 +895,10 @@ mod tests {
         assert!(!source.contains(&["#[tauri", "::command]"].concat()));
         assert!(!source.contains(&["req", "west"].concat()));
         assert!(!source.contains(&["Wallet", "Seed"].concat()));
+        for result_type in ["WalletCoreAccountSnapshot", "WalletCoreStatus"] {
+            assert!(!source.contains(&format!(
+                "#[derive(Debug, PartialEq, Eq)]\npub(super) struct {result_type}"
+            )));
+        }
     }
 }

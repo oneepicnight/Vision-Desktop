@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "wallet amount entry remains internal until user-facing custody is approved"
-    )
-)]
-
 use std::fmt;
 
 pub(in crate::wallet) const VISION_TOKEN_DECIMALS: u32 = 9;

@@ -23,7 +23,8 @@ const DEFAULT_CASH_TRANSFER_TIP: u64 = 0;
 ///
 /// Field order is consensus-relevant because RC2 signs the bincode 1.3.3
 /// serialization of this structure after clearing `sig`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(in crate::wallet) struct VisionTransaction {
     pub nonce: u64,
     pub sender_pubkey: String,
@@ -35,7 +36,8 @@ pub(in crate::wallet) struct VisionTransaction {
     pub sig: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub(in crate::wallet) struct CashTransferDraft {
     pub nonce: u64,
     pub recipient: String,
@@ -60,6 +62,16 @@ impl CashTransferDraft {
             fee_limit_raw_units: MIN_CASH_TRANSFER_FEE_LIMIT,
         }
     }
+
+    pub(in crate::wallet) fn charged_fee_raw_units(&self) -> Result<u64, WalletTransactionError> {
+        CASH_TRANSFER_BASE_FEE
+            .checked_add(self.tip_raw_units)
+            .ok_or(WalletTransactionError::FeeArithmeticOverflow)
+    }
+
+    pub(in crate::wallet) const fn fee_limit_raw_units(&self) -> u64 {
+        self.fee_limit_raw_units
+    }
 }
 
 #[derive(Serialize)]
@@ -77,6 +89,7 @@ pub(in crate::wallet) enum WalletTransactionError {
     FeeLimitTooLow,
     FeeArithmeticOverflow,
     FeeExceedsLimit,
+    InvalidSender,
     SerializationUnavailable,
 }
 
@@ -90,6 +103,7 @@ impl fmt::Display for WalletTransactionError {
             Self::FeeLimitTooLow => "transfer fee limit is below the Core minimum",
             Self::FeeArithmeticOverflow => "transfer fee arithmetic overflowed",
             Self::FeeExceedsLimit => "transfer fee exceeds the authorized limit",
+            Self::InvalidSender => "sender account identity is invalid",
             Self::SerializationUnavailable => "transaction serialization is unavailable",
         };
         formatter.write_str(message)
@@ -115,7 +129,55 @@ pub(in crate::wallet) fn canonical_transaction_id(
     Ok(hex::encode(blake3::hash(&payload).as_bytes()))
 }
 
-/// Builds and signs only RC2 `cash::transfer` transactions inside Rust.
+/// Constructs the complete unsigned RC2 cash transfer from Rust-authoritative fields.
+///
+/// The result remains private Rust state. This function performs no signing and no network write.
+pub(in crate::wallet) fn build_unsigned_cash_transfer(
+    sender_public_key: String,
+    sender_address: &str,
+    draft: &CashTransferDraft,
+) -> Result<VisionTransaction, WalletTransactionError> {
+    if !is_lowercase_hex_32_bytes(&sender_public_key)
+        || !is_lowercase_hex_32_bytes(sender_address)
+        || sender_public_key != sender_address
+    {
+        return Err(WalletTransactionError::InvalidSender);
+    }
+    if !is_lowercase_hex_32_bytes(&draft.recipient) {
+        return Err(WalletTransactionError::InvalidRecipient);
+    }
+    if draft.amount_raw_units == 0 {
+        return Err(WalletTransactionError::ZeroAmount);
+    }
+    if draft.recipient == sender_address {
+        return Err(WalletTransactionError::TransferToSelf);
+    }
+    if draft.fee_limit_raw_units < MIN_CASH_TRANSFER_FEE_LIMIT {
+        return Err(WalletTransactionError::FeeLimitTooLow);
+    }
+    let charged_fee = draft.charged_fee_raw_units()?;
+    if charged_fee > draft.fee_limit_raw_units {
+        return Err(WalletTransactionError::FeeExceedsLimit);
+    }
+
+    let args = serde_json::to_vec(&CashTransferArgs {
+        to: &draft.recipient,
+        amount: draft.amount_raw_units,
+    })
+    .map_err(|_| WalletTransactionError::SerializationUnavailable)?;
+    Ok(VisionTransaction {
+        nonce: draft.nonce,
+        sender_pubkey: sender_public_key,
+        module: CASH_MODULE.to_string(),
+        method: TRANSFER_METHOD.to_string(),
+        args,
+        tip: draft.tip_raw_units,
+        fee_limit: draft.fee_limit_raw_units,
+        sig: String::new(),
+    })
+}
+
+/// Builds and signs only RC2 cash transfer transactions inside Rust.
 ///
 /// This is not registered as a Tauri command. Amount, nonce, and fee policy is
 /// verified internally, but no UI may reach signing until every remaining
@@ -128,41 +190,9 @@ pub(in crate::wallet) fn sign_cash_transfer(
     activation
         .require_signing()
         .map_err(|_| WalletTransactionError::ActivationUnavailable)?;
-    if !is_lowercase_hex_32_bytes(&draft.recipient) {
-        return Err(WalletTransactionError::InvalidRecipient);
-    }
-    if draft.amount_raw_units == 0 {
-        return Err(WalletTransactionError::ZeroAmount);
-    }
-    if draft.fee_limit_raw_units < MIN_CASH_TRANSFER_FEE_LIMIT {
-        return Err(WalletTransactionError::FeeLimitTooLow);
-    }
-    let charged_fee = CASH_TRANSFER_BASE_FEE
-        .checked_add(draft.tip_raw_units)
-        .ok_or(WalletTransactionError::FeeArithmeticOverflow)?;
-    if charged_fee > draft.fee_limit_raw_units {
-        return Err(WalletTransactionError::FeeExceedsLimit);
-    }
-
     let identity = derive_account_identity(seed);
-    if draft.recipient == identity.address {
-        return Err(WalletTransactionError::TransferToSelf);
-    }
-    let args = serde_json::to_vec(&CashTransferArgs {
-        to: &draft.recipient,
-        amount: draft.amount_raw_units,
-    })
-    .map_err(|_| WalletTransactionError::SerializationUnavailable)?;
-    let mut transaction = VisionTransaction {
-        nonce: draft.nonce,
-        sender_pubkey: identity.public_key,
-        module: CASH_MODULE.to_string(),
-        method: TRANSFER_METHOD.to_string(),
-        args,
-        tip: draft.tip_raw_units,
-        fee_limit: draft.fee_limit_raw_units,
-        sig: String::new(),
-    };
+    let mut transaction =
+        build_unsigned_cash_transfer(identity.public_key, &identity.address, draft)?;
     let payload = canonical_unsigned_payload(&transaction)?;
     transaction.sig = seed.with_exposed(|seed_bytes| {
         let signing_key = SigningKey::from_bytes(seed_bytes);
@@ -310,6 +340,10 @@ mod tests {
     #[test]
     fn cash_transfer_builder_rejects_unsafe_shapes_before_signing() {
         let seed = WalletSeed::for_test(7);
+        assert_eq!(
+            build_unsigned_cash_transfer("11".repeat(32), &"22".repeat(32), &signed_vector_draft(),),
+            Err(WalletTransactionError::InvalidSender)
+        );
         let mut draft = signed_vector_draft();
         draft.recipient = "AA".repeat(32);
         assert_eq!(

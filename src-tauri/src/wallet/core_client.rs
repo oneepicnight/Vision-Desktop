@@ -34,6 +34,7 @@ const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_TCP_TABLE_BYTES: usize = 4 * 1024 * 1024;
 const SUPPORTED_STATUS_VERSION: &str = "3";
+pub(super) const SUPPORTED_WALLET_CORE_CONTRACT: &str = "vision-wallet-read-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WalletCoreClientError {
@@ -70,6 +71,15 @@ pub(super) struct WalletCoreStatus {
     pub canonical_tip_hash: String,
     pub peer_count: usize,
     pub recovery_state: String,
+}
+
+pub(super) trait WalletCoreReadSource {
+    fn account_snapshot(
+        &self,
+        address: &str,
+    ) -> Result<WalletCoreAccountSnapshot, WalletCoreClientError>;
+    fn status(&self) -> Result<WalletCoreStatus, WalletCoreClientError>;
+    fn validated_identity_fingerprint(&self) -> Result<[u8; 32], WalletCoreClientError>;
 }
 
 #[derive(Deserialize)]
@@ -185,6 +195,24 @@ impl<'a> WalletCoreReadClient<'a> {
 
     pub(super) fn status(&self) -> Result<WalletCoreStatus, WalletCoreClientError> {
         status_with(&self.authority)
+    }
+}
+
+impl WalletCoreReadSource for WalletCoreReadClient<'_> {
+    fn account_snapshot(
+        &self,
+        address: &str,
+    ) -> Result<WalletCoreAccountSnapshot, WalletCoreClientError> {
+        WalletCoreReadClient::account_snapshot(self, address)
+    }
+
+    fn status(&self) -> Result<WalletCoreStatus, WalletCoreClientError> {
+        WalletCoreReadClient::status(self)
+    }
+
+    fn validated_identity_fingerprint(&self) -> Result<[u8; 32], WalletCoreClientError> {
+        self.authority.validate().map_err(map_authority_error)?;
+        Ok(self.authority.wallet_identity_fingerprint())
     }
 }
 

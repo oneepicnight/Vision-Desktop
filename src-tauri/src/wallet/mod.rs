@@ -19,6 +19,8 @@ mod lifecycle;
 mod native_secret_buffer;
 mod onboarding;
 mod panic_policy;
+#[cfg(windows)]
+mod preview;
 mod public_request;
 mod receipt;
 mod recovery;

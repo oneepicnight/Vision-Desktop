@@ -136,6 +136,20 @@ impl WalletSession {
         self.is_locked_at(self.now_ms())
     }
 
+    /// Returns only the public wallet identifier after enforcing the idle lock.
+    /// This deliberately does not expose the seed or refresh secret-session activity.
+    pub(in crate::wallet) fn active_wallet_id(&mut self) -> Result<String, WalletSessionError> {
+        self.active_wallet_id_at(self.now_ms())
+    }
+
+    fn active_wallet_id_at(&mut self, now_ms: u64) -> Result<String, WalletSessionError> {
+        self.enforce_idle_lock(now_ms);
+        match &self.state {
+            SessionState::Locked => Err(WalletSessionError::Locked),
+            SessionState::Unlocked { wallet_id, .. } => Ok(wallet_id.clone()),
+        }
+    }
+
     fn is_locked_at(&mut self, now_ms: u64) -> bool {
         self.enforce_idle_lock(now_ms);
         matches!(self.state, SessionState::Locked)
@@ -304,6 +318,23 @@ mod tests {
             WalletSessionError::Locked
         );
         assert!(session.is_locked_at(100 + AUTO_LOCK_IDLE_MS));
+    }
+
+    #[test]
+    fn public_wallet_identity_observation_never_exposes_or_refreshes_the_seed() {
+        let vault = test_vault("primary", 7);
+        let mut session = WalletSession::new();
+        session
+            .unlock_at(&vault, &password(CORRECT_PASSWORD), 100)
+            .unwrap();
+
+        assert_eq!(session.active_wallet_id_at(101).unwrap(), "primary");
+        assert_eq!(
+            session
+                .active_wallet_id_at(100 + AUTO_LOCK_IDLE_MS)
+                .unwrap_err(),
+            WalletSessionError::Locked
+        );
     }
 
     #[test]

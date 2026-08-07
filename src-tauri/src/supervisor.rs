@@ -357,6 +357,19 @@ impl CoreConnectionAuthority<'_> {
         self.pid
     }
 
+    pub(crate) fn wallet_identity_fingerprint(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"vision-desktop.wallet-core-connection-identity.v1");
+        hasher.update(&[0]);
+        hasher.update(&self.pid.to_le_bytes());
+        hasher.update(&self.process_created_at.to_le_bytes());
+        hasher.update(&self.generation.to_le_bytes());
+        hasher.update(&self.api_port.to_le_bytes());
+        hasher.update(&[127, 0, 0, 1]);
+        hasher.update(&self.compatibility_fingerprint);
+        *hasher.finalize().as_bytes()
+    }
+
     pub(crate) fn validate(&self) -> Result<(), CoreAuthorityError> {
         if !process_is_alive(&self.held_process)?
             || get_process_id_checked(&self.held_process)? != self.pid

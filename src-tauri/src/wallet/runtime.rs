@@ -10,6 +10,7 @@ use super::{
     account::derive_account_identity,
     activation::{WalletActivationPolicy, WalletActivationScope},
     contract::{WalletAccountSummary, WalletLifecycleStatus, WalletPublicMetadata},
+    preview::BoundTransferPreview,
     secrets::WalletPassword,
     session::{WalletSession, WalletSessionError},
     vault::EncryptedWalletVault,
@@ -33,6 +34,9 @@ const PATH_TOKEN_BYTES: usize = 32;
 const PATH_TOKEN_HEX_BYTES: usize = PATH_TOKEN_BYTES * 2;
 const PATH_TOKEN_TTL_MS: u64 = 2 * 60 * 1000;
 const WALLET_PROCESS_MUTEX_BASE: &str = "com.vision.desktop.wallet-runtime.v2";
+const TRANSACTION_PREVIEW_TOKEN_BYTES: usize = 32;
+const TRANSACTION_PREVIEW_TOKEN_HEX_BYTES: usize = TRANSACTION_PREVIEW_TOKEN_BYTES * 2;
+pub(in crate::wallet) const TRANSACTION_PREVIEW_TTL_MS: u64 = 60 * 1000;
 
 /// Rust-only wallet authority owned by the application process.
 ///
@@ -52,6 +56,7 @@ struct WalletRuntimeInner {
     active_operation: Option<ActiveOperation>,
     pending_path_selection: Option<PendingPathSelection>,
     path_authorization: Option<PathAuthorization>,
+    transaction_preview: Option<PendingTransactionPreview>,
     public_account: Option<WalletAccountSummary>,
     next_generation: u64,
 }
@@ -75,6 +80,25 @@ struct PathAuthorization {
     selected_path: PathBuf,
     issued_at_ms: u64,
 }
+struct PendingTransactionPreview {
+    token: Zeroizing<String>,
+    owner_window: String,
+    wallet_id: String,
+    issued_at_ms: u64,
+    revocation_epoch: u64,
+    intent: BoundTransferPreview,
+}
+
+pub(in crate::wallet) struct TransactionPreviewInstallReceipt {
+    handle: String,
+    issued_at_ms: u64,
+}
+
+impl TransactionPreviewInstallReceipt {
+    pub(in crate::wallet) fn into_parts(self) -> (String, u64) {
+        (self.handle, self.issued_at_ms)
+    }
+}
 
 struct WalletProcessLock {
     _platform_lock: platform::ProcessLock,
@@ -85,6 +109,7 @@ pub(in crate::wallet) struct WalletOperationPermit<'a> {
     generation: u64,
     revocation_epoch: u64,
     owner_window: String,
+    kind: WalletOperationKind,
     activation_proof: WalletActivationProof,
 }
 
@@ -130,6 +155,8 @@ pub(in crate::wallet) enum WalletOperationKind {
     Create,
     Restore,
     Unlock,
+    PreparePreview,
+    ConsumePreview,
     Sign,
 }
 
@@ -221,6 +248,7 @@ impl WalletRuntimeState {
                 pending_path_selection: None,
                 path_authorization: None,
                 public_account: None,
+                transaction_preview: None,
                 next_generation: 0,
             }),
             revocation_epoch: AtomicU64::new(1),
@@ -248,6 +276,15 @@ impl WalletRuntimeState {
         inner.next_generation = inner.next_generation.wrapping_add(1).max(1);
         let generation = inner.next_generation;
         let revocation_epoch = self.revocation_epoch.load(Ordering::Acquire);
+        if matches!(
+            kind,
+            WalletOperationKind::Create
+                | WalletOperationKind::Restore
+                | WalletOperationKind::Unlock
+                | WalletOperationKind::PreparePreview
+        ) {
+            inner.transaction_preview = None;
+        }
         inner.active_operation = Some(ActiveOperation {
             generation,
             owner_window: owner_window.to_string(),
@@ -258,6 +295,7 @@ impl WalletRuntimeState {
             generation,
             revocation_epoch,
             owner_window: owner_window.to_string(),
+            kind,
             activation_proof: WalletActivationProof {
                 scope: activation_scope,
             },
@@ -441,6 +479,7 @@ impl WalletRuntimeState {
         let mut inner = self.lock_inner()?;
         inner.session.lock();
         inner.public_account = Some(metadata.into());
+        inner.transaction_preview = None;
         Ok(inner.lifecycle_status(true))
     }
 
@@ -494,6 +533,7 @@ impl WalletRuntimeState {
         if !vault_exists {
             inner.session.lock();
             inner.public_account = None;
+            inner.transaction_preview = None;
         }
         Ok(inner.lifecycle_status(vault_exists))
     }
@@ -509,6 +549,7 @@ impl WalletRuntimeState {
         }) {
             inner.session.lock();
             inner.public_account = None;
+            inner.transaction_preview = None;
         }
         Ok(inner.lifecycle_status(true))
     }
@@ -593,7 +634,11 @@ impl WalletRuntimeState {
 impl WalletOperationKind {
     const fn activation_scope(self) -> WalletActivationScope {
         match self {
-            Self::Create | Self::Restore | Self::Unlock => WalletActivationScope::Lifecycle,
+            Self::Create
+            | Self::Restore
+            | Self::Unlock
+            | Self::PreparePreview
+            | Self::ConsumePreview => WalletActivationScope::Lifecycle,
             Self::Sign => WalletActivationScope::Signing,
         }
     }
@@ -615,12 +660,17 @@ impl WalletRuntimeInner {
         self.active_operation = None;
         self.pending_path_selection = None;
         self.path_authorization = None;
+        self.transaction_preview = None;
     }
 
     fn lifecycle_status(&mut self, vault_exists: bool) -> WalletLifecycleStatus {
+        let locked = self.session.is_locked();
+        if locked {
+            self.transaction_preview = None;
+        }
         WalletLifecycleStatus {
             vault_exists,
-            locked: self.session.is_locked(),
+            locked,
             account: self.public_account.clone(),
         }
     }
@@ -707,6 +757,156 @@ impl WalletOperationPermit<'_> {
         }
         inner.active_operation = None;
         Ok(value)
+    }
+
+    pub(in crate::wallet) fn current_public_account(
+        &self,
+    ) -> Result<WalletAccountSummary, WalletRuntimeError> {
+        if self.kind != WalletOperationKind::PreparePreview {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        self.ensure_current()?;
+        let mut inner = self.state.lock_inner()?;
+        let wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::InvalidRequest)?;
+        let account = inner
+            .public_account
+            .as_ref()
+            .filter(|account| account.wallet_id == wallet_id)
+            .cloned()
+            .ok_or(WalletRuntimeError::InvalidRequest)?;
+        if !self.is_current(&inner)
+            || self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(account)
+    }
+
+    pub(in crate::wallet) fn complete_transaction_preview(
+        &self,
+        intent: BoundTransferPreview,
+    ) -> Result<TransactionPreviewInstallReceipt, WalletRuntimeError> {
+        if self.kind != WalletOperationKind::PreparePreview {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        let mut token_bytes = Zeroizing::new([0_u8; TRANSACTION_PREVIEW_TOKEN_BYTES]);
+        if getrandom::fill(&mut *token_bytes).is_err() {
+            return Err(WalletRuntimeError::SecureRandomUnavailable);
+        }
+        let handle = hex::encode(token_bytes.as_slice());
+        if self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let mut inner = self.state.lock_inner()?;
+        if !self.is_current(&inner)
+            || self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::InvalidRequest)?;
+        let account_matches = inner.public_account.as_ref().is_some_and(|account| {
+            account.wallet_id == wallet_id
+                && account.address == intent.sender_address()
+                && account.public_key == intent.sender_public_key()
+        });
+        if !account_matches {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        let issued_at_ms =
+            u64::try_from(inner.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        inner.transaction_preview = Some(PendingTransactionPreview {
+            token: Zeroizing::new(handle.clone()),
+            owner_window: self.owner_window.clone(),
+            wallet_id,
+            issued_at_ms,
+            revocation_epoch: self.revocation_epoch,
+            intent,
+        });
+        inner.active_operation = None;
+        Ok(TransactionPreviewInstallReceipt {
+            handle,
+            issued_at_ms,
+        })
+    }
+
+    pub(in crate::wallet) fn consume_transaction_preview(
+        &self,
+        handle: &str,
+    ) -> Result<BoundTransferPreview, WalletRuntimeError> {
+        self.consume_transaction_preview_at(handle, None)
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn consume_transaction_preview_at_for_test(
+        &self,
+        handle: &str,
+        now_ms: u64,
+    ) -> Result<BoundTransferPreview, WalletRuntimeError> {
+        self.consume_transaction_preview_at(handle, Some(now_ms))
+    }
+
+    fn consume_transaction_preview_at(
+        &self,
+        handle: &str,
+        now_override_ms: Option<u64>,
+    ) -> Result<BoundTransferPreview, WalletRuntimeError> {
+        if self.kind != WalletOperationKind::ConsumePreview
+            || handle.len() != TRANSACTION_PREVIEW_TOKEN_HEX_BYTES
+            || !handle
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        if self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let mut inner = self.state.lock_inner()?;
+        if !self.is_current(&inner) {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let preview = inner
+            .transaction_preview
+            .take()
+            .ok_or(WalletRuntimeError::InvalidRequest)?;
+        let now_ms = now_override_ms.unwrap_or_else(|| {
+            u64::try_from(inner.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+        });
+        let wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::InvalidRequest)?;
+        let account_matches = inner.public_account.as_ref().is_some_and(|account| {
+            account.wallet_id == wallet_id
+                && account.address == preview.intent.sender_address()
+                && account.public_key == preview.intent.sender_public_key()
+        });
+        let valid = preview.owner_window == self.owner_window
+            && preview.wallet_id == wallet_id
+            && preview.revocation_epoch == self.revocation_epoch
+            && preview.token.as_str() == handle
+            && now_ms >= preview.issued_at_ms
+            && now_ms.saturating_sub(preview.issued_at_ms) <= TRANSACTION_PREVIEW_TTL_MS
+            && account_matches
+            && !self.state.revocation_is_pending()
+            && self.state.revocation_epoch.load(Ordering::Acquire) == self.revocation_epoch;
+        if !valid {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        inner.active_operation = None;
+        Ok(preview.intent)
     }
 
     fn is_current(&self, inner: &WalletRuntimeInner) -> bool {
@@ -1336,6 +1536,8 @@ mod tests {
                 WalletOperationKind::Create,
                 WalletOperationKind::Restore,
                 WalletOperationKind::Unlock,
+                WalletOperationKind::PreparePreview,
+                WalletOperationKind::ConsumePreview,
                 WalletOperationKind::Sign,
             ] {
                 assert_eq!(
@@ -1364,6 +1566,8 @@ mod tests {
                 WalletOperationKind::Create,
                 WalletOperationKind::Restore,
                 WalletOperationKind::Unlock,
+                WalletOperationKind::PreparePreview,
+                WalletOperationKind::ConsumePreview,
             ] {
                 let runtime = WalletRuntimeState::for_test_missing_activation(requirement);
                 runtime.begin_operation(MAIN_WINDOW_LABEL, kind).unwrap();
@@ -1392,6 +1596,12 @@ mod tests {
         assert_eq!(
             runtime
                 .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Create)
+                .err(),
+            Some(WalletRuntimeError::ActivationUnavailable),
+        );
+        assert_eq!(
+            runtime
+                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::PreparePreview)
                 .err(),
             Some(WalletRuntimeError::ActivationUnavailable),
         );

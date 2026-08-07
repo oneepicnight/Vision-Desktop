@@ -37,6 +37,32 @@ activation-flag change, signing access, transaction submission, or Vision-Core m
 included. Mock listeners test parsing and failure behavior but do not qualify a production Core
 release.
 
+### Implemented private preview tranche awaiting independent review
+
+The next candidate tranche now exists only inside the private Rust wallet module. Its bounded
+request accepts exactly one canonical public recipient address and one plain decimal amount string;
+unknown, duplicate, secret-bearing, caller-authoritative, malformed, and oversized fields are
+rejected. Rust obtains the unlocked wallet's public identity without exposing or refreshing the
+seed session, reads the combined balance/nonce snapshot and status through the reviewed
+CoreConnectionAuthority client, and derives the fixed transfer method, exact nonce, zero tip,
+charged fee 1, fee limit 201, total debit, canonical tip, and unsigned transaction identifier.
+
+The complete unsigned intent stays in WalletRuntimeState. A random 256-bit opaque handle is bound
+to the main window, wallet identity, public account, revocation epoch, and a one-minute monotonic
+expiry. The private intent also retains a domain-separated fingerprint of the exact supervised Core
+PID, process-creation identity, monotonic generation, loopback port, and compatibility manifest
+that produced the observations. The handle is single use. Replacement previews, wallet
+creation/restore/unlock, explicit or lifecycle invalidation, wallet mismatch, idle locking,
+restart, malformed handles, replay, and expiry all fail closed. Public preview data has no
+unrestricted Debug implementation and exposes
+zero data age rather than a process-relative timestamp.
+
+This candidate adds no command, permission, capability, AppManifest entry, frontend wrapper or
+form. It performs no signing, seed access, native confirmation, network write, submission,
+reconciliation, receipt tracking, recovery export, activation change, or Vision-Core modification.
+Production preparation remains unavailable under the current manifest. The candidate must pass
+independent review before native final-confirmation work begins.
+
 ## Security objective
 
 One explicit user decision may authorize exactly one transaction with one sender, recipient, amount,
@@ -360,7 +386,7 @@ listeners do not replace this gate.
 
 1. Approve this design.
 2. Implement only the unregistered, bounded, read-only private Core client tranche.
-3. Implement private intent and preview authority.
+3. Implement private intent and preview authority (candidate implemented; review pending).
 4. Implement and qualify native final confirmation.
 5. Connect unlocked-session signing.
 6. Add submission, ambiguity reconciliation, receipts, and journal orchestration.

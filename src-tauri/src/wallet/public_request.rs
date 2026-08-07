@@ -17,6 +17,8 @@ use std::fmt;
 const MAX_WALLET_ID_BYTES: usize = 64;
 const MAX_WALLET_LABEL_BYTES: usize = 64;
 const RECOVERY_SELECTION_HANDLE_BYTES: usize = 64;
+const TRANSFER_ADDRESS_BYTES: usize = 64;
+const MAX_TRANSFER_AMOUNT_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::wallet) enum PublicRequestError {
@@ -101,6 +103,71 @@ impl<'de> Deserialize<'de> for RecoverySelectionHandle {
     }
 }
 
+pub(in crate::wallet) struct TransferAddress(String);
+
+impl TransferAddress {
+    pub(in crate::wallet) fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub(in crate::wallet) fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for TransferAddress {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = BoundedString::<TRANSFER_ADDRESS_BYTES>::deserialize(deserializer)?.0;
+        if value.len() != TRANSFER_ADDRESS_BYTES
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(de::Error::custom("invalid transfer address"));
+        }
+        Ok(Self(value))
+    }
+}
+
+pub(in crate::wallet) struct TransferAmount(String);
+
+impl TransferAmount {
+    pub(in crate::wallet) fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl<'de> Deserialize<'de> for TransferAmount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = BoundedString::<MAX_TRANSFER_AMOUNT_BYTES>::deserialize(deserializer)?.0;
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        {
+            return Err(de::Error::custom("invalid transfer amount"));
+        }
+        Ok(Self(value))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::wallet) struct WalletTransferPreviewRequest {
+    pub(in crate::wallet) recipient: TransferAddress,
+    pub(in crate::wallet) amount: TransferAmount,
+}
+
+impl WalletTransferPreviewRequest {
+    pub(in crate::wallet) fn into_parts(self) -> (TransferAddress, TransferAmount) {
+        (self.recipient, self.amount)
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::wallet) struct WalletCreateRequest {
@@ -244,6 +311,45 @@ mod tests {
         assert_eq!(request.wallet_id.as_str(), "restored");
         assert_eq!(request.label.as_str(), "Restored");
         assert_eq!(request.recovery_source_handle.as_str(), HANDLE);
+    }
+
+    #[test]
+    fn transfer_preview_schema_accepts_only_recipient_and_decimal_amount() {
+        let recipient = "2".repeat(64);
+        let request: WalletTransferPreviewRequest = serde_json::from_str(&format!(
+            r#"{{"recipient":"{recipient}","amount":"12.000000001"}}"#
+        ))
+        .unwrap();
+        assert_eq!(request.recipient.as_str(), recipient);
+        assert_eq!(request.amount.as_str(), "12.000000001");
+
+        for value in [
+            format!(r#"{{"recipient":"{recipient}","amount":"1","nonce":2}}"#),
+            format!(r#"{{"recipient":"{recipient}","amount":"1","fee":201}}"#),
+            format!(r#"{{"recipient":"{recipient}","amount":"1","password":"forbidden"}}"#),
+            format!(
+                r#"{{"recipient":"{recipient}","recipient":"{}","amount":"1"}}"#,
+                "3".repeat(64)
+            ),
+        ] {
+            assert!(serde_json::from_str::<WalletTransferPreviewRequest>(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn transfer_preview_schema_rejects_noncanonical_or_oversized_values() {
+        let recipient = "2".repeat(64);
+        for value in [
+            format!(r#"{{"recipient":"{}","amount":"1"}}"#, "A".repeat(64)),
+            format!(r#"{{"recipient":"{}","amount":"1"}}"#, "2".repeat(63)),
+            format!(r#"{{"recipient":"{recipient}","amount":"1e9"}}"#),
+            format!(
+                r#"{{"recipient":"{recipient}","amount":"{}"}}"#,
+                "1".repeat(129)
+            ),
+        ] {
+            assert!(serde_json::from_str::<WalletTransferPreviewRequest>(&value).is_err());
+        }
     }
 
     #[test]

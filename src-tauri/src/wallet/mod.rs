@@ -8,6 +8,8 @@ mod account;
 mod activation;
 mod amount;
 mod contract;
+#[cfg(windows)]
+mod core_client;
 mod device_protection;
 mod journal;
 mod kdf;

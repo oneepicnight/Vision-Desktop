@@ -10,6 +10,28 @@ The existing Rust amount, transaction, submission, receipt, and journal modules 
 unregistered primitives. They are not an end-to-end spending authority. Production signing remains
 disabled until this complete boundary is implemented, qualified against a supported private-loopback
 Vision-Core release, and independently approved.
+### Implemented private read-only tranche
+
+The first approved implementation tranche now exists only inside Rust. The supervisor can issue an
+opaque `CoreConnectionAuthority` that binds one monotonic process generation, a duplicated live
+process handle, the Windows process-creation identity, the exact API port, and the exact approved
+compatibility-manifest digest. The authority cannot be cloned, debug-formatted, serialized, or
+constructed from caller-supplied connection values.
+
+The private wallet Core client supports bounded `GET` reads for account balance, account nonce, and
+node status/canonical tip. Every operation creates a fresh literal `127.0.0.1` TCP connection,
+verifies that the server side of that exact connection belongs to the supervised PID through the
+Windows TCP owner table, validates authority before and after the read, applies one total deadline,
+requires bounded HTTP/1.1 JSON with an exact typed schema, and returns fixed internal errors.
+Redirects, transfer encoding, DNS hosts, proxies, cookies, ambient credentials, retries, pooled
+connections, unknown response fields, and network writes are absent or rejected.
+
+Production authority remains unavailable because the bundled RC2 manifest does not declare the
+reviewed `vision-wallet-read-v1` contract, literal loopback bind, Windows socket-owner binding, and
+exact fee policy. No wallet Tauri command, permission, capability, frontend wrapper, form,
+activation-flag change, signing access, transaction submission, or Vision-Core modification is
+included. Mock listeners test parsing and failure behavior but do not qualify a production Core
+release.
 
 ## Security objective
 

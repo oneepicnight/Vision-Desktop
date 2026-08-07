@@ -1,28 +1,41 @@
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::{
     fs::{self, OpenOptions},
     net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{Pid, ProcessesToUpdate, System};
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, FILETIME, HANDLE, STILL_ACTIVE},
+    System::Threading::{GetCurrentProcess, GetExitCodeProcess, GetProcessId, GetProcessTimes},
+};
 
 use crate::{
     config::{allocate_api_port, load_or_create_default_config, validate_node_config, NodeConfig},
-    core_manifest::{bundled_core_binary_path, verify_bundled_core_binary},
+    core_manifest::{
+        bundled_core_binary_path, load_wallet_core_compatibility, verify_bundled_core_binary,
+    },
     paths::{default_paths, ensure_dir},
 };
 
-#[derive(Default)]
 pub struct SupervisorState {
     inner: Mutex<Option<OwnedCoreProcess>>,
+    next_generation: AtomicU64,
 }
 
 pub struct OwnedCoreProcess {
     child: Child,
     pid: u32,
+    generation: u64,
     started_at_unix: u64,
     api_port: u16,
     p2p_port: u16,
@@ -30,6 +43,25 @@ pub struct OwnedCoreProcess {
     log_dir: PathBuf,
     stdout_log: PathBuf,
     stderr_log: PathBuf,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoreAuthorityError {
+    UnsupportedCompatibility,
+    CoreUnavailable,
+    CoreIdentityChanged,
+}
+
+#[cfg(windows)]
+pub(crate) struct CoreConnectionAuthority<'a> {
+    supervisor: &'a SupervisorState,
+    held_process: OwnedHandle,
+    pid: u32,
+    process_created_at: u64,
+    generation: u64,
+    api_port: u16,
+    compatibility_fingerprint: [u8; 32],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,6 +81,15 @@ pub struct CoreProcessState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartCoreRequest {
     pub config: Option<NodeConfig>,
+}
+
+impl Default for SupervisorState {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(None),
+            next_generation: AtomicU64::new(0),
+        }
+    }
 }
 
 fn now_unix() -> u64 {
@@ -83,6 +124,15 @@ pub fn process_resources(pid: u32) -> (Option<f32>, Option<u64>) {
 }
 
 impl SupervisorState {
+    fn issue_generation(&self) -> Result<u64, String> {
+        self.next_generation
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_add(1)
+            })
+            .map(|previous| previous + 1)
+            .map_err(|_| "Core process generation exhausted".to_string())
+    }
+
     pub fn start(&self, _request: StartCoreRequest) -> Result<CoreProcessState, String> {
         let mut guard = self
             .inner
@@ -135,6 +185,7 @@ impl SupervisorState {
         let binary = bundled_core_binary_path();
         let seed_peers = cfg.seed_peers.join(";");
         let advertised_port = cfg.advertised_port.unwrap_or(cfg.p2p_port);
+        let generation = self.issue_generation()?;
         let child = Command::new(binary)
             .env("VISION_DATA_DIR", &cfg.data_dir)
             .env("VISION_HTTP_PORT", cfg.api_port.to_string())
@@ -163,6 +214,7 @@ impl SupervisorState {
         let owned = OwnedCoreProcess {
             child,
             pid,
+            generation,
             started_at_unix: now_unix(),
             api_port: cfg.api_port,
             p2p_port: cfg.p2p_port,
@@ -247,6 +299,172 @@ impl SupervisorState {
             state.stderr_log,
         ))
     }
+
+    #[cfg(windows)]
+    pub(crate) fn wallet_core_connection_authority(
+        &self,
+    ) -> Result<CoreConnectionAuthority<'_>, CoreAuthorityError> {
+        let compatibility = load_wallet_core_compatibility()
+            .map_err(|_| CoreAuthorityError::UnsupportedCompatibility)?;
+        let verification = verify_bundled_core_binary()
+            .map_err(|_| CoreAuthorityError::UnsupportedCompatibility)?;
+        if !verification.matches {
+            return Err(CoreAuthorityError::UnsupportedCompatibility);
+        }
+
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| CoreAuthorityError::CoreUnavailable)?;
+        let owned = guard.as_mut().ok_or(CoreAuthorityError::CoreUnavailable)?;
+        if owned
+            .child
+            .try_wait()
+            .map_err(|_| CoreAuthorityError::CoreUnavailable)?
+            .is_some()
+        {
+            return Err(CoreAuthorityError::CoreUnavailable);
+        }
+
+        let held_process = duplicate_process_handle(owned.child.as_raw_handle())?;
+        let process_created_at = process_creation_identity(&held_process)?;
+        if get_process_id_checked(&held_process)? != owned.pid {
+            return Err(CoreAuthorityError::CoreIdentityChanged);
+        }
+
+        let authority = CoreConnectionAuthority {
+            supervisor: self,
+            held_process,
+            pid: owned.pid,
+            process_created_at,
+            generation: owned.generation,
+            api_port: owned.api_port,
+            compatibility_fingerprint: compatibility.manifest_sha256(),
+        };
+        drop(guard);
+        authority.validate()?;
+        Ok(authority)
+    }
+}
+
+#[cfg(windows)]
+impl CoreConnectionAuthority<'_> {
+    pub(crate) fn api_port(&self) -> u16 {
+        self.api_port
+    }
+
+    pub(crate) fn expected_pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), CoreAuthorityError> {
+        if !process_is_alive(&self.held_process)?
+            || get_process_id_checked(&self.held_process)? != self.pid
+            || process_creation_identity(&self.held_process)? != self.process_created_at
+        {
+            return Err(CoreAuthorityError::CoreIdentityChanged);
+        }
+
+        let compatibility = load_wallet_core_compatibility()
+            .map_err(|_| CoreAuthorityError::CoreIdentityChanged)?;
+        let verification =
+            verify_bundled_core_binary().map_err(|_| CoreAuthorityError::CoreIdentityChanged)?;
+        if !verification.matches
+            || compatibility.manifest_sha256() != self.compatibility_fingerprint
+        {
+            return Err(CoreAuthorityError::CoreIdentityChanged);
+        }
+
+        let mut guard = self
+            .supervisor
+            .inner
+            .lock()
+            .map_err(|_| CoreAuthorityError::CoreIdentityChanged)?;
+        let current = guard
+            .as_mut()
+            .ok_or(CoreAuthorityError::CoreIdentityChanged)?;
+        if current.generation != self.generation
+            || current.pid != self.pid
+            || current.api_port != self.api_port
+            || current
+                .child
+                .try_wait()
+                .map_err(|_| CoreAuthorityError::CoreIdentityChanged)?
+                .is_some()
+            || process_creation_identity_from_raw(current.child.as_raw_handle())?
+                != self.process_created_at
+        {
+            return Err(CoreAuthorityError::CoreIdentityChanged);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn duplicate_process_handle(raw: RawHandle) -> Result<OwnedHandle, CoreAuthorityError> {
+    let current = unsafe { GetCurrentProcess() };
+    let mut duplicate: HANDLE = std::ptr::null_mut();
+    let succeeded = unsafe {
+        DuplicateHandle(
+            current,
+            raw as HANDLE,
+            current,
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if succeeded == 0 || duplicate.is_null() {
+        return Err(CoreAuthorityError::CoreUnavailable);
+    }
+    Ok(unsafe { OwnedHandle::from_raw_handle(duplicate as RawHandle) })
+}
+
+#[cfg(windows)]
+fn get_process_id_checked(handle: &OwnedHandle) -> Result<u32, CoreAuthorityError> {
+    let pid = unsafe { GetProcessId(handle.as_raw_handle() as HANDLE) };
+    if pid == 0 {
+        Err(CoreAuthorityError::CoreIdentityChanged)
+    } else {
+        Ok(pid)
+    }
+}
+
+#[cfg(windows)]
+fn process_creation_identity(handle: &OwnedHandle) -> Result<u64, CoreAuthorityError> {
+    process_creation_identity_from_raw(handle.as_raw_handle())
+}
+
+#[cfg(windows)]
+fn process_creation_identity_from_raw(raw: RawHandle) -> Result<u64, CoreAuthorityError> {
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let succeeded = unsafe {
+        GetProcessTimes(
+            raw as HANDLE,
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if succeeded == 0 {
+        return Err(CoreAuthorityError::CoreIdentityChanged);
+    }
+    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+#[cfg(windows)]
+fn process_is_alive(handle: &OwnedHandle) -> Result<bool, CoreAuthorityError> {
+    let mut code = 0_u32;
+    let succeeded = unsafe { GetExitCodeProcess(handle.as_raw_handle() as HANDLE, &mut code) };
+    if succeeded == 0 {
+        return Err(CoreAuthorityError::CoreIdentityChanged);
+    }
+    Ok(code == STILL_ACTIVE as u32)
 }
 
 impl OwnedCoreProcess {
@@ -281,6 +499,14 @@ mod tests {
         let state = SupervisorState::stopped_state();
         assert_eq!(state.state, "stopped");
         assert!(state.pid.is_none());
+    }
+
+    #[test]
+    fn process_generations_are_monotonic_and_never_reused() {
+        let supervisor = SupervisorState::default();
+        assert_eq!(supervisor.issue_generation().unwrap(), 1);
+        assert_eq!(supervisor.issue_generation().unwrap(), 2);
+        assert_eq!(supervisor.issue_generation().unwrap(), 3);
     }
 
     #[test]

@@ -67,6 +67,17 @@ use windows_sys::Win32::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(test)]
+use windows_sys::Win32::{
+    System::Threading::GetCurrentProcess,
+    UI::HiDpi::{
+        AreDpiAwarenessContextsEqual, GetAwarenessFromDpiAwarenessContext,
+        GetDpiAwarenessContextForProcess, GetDpiForWindow, GetThreadDpiAwarenessContext,
+        GetWindowDpiAwarenessContext, SetProcessDpiAwarenessContext,
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_PER_MONITOR_AWARE,
+    },
+};
+
 const DIALOG_WIDTH: i32 = 860;
 const DIALOG_HEIGHT: i32 = 650;
 const AUTHORITY_TIMER_ID: usize = 1;
@@ -75,6 +86,10 @@ const CONFIRM_BUTTON_ID: usize = 2001;
 const CANCEL_BUTTON_ID: usize = 2002;
 
 static CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+static QUALIFICATION_CONFIRMATION_DPI: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 /// A non-forgeable proof issued only after this module's native ceremony reports an explicit,
 /// post-render hardware approval. Sibling wallet modules can name and consume this type, but its
@@ -353,6 +368,125 @@ impl ConfirmationDialogState {
     }
 }
 
+fn confirmation_input_contexts_are_absent(dialog: HWND, state: &ConfirmationDialogState) -> bool {
+    !dialog.is_null()
+        && !state.confirm_button.is_null()
+        && !state.cancel_button.is_null()
+        && input_context_is_absent(dialog)
+        && input_context_is_absent(state.confirm_button)
+        && input_context_is_absent(state.cancel_button)
+}
+
+#[cfg(test)]
+fn is_production_dpi_context(
+    context: windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT,
+) -> bool {
+    !context.is_null()
+        && unsafe {
+            AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        } != 0
+        && unsafe { GetAwarenessFromDpiAwarenessContext(context) }
+            == DPI_AWARENESS_PER_MONITOR_AWARE
+}
+
+#[cfg(test)]
+fn qualification_dpi_context_label(
+    context: windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT,
+) -> &'static str {
+    if is_production_dpi_context(context) {
+        "PerMonitorV2"
+    } else {
+        "unexpected"
+    }
+}
+
+#[cfg(test)]
+fn establish_production_dpi_context_for_qualification() {
+    let cargo_lock = include_str!("../../Cargo.lock");
+    let mut lines = cargo_lock.lines();
+    let mut pinned_tao = false;
+    while let Some(line) = lines.next() {
+        if line == "name = \"tao\"" {
+            pinned_tao = lines.next() == Some("version = \"0.35.3\"");
+            break;
+        }
+    }
+    assert!(
+        pinned_tao,
+        "qualification DPI contract must be re-reviewed when the pinned TAO version changes"
+    );
+    let process = unsafe { GetCurrentProcess() };
+    let existing = unsafe { GetDpiAwarenessContextForProcess(process) };
+    if !is_production_dpi_context(existing) {
+        assert_ne!(
+            unsafe {
+                SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+            },
+            0,
+            "qualification process could not establish TAO's supported PerMonitorV2 context before creating an HWND",
+        );
+    }
+    let process_context = unsafe { GetDpiAwarenessContextForProcess(process) };
+    let thread_context = unsafe { GetThreadDpiAwarenessContext() };
+    assert!(
+        is_production_dpi_context(process_context),
+        "qualification process does not match production PerMonitorV2 awareness"
+    );
+    assert!(
+        is_production_dpi_context(thread_context),
+        "qualification thread does not inherit production PerMonitorV2 awareness"
+    );
+}
+
+#[cfg(test)]
+fn record_qualification_window_contexts(
+    owner: HWND,
+    dialog: HWND,
+    state: &ConfirmationDialogState,
+) -> bool {
+    let process_context = unsafe { GetDpiAwarenessContextForProcess(GetCurrentProcess()) };
+    let thread_context = unsafe { GetThreadDpiAwarenessContext() };
+    let owner_context = unsafe { GetWindowDpiAwarenessContext(owner) };
+    let dialog_context = unsafe { GetWindowDpiAwarenessContext(dialog) };
+    let confirm_context = unsafe { GetWindowDpiAwarenessContext(state.confirm_button) };
+    let cancel_context = unsafe { GetWindowDpiAwarenessContext(state.cancel_button) };
+    let owner_dpi = unsafe { GetDpiForWindow(owner) };
+    let dialog_dpi = unsafe { GetDpiForWindow(dialog) };
+    println!(
+        "VISION_WALLET_CONFIRMATION_DPI_CONTEXT process={}:{} thread={}:{} owner={}:{} dialog={}:{} confirm={}:{} cancel={}:{} owner_dpi={owner_dpi} dialog_dpi={dialog_dpi}",
+        qualification_dpi_context_label(process_context),
+        process_context as isize,
+        qualification_dpi_context_label(thread_context),
+        thread_context as isize,
+        qualification_dpi_context_label(owner_context),
+        owner_context as isize,
+        qualification_dpi_context_label(dialog_context),
+        dialog_context as isize,
+        qualification_dpi_context_label(confirm_context),
+        confirm_context as isize,
+        qualification_dpi_context_label(cancel_context),
+        cancel_context as isize,
+    );
+    let valid = [
+        process_context,
+        thread_context,
+        owner_context,
+        dialog_context,
+        confirm_context,
+        cancel_context,
+    ]
+    .into_iter()
+    .all(is_production_dpi_context)
+        && owner_dpi > 0
+        && dialog_dpi > 0
+        && owner_dpi == dialog_dpi
+        && confirmation_input_contexts_are_absent(dialog, state);
+    if valid {
+        QUALIFICATION_CONFIRMATION_DPI.store(dialog_dpi, Ordering::SeqCst);
+    }
+    valid
+}
+
 fn run_native_confirmation(
     owner_window: HWND,
     fields: TransferConfirmationFields<'_>,
@@ -426,6 +560,15 @@ fn run_native_confirmation(
         return Err(NativeConfirmationError::NativeUiUnavailable);
     }
 
+    #[cfg(test)]
+    if std::env::var_os("VISION_WALLET_CONFIRMATION_SCENARIO").is_some()
+        && !record_qualification_window_contexts(owner_window, dialog, &state)
+    {
+        state.wipe();
+        unsafe { DestroyWindow(dialog) };
+        return Err(NativeConfirmationError::NativeUiUnavailable);
+    }
+
     let _modal_owner = DisabledOwner::new(owner_window);
     if unsafe { SetTimer(dialog, AUTHORITY_TIMER_ID, AUTHORITY_TIMER_MS, None) } == 0 {
         state.wipe();
@@ -455,12 +598,19 @@ fn run_native_confirmation(
         if message.hwnd == dialog
             && message.message == WM_TIMER
             && message.wParam == AUTHORITY_TIMER_ID
-            && (unsafe { IsWindow(owner_window) } == 0 || !authority_is_current())
         {
-            state.outcome = ConfirmationOutcome::AuthorityRevoked;
-            state.wipe();
-            unsafe { DestroyWindow(dialog) };
-            continue;
+            if !confirmation_input_contexts_are_absent(dialog, &state) {
+                state.outcome = ConfirmationOutcome::Failed;
+                state.wipe();
+                unsafe { DestroyWindow(dialog) };
+                continue;
+            }
+            if unsafe { IsWindow(owner_window) } == 0 || !authority_is_current() {
+                state.outcome = ConfirmationOutcome::AuthorityRevoked;
+                state.wipe();
+                unsafe { DestroyWindow(dialog) };
+                continue;
+            }
         }
         record_fresh_confirmation_input(&mut state, &message);
         if unsafe { IsDialogMessageW(dialog, &message) } == 0 {
@@ -1026,9 +1176,7 @@ mod tests {
         time::Duration,
     };
     use windows_sys::Win32::{
-        Graphics::Gdi::{
-            CreateCompatibleDC, DeleteDC, GetDC, GetDeviceCaps, ReleaseDC, LOGPIXELSX,
-        },
+        Graphics::Gdi::{CreateCompatibleDC, DeleteDC},
         UI::Input::{
             Ime::{ImmAssociateContext, ImmCreateContext, ImmDestroyContext},
             KeyboardAndMouse::{
@@ -1430,6 +1578,21 @@ mod tests {
         assert!(!window.is_null());
         assert!(disable_text_services(window));
         let mut state = dialog_state_for_test();
+        let (confirm, cancel) = create_buttons(window).unwrap();
+        state.confirm_button = confirm;
+        state.cancel_button = cancel;
+        assert!(confirmation_input_contexts_are_absent(window, &state));
+
+        let child_context = unsafe { ImmCreateContext() };
+        assert!(!child_context.is_null());
+        assert!(unsafe { ImmAssociateContext(confirm, child_context) }.is_null());
+        assert!(!confirmation_input_contexts_are_absent(window, &state));
+        assert_eq!(
+            unsafe { ImmAssociateContext(confirm, null_mut()) },
+            child_context
+        );
+        assert_ne!(unsafe { ImmDestroyContext(child_context) }, 0);
+        assert!(confirmation_input_contexts_are_absent(window, &state));
         unsafe {
             SetWindowLongPtrW(
                 window,
@@ -1701,6 +1864,18 @@ mod tests {
                         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
             })
             .expect("set a 1-64 character alphanumeric, dash, or underscore evidence label");
+        let input_profile = std::env::var("VISION_WALLET_CONFIRMATION_INPUT_PROFILE").expect(
+            "set VISION_WALLET_CONFIRMATION_INPUT_PROFILE to us, microsoft-pinyin, or microsoft-japanese",
+        );
+        let expected_layout = match input_profile.as_str() {
+            "us" => "00000409",
+            "microsoft-pinyin" => "00000804",
+            "microsoft-japanese" => "00000411",
+            _ => panic!("unsupported qualification input profile"),
+        };
+
+        establish_production_dpi_context_for_qualification();
+        QUALIFICATION_CONFIRMATION_DPI.store(0, AtomicOrdering::SeqCst);
 
         let mut keyboard_layout = [0_u16; 9];
         assert_ne!(
@@ -1709,6 +1884,10 @@ mod tests {
             "active keyboard layout could not be recorded",
         );
         let keyboard_layout = String::from_utf16(&keyboard_layout[..8]).unwrap();
+        assert!(
+            keyboard_layout.eq_ignore_ascii_case(expected_layout),
+            "active keyboard layout does not match the declared qualification input profile"
+        );
 
         let owner = hidden_test_window();
         assert!(!owner.is_null());
@@ -1720,14 +1899,9 @@ mod tests {
             );
             ShowWindow(owner, SW_SHOW);
         }
-        let device = unsafe { GetDC(owner) };
-        assert!(!device.is_null());
-        let dpi = unsafe { GetDeviceCaps(device, i32::try_from(LOGPIXELSX).unwrap()) };
-        assert_ne!(unsafe { ReleaseDC(owner, device) }, 0);
-        assert!(dpi > 0);
 
         println!(
-            "VISION_WALLET_CONFIRMATION_QUALIFICATION_READY scenario={scenario} label={evidence_label} keyboard_layout={keyboard_layout} dpi={dpi} pid={}",
+            "VISION_WALLET_CONFIRMATION_QUALIFICATION_READY scenario={scenario} label={evidence_label} input_profile={input_profile} keyboard_layout={keyboard_layout} expected_dpi_context=PerMonitorV2 pid={}",
             std::process::id()
         );
         match scenario.as_str() {
@@ -1850,6 +2024,11 @@ mod tests {
             helper.join().expect("qualification helper failed");
         }
         unsafe { DestroyWindow(owner) };
+        let confirmation_dpi = QUALIFICATION_CONFIRMATION_DPI.load(AtomicOrdering::SeqCst);
+        assert!(
+            confirmation_dpi > 0,
+            "actual confirmation-window DPI was not recorded under the production context"
+        );
 
         assert!(
             !injected_input_accepted.load(AtomicOrdering::SeqCst),
@@ -1868,7 +2047,7 @@ mod tests {
             _ => unreachable!(),
         }
         println!(
-            "VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS scenario={scenario} label={evidence_label} keyboard_layout={keyboard_layout} dpi={dpi}"
+            "VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS scenario={scenario} label={evidence_label} input_profile={input_profile} keyboard_layout={keyboard_layout} dpi_context=PerMonitorV2 confirmation_dpi={confirmation_dpi}"
         );
     }
 

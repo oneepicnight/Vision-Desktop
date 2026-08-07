@@ -27,18 +27,40 @@ Run each scenario separately from the repository root:
 ```powershell
 $env:VISION_WALLET_CONFIRMATION_SCENARIO='<scenario>'
 $env:VISION_WALLET_CONFIRMATION_EVIDENCE_LABEL='<short-label>'
+$env:VISION_WALLET_CONFIRMATION_INPUT_PROFILE='<input-profile>'
 cargo test --manifest-path src-tauri/Cargo.toml wallet::transaction_confirmation::tests::real_windows_transaction_confirmation_operator_harness -- --exact --ignored --nocapture --test-threads=1
 Remove-Item Env:VISION_WALLET_CONFIRMATION_SCENARIO
 Remove-Item Env:VISION_WALLET_CONFIRMATION_EVIDENCE_LABEL
+Remove-Item Env:VISION_WALLET_CONFIRMATION_INPUT_PROFILE
 ```
 
 Allowed scenarios are `mouse`, `keyboard`, `held-enter`, `injected-enter`, `cancel`, and `revoke`.
-Every successful run prints `VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS` with its scenario,
-evidence label, active keyboard-layout identifier, and effective DPI.
+Allowed input profiles are `us`, `microsoft-pinyin`, and `microsoft-japanese`; each is bound to its
+expected Windows keyboard-layout identifier. Every successful run prints
+`VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS` with its scenario, evidence label, declared input
+profile, active keyboard-layout identifier, DPI-awareness context, and actual confirmation-window
+DPI.
+
+## Production-equivalent DPI boundary
+
+The pinned production window runtime is TAO 0.35.3. On supported Windows 11, TAO first requests
+`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2` before creating its event-loop windows. The ignored
+harness must establish that same Per-Monitor V2 process context before creating any HWND; it does
+not accept DPI virtualization or a 96-DPI default as equivalent.
+
+Each run queries and requires Per-Monitor V2 equivalence for the process, current thread, owner
+window, actual confirmation window, Confirm button, and Cancel button. It prints every context and
+records `GetDpiForWindow` for both the owner and actual confirmation HWND. The two windows must have
+the same nonzero monitor DPI. Context establishment, inheritance, or window-DPI disagreement fails
+the harness. This follows Microsoft's
+[`SetProcessDpiAwarenessContext`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setprocessdpiawarenesscontext)
+and [`GetDpiForWindow`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdpiforwindow)
+contracts.
 
 ## Required baseline runs
 
-At the workstation's normal resolution, scaling, and US keyboard layout, run all six scenarios:
+At the workstation's normal resolution and scaling, set the US keyboard layout, use the `us` input
+profile, and run all six scenarios:
 
 1. `mouse`: inspect every value and both buttons for clipping, overlap, truncation, or substitution;
    click Confirm exactly once with a physical mouse.
@@ -60,9 +82,35 @@ and 200% when the display supports them. Test the smallest supported display res
 Every sender, recipient, amount, fee, total, nonce, transaction identifier, warning, and button must
 remain completely visible and distinguishable.
 
-Repeat `keyboard`, `held-enter`, and `cancel` with every supported non-IME international keyboard
-layout installed for qualification. IME-specific secret-entry evidence remains governed by
-`WALLET_IME_OPERATOR_QUALIFICATION.md`.
+Repeat `keyboard`, `held-enter`, and `cancel` with every other supported non-IME international
+keyboard layout installed for qualification where an explicit harness input profile is available.
+
+## Transaction-confirmation IME matrix
+
+The transaction window has its own owner-drawn procedure and its own guarded
+`WM_IME_SETCONTEXT` path. Secret-entry IME evidence from another window does not qualify it.
+
+Enable Microsoft Pinyin, declare `microsoft-pinyin`, verify that the emitted layout identifier is
+`00000804`, and run `keyboard`, `cancel`, and `revoke`. Then enable Microsoft Japanese IME, declare
+`microsoft-japanese`, verify `00000411`, and run the same three scenarios.
+
+For each of the six IME runs, verify and record that:
+
+1. Normal focus does not close the confirmation window.
+2. The dialog displays every exact value without composition, candidate, prediction, conversion,
+   guide, or soft-keyboard UI.
+3. The emitted context record covers the dialog and both focusable controls under Per-Monitor V2.
+4. A physical keyboard confirmation succeeds only after a fresh complete key press and release.
+5. Cancellation produces no confirmation.
+6. Authority revocation closes the window without confirmation.
+
+While open, the production confirmation loop rechecks the dialog and both button HWNDs every 250
+milliseconds. Any newly associated IME context fails closed. The normal focus-time
+`WM_IME_SETCONTEXT` notification is suppressed only while a balanced `ImmGetContext` and
+`ImmReleaseContext` check proves the actual dialog remains disassociated. This behavior follows
+Microsoft's [`WM_IME_SETCONTEXT`](https://learn.microsoft.com/en-us/windows/win32/intl/wm-ime-setcontext)
+and [`ImmGetContext`](https://learn.microsoft.com/en-us/windows/win32/api/imm/nf-imm-immgetcontext)
+contracts.
 
 ## Trust-boundary note
 
@@ -78,7 +126,9 @@ For every run, preserve:
 - exact commit and tree;
 - clean-worktree proof;
 - scenario and evidence label;
-- Windows edition/build, display resolution, scaling, effective DPI, and keyboard layout;
+- Windows edition/build, display resolution, scaling, input profile, and keyboard layout;
+- process, thread, owner, confirmation, Confirm-button, and Cancel-button DPI contexts;
+- owner-window and actual confirmation-window DPI reported by `GetDpiForWindow`;
 - full console output and exit code;
 - operator observation that all exact values were visible before approval;
 - confirmation that no wallet command, permission, activation flag, signing path, or Vision-Core

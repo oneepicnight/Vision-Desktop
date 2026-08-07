@@ -51,7 +51,7 @@ use windows_sys::Win32::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageTime,
             GetMessageW, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW, IsWindow, KillTimer,
             LoadCursorW, PostQuitMessage, RegisterClassExW, SendMessageW, SetForegroundWindow,
-            SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage, UnregisterClassW,
+            SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage, UnregisterClassW, BM_CLICK,
             BM_SETSTYLE, BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CREATESTRUCTW,
             CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_STYLE, IDC_ARROW, MSG, SW_SHOW, WM_CHAR,
             WM_CLEAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_CUT, WM_GETTEXT,
@@ -89,6 +89,10 @@ static CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 static QUALIFICATION_CONFIRMATION_DPI: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(test)]
+static QUALIFICATION_ACCEPTED_INPUT_DEVICE: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
 
 /// A non-forgeable proof issued only after this module's native ceremony reports an explicit,
@@ -281,6 +285,12 @@ enum ConfirmationOutcome {
     Failed,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfirmationInputDevice {
+    Keyboard,
+    Mouse,
+}
+
 struct ConfirmationDisplayBuffers {
     sender: Zeroizing<Vec<u16>>,
     recipient: Zeroizing<Vec<u16>>,
@@ -351,8 +361,9 @@ struct ConfirmationDialogState {
     cancel_button: HWND,
     display_verified: bool,
     display_verified_at: Option<u32>,
-    press_started_after_display: bool,
+    press_started_after_display: Option<ConfirmationInputDevice>,
     fresh_input_time: Option<u32>,
+    fresh_input_device: Option<ConfirmationInputDevice>,
 }
 
 impl ConfirmationDialogState {
@@ -362,8 +373,9 @@ impl ConfirmationDialogState {
         }
         self.display_verified = false;
         self.display_verified_at = None;
-        self.press_started_after_display = false;
+        self.press_started_after_display = None;
         self.fresh_input_time = None;
+        self.fresh_input_device = None;
         self.display.wipe();
     }
 }
@@ -535,8 +547,9 @@ fn run_native_confirmation(
         cancel_button: null_mut(),
         display_verified: false,
         display_verified_at: None,
-        press_started_after_display: false,
+        press_started_after_display: None,
         fresh_input_time: None,
+        fresh_input_device: None,
     };
     let title = wide_null("Confirm Vision Transaction");
     let dialog = unsafe {
@@ -612,7 +625,13 @@ fn run_native_confirmation(
                 continue;
             }
         }
-        record_fresh_confirmation_input(&mut state, &message);
+        if record_fresh_confirmation_input(&mut state, &message) {
+            unsafe { SendMessageW(state.confirm_button, BM_CLICK, 0, 0) };
+            if unsafe { IsWindow(dialog) } != 0 {
+                fail_closed_window(dialog, &mut state);
+            }
+            continue;
+        }
         if unsafe { IsDialogMessageW(dialog, &message) } == 0 {
             unsafe {
                 TranslateMessage(&message);
@@ -780,25 +799,26 @@ fn arm_confirmation(window: HWND, state: &mut ConfirmationDialogState) -> bool {
     true
 }
 
-fn record_fresh_confirmation_input(state: &mut ConfirmationDialogState, message: &MSG) {
+fn record_fresh_confirmation_input(state: &mut ConfirmationDialogState, message: &MSG) -> bool {
     let mut source = INPUT_MESSAGE_SOURCE::default();
     let source = if unsafe { GetCurrentInputMessageSource(&mut source) } != 0 {
         Some(source)
     } else {
         None
     };
-    apply_confirmation_input_source(state, message, source);
+    apply_confirmation_input_source(state, message, source)
 }
 
 fn apply_confirmation_input_source(
     state: &mut ConfirmationDialogState,
     message: &MSG,
     source: Option<INPUT_MESSAGE_SOURCE>,
-) {
+) -> bool {
     state.fresh_input_time = None;
+    state.fresh_input_device = None;
     let Some(source) = source else {
-        state.press_started_after_display = false;
-        return;
+        state.press_started_after_display = None;
+        return false;
     };
     if !state.display_verified
         || message.hwnd != state.confirm_button
@@ -807,39 +827,42 @@ fn apply_confirmation_input_source(
             .display_verified_at
             .is_some_and(|verified_at| tick_is_strictly_after(message.time, verified_at))
     {
-        state.press_started_after_display = false;
-        return;
+        state.press_started_after_display = None;
+        return false;
     }
 
     let keyboard_key = u16::try_from(message.wParam).unwrap_or_default();
     match message.message {
         WM_LBUTTONDOWN if source.deviceType == IMDT_MOUSE => {
-            state.press_started_after_display = true;
+            state.press_started_after_display = Some(ConfirmationInputDevice::Mouse);
         }
         WM_LBUTTONUP if source.deviceType == IMDT_MOUSE => {
-            if state.press_started_after_display {
+            if state.press_started_after_display == Some(ConfirmationInputDevice::Mouse) {
                 state.fresh_input_time = Some(message.time);
+                state.fresh_input_device = Some(ConfirmationInputDevice::Mouse);
             }
-            state.press_started_after_display = false;
+            state.press_started_after_display = None;
         }
         WM_KEYDOWN
             if source.deviceType == IMDT_KEYBOARD
                 && (keyboard_key == VK_RETURN || keyboard_key == VK_SPACE)
                 && (message.lParam & (1_isize << 30)) == 0 =>
         {
-            state.press_started_after_display = true;
+            state.press_started_after_display = Some(ConfirmationInputDevice::Keyboard);
         }
         WM_KEYUP
             if source.deviceType == IMDT_KEYBOARD
                 && (keyboard_key == VK_RETURN || keyboard_key == VK_SPACE) =>
         {
-            if state.press_started_after_display {
+            if state.press_started_after_display == Some(ConfirmationInputDevice::Keyboard) {
                 state.fresh_input_time = Some(message.time);
+                state.fresh_input_device = Some(ConfirmationInputDevice::Keyboard);
             }
-            state.press_started_after_display = false;
+            state.press_started_after_display = None;
         }
-        _ => state.press_started_after_display = false,
+        _ => state.press_started_after_display = None,
     }
+    state.fresh_input_device == Some(ConfirmationInputDevice::Keyboard)
 }
 
 const fn tick_is_strictly_after(candidate: u32, baseline: u32) -> bool {
@@ -849,13 +872,27 @@ const fn tick_is_strictly_after(candidate: u32, baseline: u32) -> bool {
 
 fn consume_fresh_confirmation_command(state: &mut ConfirmationDialogState, control: HWND) -> bool {
     let fresh_input_time = state.fresh_input_time.take();
+    let fresh_input_device = state.fresh_input_device.take();
+    let completed_press_was_present = fresh_input_time.is_some() || fresh_input_device.is_some();
     let approved = state.display_verified
         && !state.confirm_button.is_null()
         && control == state.confirm_button
         && unsafe { IsWindow(state.confirm_button) } != 0
         && unsafe { IsWindowEnabled(state.confirm_button) } != 0
+        && fresh_input_device.is_some()
         && fresh_input_time == Some(unsafe { GetMessageTime() } as u32);
-    state.press_started_after_display = false;
+    if completed_press_was_present {
+        state.press_started_after_display = None;
+    }
+    #[cfg(test)]
+    if approved && std::env::var_os("VISION_WALLET_CONFIRMATION_SCENARIO").is_some() {
+        let code = match fresh_input_device {
+            Some(ConfirmationInputDevice::Keyboard) => 1,
+            Some(ConfirmationInputDevice::Mouse) => 2,
+            None => 0,
+        };
+        QUALIFICATION_ACCEPTED_INPUT_DEVICE.store(code, Ordering::SeqCst);
+    }
     approved
 }
 
@@ -1285,8 +1322,9 @@ mod tests {
             cancel_button: null_mut(),
             display_verified: false,
             display_verified_at: None,
-            press_started_after_display: false,
+            press_started_after_display: None,
             fresh_input_time: None,
+            fresh_input_device: None,
         }
     }
 
@@ -1644,16 +1682,20 @@ mod tests {
 
         assert_eq!(unsafe { IsWindowEnabled(confirm) }, 0);
         state.fresh_input_time = Some(unsafe { GetMessageTime() } as u32);
+        state.fresh_input_device = Some(ConfirmationInputDevice::Keyboard);
         assert!(!consume_fresh_confirmation_command(&mut state, confirm));
 
         state.display_verified = true;
         state.display_verified_at = Some(100);
         unsafe { EnableWindow(confirm, 1) };
         state.fresh_input_time = Some(unsafe { GetMessageTime() } as u32);
+        state.fresh_input_device = Some(ConfirmationInputDevice::Keyboard);
         assert!(!consume_fresh_confirmation_command(&mut state, cancel));
         state.fresh_input_time = Some(unsafe { GetMessageTime() } as u32);
+        state.fresh_input_device = Some(ConfirmationInputDevice::Keyboard);
         assert!(consume_fresh_confirmation_command(&mut state, confirm));
         assert!(state.fresh_input_time.is_none());
+        assert!(state.fresh_input_device.is_none());
 
         unsafe { DestroyWindow(window) };
     }
@@ -1738,6 +1780,10 @@ mod tests {
             deviceType: IMDT_MOUSE,
             originId: IMO_INJECTED,
         };
+        let hardware_mouse = INPUT_MESSAGE_SOURCE {
+            deviceType: IMDT_MOUSE,
+            originId: IMO_HARDWARE,
+        };
         let mut message = MSG {
             hwnd: confirm,
             message: WM_KEYDOWN,
@@ -1780,6 +1826,20 @@ mod tests {
 
         message.message = WM_KEYDOWN;
         message.wParam = usize::from(VK_RETURN);
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        message.message = WM_LBUTTONUP;
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_mouse));
+        assert!(state.fresh_input_time.is_none());
+
+        message.message = WM_LBUTTONDOWN;
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_mouse));
+        message.message = WM_KEYUP;
+        message.wParam = usize::from(VK_RETURN);
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        assert!(state.fresh_input_time.is_none());
+
+        message.message = WM_KEYDOWN;
+        message.wParam = usize::from(VK_RETURN);
         message.time = 201;
         apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
         message.message = WM_KEYUP;
@@ -1793,6 +1853,65 @@ mod tests {
         assert!(state.fresh_input_time.is_none());
 
         unsafe { DestroyWindow(window) };
+    }
+
+    #[test]
+    fn completed_hardware_keyboard_release_triggers_exact_confirmation() {
+        let window = hidden_test_window();
+        assert!(!window.is_null());
+        assert!(disable_text_services(window));
+        let (confirm, cancel) = create_buttons(window).unwrap();
+        let mut state = dialog_state_for_test();
+        state.confirm_button = confirm;
+        state.cancel_button = cancel;
+        state.display_verified = true;
+        let message_time = unsafe { GetMessageTime() } as u32;
+        state.display_verified_at = Some(message_time.wrapping_sub(1));
+        unsafe {
+            EnableWindow(confirm, 1);
+            SetWindowLongPtrW(
+                window,
+                GWLP_USERDATA,
+                (&mut state as *mut ConfirmationDialogState) as isize,
+            );
+        }
+        let hardware_keyboard = INPUT_MESSAGE_SOURCE {
+            deviceType: IMDT_KEYBOARD,
+            originId: IMO_HARDWARE,
+        };
+        let mut message = MSG {
+            hwnd: confirm,
+            message: WM_KEYDOWN,
+            wParam: usize::from(VK_RETURN),
+            lParam: 0,
+            time: message_time,
+            ..MSG::default()
+        };
+        assert!(!apply_confirmation_input_source(
+            &mut state,
+            &message,
+            Some(hardware_keyboard)
+        ));
+        assert!(!consume_fresh_confirmation_command(&mut state, confirm));
+        assert!(state.press_started_after_display == Some(ConfirmationInputDevice::Keyboard));
+        message.message = WM_KEYUP;
+        assert!(apply_confirmation_input_source(
+            &mut state,
+            &message,
+            Some(hardware_keyboard)
+        ));
+
+        unsafe {
+            confirmation_window_proc(
+                window,
+                WM_COMMAND,
+                CONFIRM_BUTTON_ID | ((BN_CLICKED as usize) << 16),
+                confirm as LPARAM,
+            );
+        }
+        assert_eq!(state.outcome, ConfirmationOutcome::Confirmed);
+        assert!(state.display.is_wiped());
+        assert_eq!(unsafe { IsWindow(window) }, 0);
     }
 
     #[test]
@@ -1948,6 +2067,7 @@ mod tests {
 
         establish_production_dpi_context_for_qualification();
         QUALIFICATION_CONFIRMATION_DPI.store(0, AtomicOrdering::SeqCst);
+        QUALIFICATION_ACCEPTED_INPUT_DEVICE.store(0, AtomicOrdering::SeqCst);
 
         let mut keyboard_layout = [0_u16; 9];
         assert_ne!(
@@ -2110,16 +2230,41 @@ mod tests {
             !helper_failed.load(AtomicOrdering::SeqCst),
             "qualification helper could not identify the foreground dialog or deliver input"
         );
+        let accepted_input_device = QUALIFICATION_ACCEPTED_INPUT_DEVICE.load(Ordering::SeqCst);
         match scenario.as_str() {
-            "mouse" | "keyboard" | "held-enter" | "injected-enter" => {
+            "mouse" => {
                 assert_eq!(result, Ok(()));
+                assert_eq!(
+                    accepted_input_device, 2,
+                    "mouse scenario accepted non-mouse input"
+                );
             }
-            "cancel" => assert_eq!(result, Err(NativeConfirmationError::Cancelled)),
-            "revoke" => assert_eq!(result, Err(NativeConfirmationError::AuthorityRevoked)),
+            "keyboard" | "held-enter" => {
+                assert_eq!(result, Ok(()));
+                assert_eq!(
+                    accepted_input_device, 1,
+                    "keyboard scenario accepted non-keyboard input"
+                );
+            }
+            "injected-enter" => {
+                assert_eq!(result, Ok(()));
+                assert_ne!(
+                    accepted_input_device, 0,
+                    "physical completion input was not recorded"
+                );
+            }
+            "cancel" => {
+                assert_eq!(result, Err(NativeConfirmationError::Cancelled));
+                assert_eq!(accepted_input_device, 0);
+            }
+            "revoke" => {
+                assert_eq!(result, Err(NativeConfirmationError::AuthorityRevoked));
+                assert_eq!(accepted_input_device, 0);
+            }
             _ => unreachable!(),
         }
         println!(
-            "VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS scenario={scenario} label={evidence_label} input_profile={input_profile} keyboard_layout={keyboard_layout} dpi_context=PerMonitorV2 confirmation_dpi={confirmation_dpi}"
+            "VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS scenario={scenario} label={evidence_label} input_profile={input_profile} keyboard_layout={keyboard_layout} dpi_context=PerMonitorV2 confirmation_dpi={confirmation_dpi} accepted_input_device={accepted_input_device}"
         );
     }
 

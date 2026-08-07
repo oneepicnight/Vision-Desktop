@@ -85,9 +85,12 @@ authority. Panic containment invalidates the wallet runtime or terminates if inv
 proven. The Confirm control begins disabled and non-default. It is armed only after every required
 value has been measured to fit its fixed bounds and every checked Win32 draw operation completes.
 Approval then requires a complete, fresh, post-display hardware keyboard or mouse press delivered
-by the exact armed control. Pre-display and repeated-key input, ordinary non-UIAccess `SendInput`
-injection, system-origin input, unavailable-origin input, wrong-control input, and synthetic command
-paths fail closed. Windows also classifies input injected by an application whose manifest has
+by the exact armed control. Mouse and keyboard press state cannot be combined. A keyboard command
+generated on key-down is not authority and cannot consume the pending physical press; only the
+matching hardware key release drives one exact Confirm-button action. Pre-display and repeated-key
+input, ordinary non-UIAccess `SendInput` injection, system-origin input, unavailable-origin input,
+wrong-control input, and synthetic command paths fail closed. Windows also classifies input
+injected by an application whose manifest has
 `uiAccess="true"` as `IMO_HARDWARE`; Vision Desktop therefore treats trusted Windows UIAccess
 processes as part of the operating-system trusted-computing boundary and does not claim to
 distinguish their injected input from physical hardware. This boundary follows Microsoft's

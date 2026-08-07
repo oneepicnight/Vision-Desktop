@@ -39,7 +39,8 @@ Allowed input profiles are `us`, `microsoft-pinyin`, and `microsoft-japanese`; e
 expected Windows keyboard-layout identifier. Every successful run prints
 `VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS` with its scenario, evidence label, declared input
 profile, active keyboard-layout identifier, DPI-awareness context, and actual confirmation-window
-DPI.
+DPI. It also records the accepted physical input device. A `keyboard` or `held-enter` run fails if
+a mouse completed confirmation, and a `mouse` run fails if a keyboard completed it.
 
 ## Production-equivalent DPI boundary
 
@@ -113,6 +114,11 @@ and [`ImmGetContext`](https://learn.microsoft.com/en-us/windows/win32/api/imm/nf
 contracts. The same balanced absence check gates both security transitions: after focus and before
 the display is armed, and synchronously immediately before an exact Confirm command is accepted.
 Either failure wipes and closes the ceremony without confirmation.
+
+The keyboard test preserves a physical key-down across the standard dialog's early,
+non-authoritative command and drives the exact Confirm action only after the matching hardware
+key-up. This permits Microsoft IME layouts to retain keyboard operation without accepting a
+key-down-only, repeated, injected, or mixed-device ceremony.
 
 ## Trust-boundary note
 

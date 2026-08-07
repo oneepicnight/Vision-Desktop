@@ -37,7 +37,7 @@ activation-flag change, signing access, transaction submission, or Vision-Core m
 included. Mock listeners test parsing and failure behavior but do not qualify a production Core
 release.
 
-### Implemented private preview tranche awaiting independent review
+### Implemented private preview tranche approved for native-confirmation integration
 
 The next candidate tranche now exists only inside the private Rust wallet module. Its bounded
 request accepts exactly one canonical public recipient address and one plain decimal amount string;
@@ -54,14 +54,34 @@ PID, process-creation identity, monotonic generation, loopback port, and compati
 that produced the observations. The handle is single use. Replacement previews, wallet
 creation/restore/unlock, explicit or lifecycle invalidation, wallet mismatch, idle locking,
 restart, malformed handles, replay, and expiry all fail closed. Public preview data has no
-unrestricted Debug implementation and exposes
-zero data age rather than a process-relative timestamp.
+unrestricted Debug implementation and reports measured monotonic age beginning before the first
+authoritative Core read, without exposing an absolute or process-relative timestamp.
 
-This candidate adds no command, permission, capability, AppManifest entry, frontend wrapper or
-form. It performs no signing, seed access, native confirmation, network write, submission,
-reconciliation, receipt tracking, recovery export, activation change, or Vision-Core modification.
-Production preparation remains unavailable under the current manifest. The candidate must pass
-independent review before native final-confirmation work begins.
+This approved preview tranche adds no command, permission, capability, AppManifest entry, frontend
+wrapper or form. It performs no signing, seed access, network write, submission, reconciliation,
+receipt tracking, recovery export, activation change, or Vision-Core modification. Production
+preparation remains unavailable under the current manifest.
+
+### Implemented private native final-confirmation tranche awaiting independent review
+
+The next candidate tranche exists only inside the private Rust wallet module. Preview consumption
+retains its runtime operation permit and exact Core-generation authority while a main-window-owned,
+owner-drawn Windows dialog displays the complete sender, recipient, amount, charged fee, maximum
+fee, total debit, nonce, and transaction identifier. The dialog contains no editable transaction
+field, disassociates IME contexts from itself and both focusable buttons, rejects text-service and
+clipboard message routes, polls runtime and Core authority while open, and requires one explicit
+confirm action. Its temporary UTF-16 transaction buffers are zeroized on every exit.
+
+Cancellation, owner loss, UI failure, panic, Core exit or generation change, wallet/runtime
+revocation, and stale authority destroy the consumed intent without producing confirmation
+authority. Panic containment invalidates the wallet runtime or terminates if invalidation cannot be
+proven. Only a successful final authority check releases a distinct Rust-only confirmed-intent
+type; that type is not signing authority and has no Clone, Debug, or serialization implementation.
+
+This candidate registers no command, permission, capability, AppManifest entry, managed Tauri
+state, frontend wrapper, or form. It accesses no seed, creates no signature, performs no network
+write, submission, reconciliation, receipt update, recovery export, approval change, or Vision-Core
+modification. It requires independent review before any signing integration begins.
 
 ## Security objective
 

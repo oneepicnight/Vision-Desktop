@@ -37,6 +37,8 @@ mod session;
 mod storage_security;
 mod submission;
 mod transaction;
+#[cfg(windows)]
+mod transaction_confirmation;
 mod vault;
 #[cfg(windows)]
 mod windows_lifecycle;

@@ -69,6 +69,32 @@ impl BoundTransferPreview {
     fn matches_core_identity(&self, fingerprint: &[u8; 32]) -> bool {
         self.core_identity_fingerprint == *fingerprint
     }
+    pub(in crate::wallet) fn confirmation_fields(&self) -> TransferConfirmationFields<'_> {
+        TransferConfirmationFields {
+            sender_address: self.sender_address.as_str(),
+            recipient_address: self.recipient_address.as_str(),
+            amount_raw_units: self.amount_raw_units,
+            charged_fee_raw_units: self.charged_fee_raw_units,
+            fee_limit_raw_units: self.fee_limit_raw_units,
+            total_debit_raw_units: self.total_debit_raw_units,
+            nonce: self.nonce,
+            transaction_id: self.transaction_id.as_str(),
+        }
+    }
+}
+
+/// Borrowed, public-only fields rendered by the Rust-owned native confirmation window.
+///
+/// This view intentionally implements neither Clone, Debug, nor serialization.
+pub(in crate::wallet) struct TransferConfirmationFields<'a> {
+    pub sender_address: &'a str,
+    pub recipient_address: &'a str,
+    pub amount_raw_units: u128,
+    pub charged_fee_raw_units: u64,
+    pub fee_limit_raw_units: u64,
+    pub total_debit_raw_units: u128,
+    pub nonce: u64,
+    pub transaction_id: &'a str,
 }
 
 /// Public-only preview data for a future reviewed command boundary.
@@ -133,6 +159,63 @@ impl WalletPreviewError {
     }
 }
 
+/// A consumed preview whose runtime operation and Core generation remain live through native
+/// confirmation. Dropping it destroys the intent and releases the operation without producing
+/// confirmation authority.
+pub(in crate::wallet) struct PendingTransferConfirmation<'a, S: WalletCoreReadSource> {
+    permit: super::runtime::WalletOperationPermit<'a>,
+    source: S,
+    intent: BoundTransferPreview,
+}
+
+impl<S: WalletCoreReadSource> PendingTransferConfirmation<'_, S> {
+    pub(in crate::wallet) fn fields(&self) -> TransferConfirmationFields<'_> {
+        self.intent.confirmation_fields()
+    }
+
+    pub(in crate::wallet) fn authority_is_current(&self) -> bool {
+        self.validate_current().is_ok()
+    }
+
+    pub(in crate::wallet) fn confirm(self) -> Result<ConfirmedTransferIntent, WalletPreviewError> {
+        self.validate_current()?;
+        let Self {
+            permit,
+            source: _source,
+            intent,
+        } = self;
+        permit
+            .complete(intent)
+            .map(ConfirmedTransferIntent)
+            .map_err(map_runtime_error)
+    }
+
+    fn validate_current(&self) -> Result<(), WalletPreviewError> {
+        let fingerprint = self
+            .source
+            .validated_identity_fingerprint()
+            .map_err(map_core_error)?;
+        self.permit.ensure_current().map_err(map_runtime_error)?;
+        if !self.intent.matches_core_identity(&fingerprint) {
+            return Err(WalletPreviewError::CoreUnavailable);
+        }
+        Ok(())
+    }
+}
+
+/// Exact intent released only after the Rust-owned native ceremony records explicit approval.
+///
+/// It intentionally implements neither Clone, Debug, nor serialization and grants no signing
+/// authority on its own.
+pub(in crate::wallet) struct ConfirmedTransferIntent(BoundTransferPreview);
+
+impl ConfirmedTransferIntent {
+    #[cfg(test)]
+    pub(in crate::wallet) fn fields_for_test(&self) -> TransferConfirmationFields<'_> {
+        self.0.confirmation_fields()
+    }
+}
+
 pub(in crate::wallet) struct WalletTransactionPreviewEngine<'a> {
     runtime: &'a WalletRuntimeState,
 }
@@ -161,7 +244,7 @@ impl<'a> WalletTransactionPreviewEngine<'a> {
         supervisor: &'a SupervisorState,
         owner_window: &str,
         handle: &str,
-    ) -> Result<BoundTransferPreview, WalletPreviewError> {
+    ) -> Result<PendingTransferConfirmation<'a, WalletCoreReadClient<'a>>, WalletPreviewError> {
         let permit = self
             .runtime
             .begin_operation(owner_window, WalletOperationKind::ConsumePreview)
@@ -170,7 +253,7 @@ impl<'a> WalletTransactionPreviewEngine<'a> {
             .consume_transaction_preview(handle)
             .map_err(map_runtime_error)?;
         let client = WalletCoreReadClient::from_supervisor(supervisor).map_err(map_core_error)?;
-        release_consumed_preview(&permit, intent, &client)
+        bind_consumed_preview(permit, intent, client)
     }
 
     pub(in crate::wallet) fn cancel(
@@ -198,14 +281,15 @@ fn consume_with_source(
     let intent = permit
         .consume_transaction_preview(handle)
         .map_err(map_runtime_error)?;
-    release_consumed_preview(permit, intent, source)
+    validate_consumed_preview(permit, &intent, source)?;
+    permit.complete(intent).map_err(map_runtime_error)
 }
 
-fn release_consumed_preview(
+fn validate_consumed_preview(
     permit: &super::runtime::WalletOperationPermit<'_>,
-    intent: BoundTransferPreview,
+    intent: &BoundTransferPreview,
     source: &impl WalletCoreReadSource,
-) -> Result<BoundTransferPreview, WalletPreviewError> {
+) -> Result<(), WalletPreviewError> {
     let identity_before_release = source
         .validated_identity_fingerprint()
         .map_err(map_core_error)?;
@@ -224,7 +308,34 @@ fn release_consumed_preview(
         return Err(WalletPreviewError::CoreUnavailable);
     }
 
-    permit.complete(intent).map_err(map_runtime_error)
+    Ok(())
+}
+
+fn bind_consumed_preview<'a>(
+    permit: super::runtime::WalletOperationPermit<'a>,
+    intent: BoundTransferPreview,
+    source: WalletCoreReadClient<'a>,
+) -> Result<PendingTransferConfirmation<'a, WalletCoreReadClient<'a>>, WalletPreviewError> {
+    validate_consumed_preview(&permit, &intent, &source)?;
+    Ok(PendingTransferConfirmation {
+        permit,
+        source,
+        intent,
+    })
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn bind_consumed_preview_for_test<'a, S: WalletCoreReadSource>(
+    permit: super::runtime::WalletOperationPermit<'a>,
+    intent: BoundTransferPreview,
+    source: S,
+) -> Result<PendingTransferConfirmation<'a, S>, WalletPreviewError> {
+    validate_consumed_preview(&permit, &intent, &source)?;
+    Ok(PendingTransferConfirmation {
+        permit,
+        source,
+        intent,
+    })
 }
 
 fn prepare_with_source(
@@ -346,6 +457,15 @@ fn prepare_with_source(
         expires_after_ms: TRANSACTION_PREVIEW_TTL_MS,
         warning: REORGANIZATION_WARNING.to_string(),
     })
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn prepare_with_source_for_test(
+    permit: &super::runtime::WalletOperationPermit<'_>,
+    request: WalletTransferPreviewRequest,
+    source: &impl WalletCoreReadSource,
+) -> Result<PreparedTransferPreview, WalletPreviewError> {
+    prepare_with_source(permit, request, source)
 }
 
 fn map_runtime_error(error: WalletRuntimeError) -> WalletPreviewError {

@@ -33,7 +33,7 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_TCP_TABLE_BYTES: usize = 4 * 1024 * 1024;
-const SUPPORTED_STATUS_VERSION: &str = "3";
+pub(super) const SUPPORTED_STATUS_VERSION: &str = "3";
 pub(super) const SUPPORTED_WALLET_CORE_CONTRACT: &str = "vision-wallet-read-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

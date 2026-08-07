@@ -1,15 +1,7 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "transaction signing remains internal until all submission gates pass"
-    )
-)]
-
 use super::{
     account::derive_account_identity, runtime::WalletActivationProof, secrets::WalletSeed,
 };
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -90,6 +82,9 @@ pub(in crate::wallet) enum WalletTransactionError {
     FeeArithmeticOverflow,
     FeeExceedsLimit,
     InvalidSender,
+    ConfirmedIntentMismatch,
+    SignatureUnavailable,
+    SignatureVerificationFailed,
     SerializationUnavailable,
 }
 
@@ -104,6 +99,9 @@ impl fmt::Display for WalletTransactionError {
             Self::FeeArithmeticOverflow => "transfer fee arithmetic overflowed",
             Self::FeeExceedsLimit => "transfer fee exceeds the authorized limit",
             Self::InvalidSender => "sender account identity is invalid",
+            Self::ConfirmedIntentMismatch => "confirmed transaction intent is invalid",
+            Self::SignatureUnavailable => "transaction signature is unavailable",
+            Self::SignatureVerificationFailed => "transaction signature verification failed",
             Self::SerializationUnavailable => "transaction serialization is unavailable",
         };
         formatter.write_str(message)
@@ -111,6 +109,43 @@ impl fmt::Display for WalletTransactionError {
 }
 
 impl std::error::Error for WalletTransactionError {}
+
+/// Borrowed exact intent accepted by the private confirmation-to-signing bridge.
+///
+/// This type intentionally implements neither Clone, Debug, nor serialization. It carries only
+/// public transaction material; possession is not signing authority.
+pub(in crate::wallet) struct ConfirmedCashTransfer<'a> {
+    pub unsigned_transaction: &'a VisionTransaction,
+    pub sender_address: &'a str,
+    pub recipient_address: &'a str,
+    pub amount_raw_units: u128,
+    pub charged_fee_raw_units: u64,
+    pub fee_limit_raw_units: u64,
+    pub total_debit_raw_units: u128,
+    pub nonce: u64,
+    pub transaction_id: &'a str,
+    pub core_contract: &'a str,
+    pub status_version: &'a str,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::wallet) enum TransactionSigningStage {
+    SeedAccountDerivation,
+    SignatureConstruction,
+    SignatureVerification,
+}
+
+pub(in crate::wallet) trait TransactionSigningObserver {
+    fn checkpoint(&self, stage: TransactionSigningStage);
+}
+
+#[cfg(test)]
+pub(in crate::wallet) struct NoopTransactionSigningObserver;
+
+#[cfg(test)]
+impl TransactionSigningObserver for NoopTransactionSigningObserver {
+    fn checkpoint(&self, _stage: TransactionSigningStage) {}
+}
 
 /// Produces the exact RC2 unsigned signing bytes without exposing the seed.
 pub(in crate::wallet) fn canonical_unsigned_payload(
@@ -182,6 +217,7 @@ pub(in crate::wallet) fn build_unsigned_cash_transfer(
 /// This is not registered as a Tauri command. Amount, nonce, and fee policy is
 /// verified internally, but no UI may reach signing until every remaining
 /// compatibility and security gate passes.
+#[cfg(test)]
 pub(in crate::wallet) fn sign_cash_transfer(
     activation: &WalletActivationProof,
     seed: &WalletSeed,
@@ -199,6 +235,105 @@ pub(in crate::wallet) fn sign_cash_transfer(
         hex::encode(signing_key.sign(&payload).to_bytes())
     });
     Ok(transaction)
+}
+
+/// Signs only the exact unsigned transfer retained through native confirmation.
+///
+/// The caller must additionally hold the promoted runtime signing permit. This function performs
+/// no network write and exposes no secret material.
+pub(in crate::wallet) fn sign_confirmed_cash_transfer(
+    activation: &WalletActivationProof,
+    seed: &WalletSeed,
+    confirmed: ConfirmedCashTransfer<'_>,
+    expected_core_contract: &str,
+    expected_status_version: &str,
+    observer: &dyn TransactionSigningObserver,
+) -> Result<VisionTransaction, WalletTransactionError> {
+    activation
+        .require_signing()
+        .map_err(|_| WalletTransactionError::ActivationUnavailable)?;
+    validate_confirmed_cash_transfer(&confirmed, expected_core_contract, expected_status_version)?;
+
+    observer.checkpoint(TransactionSigningStage::SeedAccountDerivation);
+    let identity = derive_account_identity(seed);
+    if identity.address != confirmed.sender_address
+        || identity.public_key != confirmed.unsigned_transaction.sender_pubkey
+    {
+        return Err(WalletTransactionError::InvalidSender);
+    }
+
+    let payload = canonical_unsigned_payload(confirmed.unsigned_transaction)?;
+    observer.checkpoint(TransactionSigningStage::SignatureConstruction);
+    let signature_hex = seed.with_exposed(|seed_bytes| {
+        let signing_key = SigningKey::from_bytes(seed_bytes);
+        hex::encode(signing_key.sign(&payload).to_bytes())
+    });
+    let signature_bytes: [u8; 64] = hex::decode(&signature_hex)
+        .map_err(|_| WalletTransactionError::SignatureUnavailable)?
+        .try_into()
+        .map_err(|_| WalletTransactionError::SignatureUnavailable)?;
+    let public_key_bytes: [u8; 32] = hex::decode(&identity.public_key)
+        .map_err(|_| WalletTransactionError::SignatureUnavailable)?
+        .try_into()
+        .map_err(|_| WalletTransactionError::SignatureUnavailable)?;
+    let verifying_key = VerifyingKey::from_bytes(&public_key_bytes)
+        .map_err(|_| WalletTransactionError::SignatureUnavailable)?;
+    observer.checkpoint(TransactionSigningStage::SignatureVerification);
+    verifying_key
+        .verify(&payload, &Signature::from_bytes(&signature_bytes))
+        .map_err(|_| WalletTransactionError::SignatureVerificationFailed)?;
+
+    let mut signed = confirmed.unsigned_transaction.clone();
+    signed.sig = signature_hex;
+    if canonical_transaction_id(&signed)? != confirmed.transaction_id {
+        return Err(WalletTransactionError::ConfirmedIntentMismatch);
+    }
+    Ok(signed)
+}
+
+fn validate_confirmed_cash_transfer(
+    confirmed: &ConfirmedCashTransfer<'_>,
+    expected_core_contract: &str,
+    expected_status_version: &str,
+) -> Result<(), WalletTransactionError> {
+    let transaction = confirmed.unsigned_transaction;
+    if !transaction.sig.is_empty()
+        || confirmed.core_contract != expected_core_contract
+        || confirmed.status_version != expected_status_version
+        || transaction.sender_pubkey != confirmed.sender_address
+        || !is_lowercase_hex_32_bytes(confirmed.sender_address)
+        || !is_lowercase_hex_32_bytes(&transaction.sender_pubkey)
+        || !is_lowercase_hex_32_bytes(confirmed.recipient_address)
+        || confirmed.recipient_address == confirmed.sender_address
+        || transaction.module != CASH_MODULE
+        || transaction.method != TRANSFER_METHOD
+        || transaction.nonce != confirmed.nonce
+        || transaction.tip != DEFAULT_CASH_TRANSFER_TIP
+        || transaction.fee_limit != MIN_CASH_TRANSFER_FEE_LIMIT
+        || confirmed.fee_limit_raw_units != MIN_CASH_TRANSFER_FEE_LIMIT
+        || confirmed.charged_fee_raw_units != CASH_TRANSFER_BASE_FEE
+        || confirmed.amount_raw_units == 0
+    {
+        return Err(WalletTransactionError::ConfirmedIntentMismatch);
+    }
+    let expected_total = confirmed
+        .amount_raw_units
+        .checked_add(u128::from(CASH_TRANSFER_BASE_FEE))
+        .ok_or(WalletTransactionError::FeeArithmeticOverflow)?;
+    if expected_total != confirmed.total_debit_raw_units {
+        return Err(WalletTransactionError::ConfirmedIntentMismatch);
+    }
+    let expected_args = serde_json::to_vec(&CashTransferArgs {
+        to: confirmed.recipient_address,
+        amount: confirmed.amount_raw_units,
+    })
+    .map_err(|_| WalletTransactionError::SerializationUnavailable)?;
+    if transaction.args != expected_args
+        || canonical_transaction_id(transaction)? != confirmed.transaction_id
+    {
+        return Err(WalletTransactionError::ConfirmedIntentMismatch);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -415,5 +550,136 @@ mod tests {
         }
         assert!(json.contains(SIGNED_VECTOR_PUBLIC_KEY));
         assert!(json.contains(SIGNED_VECTOR_SIGNATURE));
+    }
+
+    fn confirmed_signing_fixture() -> (WalletSeed, VisionTransaction, String, String, String) {
+        let seed = WalletSeed::for_test(7);
+        let sender = derive_account_identity(&seed).address;
+        let recipient = "22".repeat(32);
+        let draft = CashTransferDraft::for_current_nonce(9, recipient.clone(), 42);
+        let transaction = build_unsigned_cash_transfer(sender.clone(), &sender, &draft).unwrap();
+        let transaction_id = canonical_transaction_id(&transaction).unwrap();
+        (seed, transaction, sender, recipient, transaction_id)
+    }
+
+    fn confirmed_view<'a>(
+        transaction: &'a VisionTransaction,
+        sender: &'a str,
+        recipient: &'a str,
+        transaction_id: &'a str,
+    ) -> ConfirmedCashTransfer<'a> {
+        ConfirmedCashTransfer {
+            unsigned_transaction: transaction,
+            sender_address: sender,
+            recipient_address: recipient,
+            amount_raw_units: 42,
+            charged_fee_raw_units: 1,
+            fee_limit_raw_units: 201,
+            total_debit_raw_units: 43,
+            nonce: 9,
+            transaction_id,
+            core_contract: "vision-wallet-read-v1",
+            status_version: "3",
+        }
+    }
+
+    #[test]
+    fn exact_confirmed_transaction_is_signed_and_verified_without_changing_its_identifier() {
+        let (seed, transaction, sender, recipient, transaction_id) = confirmed_signing_fixture();
+        let signed = super::super::runtime::WalletRuntimeState::with_activation_proof_for_test(
+            super::super::runtime::WalletOperationKind::Sign,
+            |activation| {
+                sign_confirmed_cash_transfer(
+                    activation,
+                    &seed,
+                    confirmed_view(&transaction, &sender, &recipient, &transaction_id),
+                    "vision-wallet-read-v1",
+                    "3",
+                    &NoopTransactionSigningObserver,
+                )
+            },
+        )
+        .unwrap();
+
+        assert_eq!(canonical_transaction_id(&signed).unwrap(), transaction_id);
+        assert_eq!(signed.nonce, transaction.nonce);
+        assert_eq!(signed.sender_pubkey, transaction.sender_pubkey);
+        assert_eq!(signed.module, transaction.module);
+        assert_eq!(signed.method, transaction.method);
+        assert_eq!(signed.args, transaction.args);
+        assert_eq!(signed.tip, transaction.tip);
+        assert_eq!(signed.fee_limit, transaction.fee_limit);
+        assert_eq!(signed.sig.len(), 128);
+    }
+
+    #[test]
+    fn confirmed_signing_rejects_mutated_or_semantically_reencoded_intents() {
+        let (seed, transaction, sender, recipient, transaction_id) = confirmed_signing_fixture();
+        let assert_rejected = |candidate: &VisionTransaction,
+                               candidate_sender: &str,
+                               candidate_recipient: &str,
+                               candidate_id: &str,
+                               contract: &str,
+                               version: &str| {
+            let result = super::super::runtime::WalletRuntimeState::with_activation_proof_for_test(
+                super::super::runtime::WalletOperationKind::Sign,
+                |activation| {
+                    sign_confirmed_cash_transfer(
+                        activation,
+                        &seed,
+                        confirmed_view(
+                            candidate,
+                            candidate_sender,
+                            candidate_recipient,
+                            candidate_id,
+                        ),
+                        contract,
+                        version,
+                        &NoopTransactionSigningObserver,
+                    )
+                },
+            );
+            assert_eq!(result, Err(WalletTransactionError::ConfirmedIntentMismatch));
+        };
+
+        let mut signed_before_confirmation = transaction.clone();
+        signed_before_confirmation.sig = "00".repeat(64);
+        assert_rejected(
+            &signed_before_confirmation,
+            &sender,
+            &recipient,
+            &transaction_id,
+            "vision-wallet-read-v1",
+            "3",
+        );
+
+        let mut reencoded_args = transaction.clone();
+        reencoded_args.args = format!("{{\"amount\":42,\"to\":\"{recipient}\"}}").into_bytes();
+        let reencoded_id = canonical_transaction_id(&reencoded_args).unwrap();
+        assert_rejected(
+            &reencoded_args,
+            &sender,
+            &recipient,
+            &reencoded_id,
+            "vision-wallet-read-v1",
+            "3",
+        );
+
+        assert_rejected(
+            &transaction,
+            &sender,
+            &recipient,
+            &transaction_id,
+            "stale-contract",
+            "3",
+        );
+        assert_rejected(
+            &transaction,
+            &sender,
+            &recipient,
+            &transaction_id,
+            "vision-wallet-read-v1",
+            "2",
+        );
     }
 }

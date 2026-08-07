@@ -21,11 +21,12 @@ use super::{
     },
     public_request::WalletTransferPreviewRequest,
     runtime::{
-        WalletOperationKind, WalletRuntimeError, WalletRuntimeState, TRANSACTION_PREVIEW_TTL_MS,
+        WalletOperationKind, WalletRuntimeError, WalletRuntimeState, WalletSigningPermit,
+        TRANSACTION_PREVIEW_TTL_MS,
     },
     transaction::{
         build_unsigned_cash_transfer, canonical_transaction_id, CashTransferDraft,
-        VisionTransaction, WalletTransactionError,
+        ConfirmedCashTransfer, VisionTransaction, WalletTransactionError,
     },
 };
 use crate::supervisor::SupervisorState;
@@ -66,8 +67,28 @@ impl BoundTransferPreview {
         self.sender_public_key.as_str()
     }
 
-    fn matches_core_identity(&self, fingerprint: &[u8; 32]) -> bool {
+    pub(in crate::wallet) fn matches_core_identity(&self, fingerprint: &[u8; 32]) -> bool {
         self.core_identity_fingerprint == *fingerprint
+    }
+
+    pub(in crate::wallet) fn core_identity_fingerprint(&self) -> &[u8; 32] {
+        &self.core_identity_fingerprint
+    }
+
+    pub(in crate::wallet) fn confirmed_cash_transfer(&self) -> ConfirmedCashTransfer<'_> {
+        ConfirmedCashTransfer {
+            unsigned_transaction: &self.unsigned_transaction,
+            sender_address: self.sender_address.as_str(),
+            recipient_address: self.recipient_address.as_str(),
+            amount_raw_units: self.amount_raw_units,
+            charged_fee_raw_units: self.charged_fee_raw_units,
+            fee_limit_raw_units: self.fee_limit_raw_units,
+            total_debit_raw_units: self.total_debit_raw_units,
+            nonce: self.nonce,
+            transaction_id: self.transaction_id.as_str(),
+            core_contract: self.core_contract.as_str(),
+            status_version: self.status_version.as_str(),
+        }
     }
     pub(in crate::wallet) fn confirmation_fields(&self) -> TransferConfirmationFields<'_> {
         TransferConfirmationFields {
@@ -168,7 +189,7 @@ pub(in crate::wallet) struct PendingTransferConfirmation<'a, S: WalletCoreReadSo
     intent: BoundTransferPreview,
 }
 
-impl<S: WalletCoreReadSource> PendingTransferConfirmation<'_, S> {
+impl<'a, S: WalletCoreReadSource> PendingTransferConfirmation<'a, S> {
     pub(in crate::wallet) fn fields(&self) -> TransferConfirmationFields<'_> {
         self.intent.confirmation_fields()
     }
@@ -177,20 +198,31 @@ impl<S: WalletCoreReadSource> PendingTransferConfirmation<'_, S> {
         self.validate_current().is_ok()
     }
 
-    pub(in crate::wallet) fn complete_with_native_approval(
+    pub(in crate::wallet) fn promote_with_native_approval(
         self,
-        _approval: super::transaction_confirmation::NativeConfirmationApproval,
-    ) -> Result<ConfirmedTransferIntent, WalletPreviewError> {
+        approval: super::transaction_confirmation::NativeConfirmationApproval,
+    ) -> Result<(WalletSigningPermit<'a>, S, BoundTransferPreview), WalletPreviewError> {
         self.validate_current()?;
         let Self {
             permit,
-            source: _source,
+            source,
             intent,
         } = self;
-        permit
-            .complete(intent)
-            .map(ConfirmedTransferIntent)
-            .map_err(map_runtime_error)
+        let signing_permit = permit
+            .promote_to_signing(
+                approval,
+                intent.sender_address(),
+                intent.sender_public_key(),
+            )
+            .map_err(map_runtime_error)?;
+        let fingerprint = source
+            .validated_identity_fingerprint()
+            .map_err(map_core_error)?;
+        signing_permit.ensure_current().map_err(map_runtime_error)?;
+        if !intent.matches_core_identity(&fingerprint) {
+            return Err(WalletPreviewError::CoreUnavailable);
+        }
+        Ok((signing_permit, source, intent))
     }
 
     fn validate_current(&self) -> Result<(), WalletPreviewError> {
@@ -203,19 +235,6 @@ impl<S: WalletCoreReadSource> PendingTransferConfirmation<'_, S> {
             return Err(WalletPreviewError::CoreUnavailable);
         }
         Ok(())
-    }
-}
-
-/// Exact intent released only after the Rust-owned native ceremony records explicit approval.
-///
-/// It intentionally implements neither Clone, Debug, nor serialization and grants no signing
-/// authority on its own.
-pub(in crate::wallet) struct ConfirmedTransferIntent(BoundTransferPreview);
-
-impl ConfirmedTransferIntent {
-    #[cfg(test)]
-    pub(in crate::wallet) fn fields_for_test(&self) -> TransferConfirmationFields<'_> {
-        self.0.confirmation_fields()
     }
 }
 
@@ -518,6 +537,9 @@ fn map_transaction_error(error: WalletTransactionError) -> WalletPreviewError {
         | WalletTransactionError::TransferToSelf
         | WalletTransactionError::FeeLimitTooLow
         | WalletTransactionError::FeeExceedsLimit
+        | WalletTransactionError::ConfirmedIntentMismatch
+        | WalletTransactionError::SignatureUnavailable
+        | WalletTransactionError::SignatureVerificationFailed
         | WalletTransactionError::SerializationUnavailable => WalletPreviewError::InvalidRequest,
     }
 }

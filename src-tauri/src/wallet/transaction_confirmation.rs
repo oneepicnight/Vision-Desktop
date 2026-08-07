@@ -17,10 +17,11 @@ use super::{
     amount::format_vision_amount,
     core_client::WalletCoreReadSource,
     preview::{
-        ConfirmedTransferIntent, PendingTransferConfirmation, TransferConfirmationFields,
-        WalletPreviewError, WalletTransactionPreviewEngine,
+        PendingTransferConfirmation, TransferConfirmationFields, WalletPreviewError,
+        WalletTransactionPreviewEngine,
     },
     runtime::WalletRuntimeState,
+    signing::{sign_after_native_approval, WalletPrivateSigningError},
 };
 use crate::supervisor::SupervisorState;
 use std::{
@@ -131,6 +132,7 @@ pub(in crate::wallet) enum WalletConfirmationError {
     CoreUnavailable,
     OperationInProgress,
     RuntimeUnavailable,
+    SigningUnavailable,
 }
 
 impl WalletConfirmationError {
@@ -143,6 +145,7 @@ impl WalletConfirmationError {
             Self::CoreUnavailable => "wallet_core_unavailable",
             Self::OperationInProgress => "wallet_operation_in_progress",
             Self::RuntimeUnavailable => "wallet_runtime_unavailable",
+            Self::SigningUnavailable => "wallet_signing_unavailable",
         }
     }
 }
@@ -203,7 +206,7 @@ impl<'a> WalletTransactionConfirmationEngine<'a> {
         supervisor: &'a SupervisorState,
         owner_window: &str,
         handle: &str,
-    ) -> Result<ConfirmedTransferIntent, WalletConfirmationError> {
+    ) -> Result<(), WalletConfirmationError> {
         self.run_fail_closed(|| {
             let pending = WalletTransactionPreviewEngine::new(self.runtime)
                 .consume(supervisor, owner_window, handle)
@@ -215,21 +218,20 @@ impl<'a> WalletTransactionConfirmationEngine<'a> {
     fn confirm_pending<S: WalletCoreReadSource>(
         &self,
         pending: PendingTransferConfirmation<'_, S>,
-    ) -> Result<ConfirmedTransferIntent, WalletConfirmationError> {
+    ) -> Result<(), WalletConfirmationError> {
         self.run_fail_closed(|| self.confirm_pending_inner(pending))
     }
 
     fn confirm_pending_inner<S: WalletCoreReadSource>(
         &self,
         pending: PendingTransferConfirmation<'_, S>,
-    ) -> Result<ConfirmedTransferIntent, WalletConfirmationError> {
+    ) -> Result<(), WalletConfirmationError> {
         let fields = pending.fields();
         self.ceremony
             .present(fields, &|| pending.authority_is_current())
             .map_err(map_native_error)?;
-        pending
-            .complete_with_native_approval(NativeConfirmationApproval::issue())
-            .map_err(map_preview_error)
+        sign_after_native_approval(pending, NativeConfirmationApproval::issue())
+            .map_err(map_signing_error)
     }
 
     fn run_fail_closed<T>(
@@ -243,6 +245,21 @@ impl<'a> WalletTransactionConfirmationEngine<'a> {
                 Err(WalletConfirmationError::RuntimeUnavailable)
             }
         }
+    }
+}
+
+const fn map_signing_error(error: WalletPrivateSigningError) -> WalletConfirmationError {
+    match error {
+        WalletPrivateSigningError::PreviewUnavailable => {
+            WalletConfirmationError::PreviewUnavailable
+        }
+        WalletPrivateSigningError::RuntimeRevoked => WalletConfirmationError::AuthorityRevoked,
+        WalletPrivateSigningError::ActivationUnavailable
+        | WalletPrivateSigningError::IntentRejected
+        | WalletPrivateSigningError::SignatureUnavailable => {
+            WalletConfirmationError::SigningUnavailable
+        }
+        WalletPrivateSigningError::CoreUnavailable => WalletConfirmationError::CoreUnavailable,
     }
 }
 
@@ -1242,6 +1259,10 @@ mod tests {
         public_request::WalletTransferPreviewRequest,
         runtime::{WalletOperationKind, WalletOperationPermit},
         secrets::{WalletPassword, WalletSeed},
+        signing::{
+            sign_after_native_approval_with_observer_for_test, SigningCoordinatorObserver,
+            SigningCoordinatorStage,
+        },
         vault::EncryptedWalletVault,
     };
     use std::{
@@ -1273,6 +1294,7 @@ mod tests {
         address: String,
         identity_calls: AtomicUsize,
         panic_on_identity_call: Option<usize>,
+        replace_identity_on_call: Option<usize>,
     }
 
     impl WalletCoreReadSource for FakeCore {
@@ -1303,7 +1325,14 @@ mod tests {
             if self.panic_on_identity_call == Some(call) {
                 panic!("injected final Core identity panic");
             }
-            Ok([0x42; 32])
+            if self
+                .replace_identity_on_call
+                .is_some_and(|replace_at| call >= replace_at)
+            {
+                Ok([0x43; 32])
+            } else {
+                Ok([0x42; 32])
+            }
         }
     }
 
@@ -1395,10 +1424,21 @@ mod tests {
         recipient: &str,
         panic_on_identity_call: Option<usize>,
     ) -> PendingTransferConfirmation<'a, FakeCore> {
+        pending_with_core_change(runtime, sender, recipient, panic_on_identity_call, None)
+    }
+
+    fn pending_with_core_change<'a>(
+        runtime: &'a WalletRuntimeState,
+        sender: &str,
+        recipient: &str,
+        panic_on_identity_call: Option<usize>,
+        replace_identity_on_call: Option<usize>,
+    ) -> PendingTransferConfirmation<'a, FakeCore> {
         let prepare_source = FakeCore {
             address: sender.to_string(),
             identity_calls: AtomicUsize::new(0),
             panic_on_identity_call: None,
+            replace_identity_on_call: None,
         };
         let prepare_permit = runtime
             .begin_operation(MAIN, WalletOperationKind::PreparePreview)
@@ -1420,6 +1460,7 @@ mod tests {
                 address: sender.to_string(),
                 identity_calls: AtomicUsize::new(0),
                 panic_on_identity_call,
+                replace_identity_on_call,
             },
         )
         .unwrap()
@@ -1485,8 +1526,43 @@ mod tests {
         }
     }
 
+    struct PanickingSigningObserver {
+        stage: SigningCoordinatorStage,
+    }
+
+    impl SigningCoordinatorObserver for PanickingSigningObserver {
+        fn checkpoint(&self, stage: SigningCoordinatorStage) {
+            if stage == self.stage {
+                panic!("injected private signing coordinator panic");
+            }
+        }
+    }
+
+    struct OccupiedSigningSlotObserver<'a> {
+        runtime: &'a WalletRuntimeState,
+    }
+
+    impl SigningCoordinatorObserver for OccupiedSigningSlotObserver<'_> {
+        fn checkpoint(&self, stage: SigningCoordinatorStage) {
+            if matches!(
+                stage,
+                SigningCoordinatorStage::SeedAccountDerivation
+                    | SigningCoordinatorStage::SignatureConstruction
+                    | SigningCoordinatorStage::SignatureVerification
+            ) {
+                return;
+            }
+            assert_eq!(
+                self.runtime
+                    .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+                    .err(),
+                Some(super::super::runtime::WalletRuntimeError::OperationInProgress)
+            );
+        }
+    }
+
     #[test]
-    fn explicit_native_approval_releases_only_the_exact_confirmed_intent() {
+    fn explicit_native_approval_signs_and_destroys_only_the_exact_confirmed_intent() {
         let (runtime, sender) = unlocked_runtime(31);
         let recipient = "d".repeat(64);
         let ceremony = ConfirmingCeremony;
@@ -1495,13 +1571,13 @@ mod tests {
             ceremony: &ceremony,
         };
 
-        let confirmed = engine
+        engine
             .confirm_pending(pending(&runtime, &sender, &recipient))
             .unwrap();
-        let fields = confirmed.fields_for_test();
-        assert_eq!(fields.sender_address, sender);
-        assert_eq!(fields.recipient_address, recipient);
-        assert_eq!(fields.amount_raw_units, 2_500_000_000);
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+            .unwrap();
+        permit.ensure_current().unwrap();
     }
 
     #[test]
@@ -1584,6 +1660,92 @@ mod tests {
             .begin_operation(MAIN, WalletOperationKind::PreparePreview)
             .unwrap();
         assert!(permit.current_public_account().is_err());
+    }
+
+    #[test]
+    fn core_replacement_after_signing_discards_the_result_and_revokes_authority() {
+        let (runtime, sender) = unlocked_runtime(36);
+        let ceremony = ConfirmingCeremony;
+        let engine = WalletTransactionConfirmationEngine {
+            runtime: &runtime,
+            ceremony: &ceremony,
+        };
+        let pending = pending_with_core_change(&runtime, &sender, &"7".repeat(64), None, Some(6));
+
+        assert_eq!(
+            engine.confirm_pending(pending),
+            Err(WalletConfirmationError::CoreUnavailable)
+        );
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+            .unwrap();
+        assert!(permit.current_public_account().is_err());
+    }
+
+    #[test]
+    fn every_private_signing_stage_panic_is_contained_and_revokes_authority() {
+        for (index, stage) in [
+            SigningCoordinatorStage::Promoted,
+            SigningCoordinatorStage::BeforeSeedAccess,
+            SigningCoordinatorStage::SeedAccountDerivation,
+            SigningCoordinatorStage::SignatureConstruction,
+            SigningCoordinatorStage::SignatureVerification,
+            SigningCoordinatorStage::AfterSignatureVerification,
+            SigningCoordinatorStage::BeforeCompletion,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (runtime, sender) = unlocked_runtime(80_u8.saturating_add(index as u8));
+            let ceremony = ConfirmingCeremony;
+            let engine = WalletTransactionConfirmationEngine {
+                runtime: &runtime,
+                ceremony: &ceremony,
+            };
+            let observer = PanickingSigningObserver { stage };
+            let pending = pending(&runtime, &sender, &"9".repeat(64));
+
+            let result = engine.run_fail_closed(|| {
+                sign_after_native_approval_with_observer_for_test(
+                    pending,
+                    NativeConfirmationApproval::issue(),
+                    &observer,
+                )
+                .map_err(map_signing_error)
+            });
+            assert_eq!(result, Err(WalletConfirmationError::RuntimeUnavailable));
+            let permit = runtime
+                .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+                .unwrap();
+            assert!(permit.current_public_account().is_err());
+        }
+    }
+
+    #[test]
+    fn promotion_keeps_the_operation_slot_occupied_until_signing_completion() {
+        let (runtime, sender) = unlocked_runtime(89);
+        let ceremony = ConfirmingCeremony;
+        let engine = WalletTransactionConfirmationEngine {
+            runtime: &runtime,
+            ceremony: &ceremony,
+        };
+        let observer = OccupiedSigningSlotObserver { runtime: &runtime };
+        let pending = pending(&runtime, &sender, &"8".repeat(64));
+
+        engine
+            .run_fail_closed(|| {
+                sign_after_native_approval_with_observer_for_test(
+                    pending,
+                    NativeConfirmationApproval::issue(),
+                    &observer,
+                )
+                .map_err(map_signing_error)
+            })
+            .unwrap();
+
+        runtime
+            .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+            .unwrap();
     }
     #[test]
     fn native_display_buffers_are_explicitly_wiped() {
@@ -2373,6 +2535,12 @@ mod tests {
         let preview_source = include_str!("preview.rs");
         assert!(!preview_source.contains("pub(in crate::wallet) fn confirm("));
         assert!(preview_source
-            .contains("_approval: super::transaction_confirmation::NativeConfirmationApproval"));
+            .contains("approval: super::transaction_confirmation::NativeConfirmationApproval"));
+        assert!(!preview_source.contains("ConfirmedTransferIntent"));
+        let signing_source = include_str!("signing.rs");
+        assert!(!signing_source.contains(&["#[tauri", "::command]"].concat()));
+        assert!(!signing_source.contains(&["PO", "ST /transactions"].concat()));
+        assert!(!signing_source.contains("TcpStream"));
+        assert!(!signing_source.contains("pub(crate)"));
     }
 }

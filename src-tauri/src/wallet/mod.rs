@@ -34,6 +34,8 @@ mod secrets;
 #[cfg(windows)]
 mod secure_filesystem;
 mod session;
+#[cfg(windows)]
+mod signing;
 mod storage_security;
 mod submission;
 mod transaction;

@@ -13,6 +13,11 @@ use super::{
     preview::BoundTransferPreview,
     secrets::WalletPassword,
     session::{WalletSession, WalletSessionError},
+    transaction::{
+        sign_confirmed_cash_transfer, TransactionSigningObserver, VisionTransaction,
+        WalletTransactionError,
+    },
+    transaction_confirmation::NativeConfirmationApproval,
     vault::EncryptedWalletVault,
 };
 use std::{
@@ -64,7 +69,7 @@ struct WalletRuntimeInner {
 struct ActiveOperation {
     generation: u64,
     owner_window: String,
-    _kind: WalletOperationKind,
+    kind: WalletOperationKind,
 }
 
 struct PendingPathSelection {
@@ -111,6 +116,17 @@ pub(in crate::wallet) struct WalletOperationPermit<'a> {
     owner_window: String,
     kind: WalletOperationKind,
     activation_proof: WalletActivationProof,
+    armed: bool,
+}
+
+/// Linear signing authority produced only by atomic promotion of the live confirmation permit.
+///
+/// This type intentionally implements neither Clone, Debug, nor serialization. Dropping it before
+/// successful completion invalidates the wallet session and all outstanding authority.
+pub(in crate::wallet) struct WalletSigningPermit<'a> {
+    permit: WalletOperationPermit<'a>,
+    wallet_id: String,
+    armed: bool,
 }
 
 pub(in crate::wallet) struct WalletActivationProof {
@@ -266,6 +282,9 @@ impl WalletRuntimeState {
         require_main_window(owner_window)?;
         let activation_scope = kind.activation_scope();
         self.require_activation(activation_scope)?;
+        if kind == WalletOperationKind::Sign {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
         let mut inner = self.lock_inner()?;
         if self.revocation_is_pending() {
             return Err(WalletRuntimeError::RuntimeUnavailable);
@@ -288,7 +307,7 @@ impl WalletRuntimeState {
         inner.active_operation = Some(ActiveOperation {
             generation,
             owner_window: owner_window.to_string(),
-            _kind: kind,
+            kind,
         });
         Ok(WalletOperationPermit {
             state: self,
@@ -299,6 +318,7 @@ impl WalletRuntimeState {
             activation_proof: WalletActivationProof {
                 scope: activation_scope,
             },
+            armed: true,
         })
     }
 
@@ -594,9 +614,9 @@ impl WalletRuntimeState {
         kind: WalletOperationKind,
         operation: impl FnOnce(&WalletActivationProof) -> R,
     ) -> R {
-        let runtime = Self::for_test();
-        let permit = runtime.begin_operation(MAIN_WINDOW_LABEL, kind).unwrap();
-        operation(&permit.activation_proof)
+        operation(&WalletActivationProof {
+            scope: kind.activation_scope(),
+        })
     }
 
     #[cfg(test)]
@@ -697,6 +717,9 @@ impl Drop for WalletRuntimeState {
 
 impl Drop for WalletOperationPermit<'_> {
     fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
         let Ok(mut inner) = self.state.lock_inner() else {
             return;
         };
@@ -708,7 +731,7 @@ impl Drop for WalletOperationPermit<'_> {
     }
 }
 
-impl WalletOperationPermit<'_> {
+impl<'a> WalletOperationPermit<'a> {
     /// Proves that no lifecycle event, explicit lock, or newer operation revoked this work.
     pub(in crate::wallet) fn ensure_current(&self) -> Result<(), WalletRuntimeError> {
         if self.state.revocation_is_pending()
@@ -757,6 +780,81 @@ impl WalletOperationPermit<'_> {
         }
         inner.active_operation = None;
         Ok(value)
+    }
+
+    /// Atomically promotes the still-live confirmation operation into signing scope.
+    ///
+    /// Consuming the native approval is mandatory. The old permit is explicitly disarmed before
+    /// it is dropped so it cannot clear the continuously occupied active-operation slot.
+    pub(in crate::wallet) fn promote_to_signing(
+        mut self,
+        _approval: NativeConfirmationApproval,
+        sender_address: &str,
+        sender_public_key: &str,
+    ) -> Result<WalletSigningPermit<'a>, WalletRuntimeError> {
+        if self.kind != WalletOperationKind::ConsumePreview
+            || self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let mut inner = self.state.lock_inner()?;
+        if !self.is_current(&inner)
+            || !inner
+                .active_operation
+                .as_ref()
+                .is_some_and(|operation| operation.kind == WalletOperationKind::ConsumePreview)
+            || self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        if !self
+            .state
+            .activation
+            .is_satisfied(WalletActivationScope::Signing)
+        {
+            return Err(WalletRuntimeError::ActivationUnavailable);
+        }
+        let wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::RuntimeUnavailable)?;
+        let account_matches = inner.public_account.as_ref().is_some_and(|account| {
+            account.wallet_id == wallet_id
+                && account.address == sender_address
+                && account.public_key == sender_public_key
+        });
+        if !account_matches
+            || self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let active = inner
+            .active_operation
+            .as_mut()
+            .ok_or(WalletRuntimeError::RuntimeUnavailable)?;
+        active.kind = WalletOperationKind::Sign;
+        drop(inner);
+
+        let promoted = WalletOperationPermit {
+            state: self.state,
+            generation: self.generation,
+            revocation_epoch: self.revocation_epoch,
+            owner_window: std::mem::take(&mut self.owner_window),
+            kind: WalletOperationKind::Sign,
+            activation_proof: WalletActivationProof {
+                scope: WalletActivationScope::Signing,
+            },
+            armed: true,
+        };
+        self.armed = false;
+        Ok(WalletSigningPermit {
+            permit: promoted,
+            wallet_id,
+            armed: true,
+        })
     }
 
     pub(in crate::wallet) fn current_public_account(
@@ -912,6 +1010,125 @@ impl WalletOperationPermit<'_> {
         inner.active_operation.as_ref().is_some_and(|operation| {
             operation.generation == self.generation && operation.owner_window == self.owner_window
         })
+    }
+}
+
+impl WalletSigningPermit<'_> {
+    pub(in crate::wallet) fn wallet_id(&self) -> &str {
+        self.wallet_id.as_str()
+    }
+
+    pub(in crate::wallet) fn ensure_current(&self) -> Result<(), WalletRuntimeError> {
+        if self.permit.kind != WalletOperationKind::Sign {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        self.permit.ensure_current()?;
+        let inner = self.permit.state.lock_inner()?;
+        if inner
+            .active_operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind == WalletOperationKind::Sign)
+        {
+            Ok(())
+        } else {
+            Err(WalletRuntimeError::RuntimeUnavailable)
+        }
+    }
+
+    pub(in crate::wallet) fn sign_confirmed_intent_with_observer(
+        &self,
+        intent: &BoundTransferPreview,
+        expected_core_contract: &str,
+        expected_status_version: &str,
+        observer: &dyn TransactionSigningObserver,
+    ) -> Result<Result<VisionTransaction, WalletTransactionError>, WalletRuntimeError> {
+        self.ensure_current()?;
+        self.permit.activation_proof.require_signing()?;
+        if !self
+            .permit
+            .state
+            .activation
+            .is_satisfied(WalletActivationScope::Signing)
+        {
+            return Err(WalletRuntimeError::ActivationUnavailable);
+        }
+        let mut inner = self.permit.state.lock_inner()?;
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let active_wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::RuntimeUnavailable)?;
+        let account_matches = active_wallet_id == self.wallet_id
+            && inner.public_account.as_ref().is_some_and(|account| {
+                account.wallet_id == self.wallet_id
+                    && account.address == intent.sender_address()
+                    && account.public_key == intent.sender_public_key()
+            });
+        if !account_matches {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+
+        let signing_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inner.session.with_seed(|wallet_id, seed| {
+                if wallet_id != self.wallet_id {
+                    return Err(WalletTransactionError::InvalidSender);
+                }
+                sign_confirmed_cash_transfer(
+                    &self.permit.activation_proof,
+                    seed,
+                    intent.confirmed_cash_transfer(),
+                    expected_core_contract,
+                    expected_status_version,
+                    observer,
+                )
+            })
+        }));
+        let result = match signing_result {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => return Err(WalletRuntimeError::RuntimeUnavailable),
+            Err(payload) => {
+                self.permit.state.revoke_current_authority();
+                inner.invalidate_all();
+                drop(inner);
+                std::panic::resume_unwind(payload);
+            }
+        };
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(result)
+    }
+
+    pub(in crate::wallet) fn complete<T>(mut self, value: T) -> Result<T, WalletRuntimeError> {
+        let result = self.permit.complete(value);
+        if result.is_ok() {
+            self.armed = false;
+        }
+        result
+    }
+}
+
+impl Drop for WalletSigningPermit<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.permit.state.invalidate_all()
+        })) {
+            Ok(Ok(())) => self.armed = false,
+            Ok(Err(_)) | Err(_) => std::process::abort(),
+        }
     }
 }
 
@@ -1589,6 +1806,18 @@ mod tests {
     }
 
     #[test]
+    fn signing_operation_cannot_be_started_without_native_approval_promotion() {
+        let runtime = WalletRuntimeState::for_test();
+
+        assert_eq!(
+            runtime
+                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
+                .err(),
+            Some(WalletRuntimeError::InvalidRequest)
+        );
+    }
+
+    #[test]
     fn production_activation_policy_issues_no_sensitive_authority() {
         let runtime = Arc::new(WalletRuntimeState::for_test_with_production_activation());
 
@@ -1626,7 +1855,7 @@ mod tests {
             .unwrap();
         runtime.invalidate_all().unwrap();
         let current = runtime
-            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
+            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Unlock)
             .unwrap();
         assert_eq!(
             stale.ensure_current(),
@@ -1636,13 +1865,13 @@ mod tests {
         drop(stale);
         assert_eq!(
             runtime
-                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Unlock)
+                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Restore)
                 .err(),
             Some(WalletRuntimeError::OperationInProgress)
         );
         drop(current);
         runtime
-            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Unlock)
+            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Restore)
             .unwrap();
     }
 
@@ -1752,7 +1981,7 @@ mod tests {
 
         let runtime = WalletRuntimeState::for_test();
         let permit = runtime
-            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
+            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Unlock)
             .unwrap();
         let initial_epoch = permit.revocation_epoch;
         let held_runtime = runtime.inner.lock().unwrap();
@@ -1790,7 +2019,7 @@ mod tests {
     fn completion_cannot_escape_after_revocation() {
         let runtime = WalletRuntimeState::for_test();
         let permit = runtime
-            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
+            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Unlock)
             .unwrap();
         runtime.invalidate_all().unwrap();
         assert_eq!(

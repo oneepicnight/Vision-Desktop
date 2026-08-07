@@ -110,7 +110,9 @@ milliseconds. Any newly associated IME context fails closed. The normal focus-ti
 `ImmReleaseContext` check proves the actual dialog remains disassociated. This behavior follows
 Microsoft's [`WM_IME_SETCONTEXT`](https://learn.microsoft.com/en-us/windows/win32/intl/wm-ime-setcontext)
 and [`ImmGetContext`](https://learn.microsoft.com/en-us/windows/win32/api/imm/nf-imm-immgetcontext)
-contracts.
+contracts. The same balanced absence check gates both security transitions: after focus and before
+the display is armed, and synchronously immediately before an exact Confirm command is accepted.
+Either failure wipes and closes the ceremony without confirmation.
 
 ## Trust-boundary note
 

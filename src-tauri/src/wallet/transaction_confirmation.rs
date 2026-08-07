@@ -681,11 +681,18 @@ unsafe extern "system" fn confirmation_window_proc(
                 return unsafe { DefWindowProcW(window, message, wparam, lparam) };
             }
             match control_id {
-                CONFIRM_BUTTON_ID if consume_fresh_confirmation_command(state, lparam as HWND) => {
-                    state.outcome = ConfirmationOutcome::Confirmed;
-                    state.wipe();
-                    unsafe { DestroyWindow(window) };
-                    0
+                CONFIRM_BUTTON_ID => {
+                    if !confirmation_input_contexts_are_absent(window, state) {
+                        return fail_closed_window(window, state);
+                    }
+                    if consume_fresh_confirmation_command(state, lparam as HWND) {
+                        state.outcome = ConfirmationOutcome::Confirmed;
+                        state.wipe();
+                        unsafe { DestroyWindow(window) };
+                        0
+                    } else {
+                        unsafe { DefWindowProcW(window, message, wparam, lparam) }
+                    }
                 }
                 CANCEL_BUTTON_ID if lparam as HWND == state.cancel_button => {
                     state.outcome = ConfirmationOutcome::Cancelled;
@@ -697,7 +704,7 @@ unsafe extern "system" fn confirmation_window_proc(
             }
         }
         WM_PAINT => {
-            if !paint_confirmation(window, state) || !arm_confirmation(state) {
+            if !paint_confirmation(window, state) || !arm_confirmation(window, state) {
                 return fail_closed_window(window, state);
             }
             0
@@ -735,7 +742,7 @@ fn fail_closed_window(window: HWND, state: &mut ConfirmationDialogState) -> LRES
     0
 }
 
-fn arm_confirmation(state: &mut ConfirmationDialogState) -> bool {
+fn arm_confirmation(window: HWND, state: &mut ConfirmationDialogState) -> bool {
     if state.display_verified {
         return true;
     }
@@ -764,6 +771,7 @@ fn arm_confirmation(state: &mut ConfirmationDialogState) -> bool {
         || cancel_style & BS_TYPEMASK != BS_PUSHBUTTON
         || unsafe { IsWindowEnabled(state.confirm_button) } == 0
         || unsafe { GetFocus() } != state.confirm_button
+        || !confirmation_input_contexts_are_absent(window, state)
     {
         return false;
     }
@@ -1651,6 +1659,69 @@ mod tests {
     }
 
     #[test]
+    fn arming_fails_closed_when_focus_has_an_associated_input_context() {
+        let window = hidden_test_window();
+        assert!(!window.is_null());
+        assert!(disable_text_services(window));
+        let (confirm, cancel) = create_buttons(window).unwrap();
+        let mut state = dialog_state_for_test();
+        state.confirm_button = confirm;
+        state.cancel_button = cancel;
+
+        let input_context = unsafe { ImmCreateContext() };
+        assert!(!input_context.is_null());
+        assert!(unsafe { ImmAssociateContext(confirm, input_context) }.is_null());
+        assert!(!arm_confirmation(window, &mut state));
+        assert!(!state.display_verified);
+        assert!(state.display_verified_at.is_none());
+
+        fail_closed_window(window, &mut state);
+        assert_eq!(state.outcome, ConfirmationOutcome::Failed);
+        assert!(state.display.is_wiped());
+        assert_eq!(unsafe { IsWindow(window) }, 0);
+        assert_ne!(unsafe { ImmDestroyContext(input_context) }, 0);
+    }
+
+    #[test]
+    fn final_confirm_fails_closed_when_context_appears_after_the_last_poll() {
+        let window = hidden_test_window();
+        assert!(!window.is_null());
+        assert!(disable_text_services(window));
+        let (confirm, cancel) = create_buttons(window).unwrap();
+        let mut state = dialog_state_for_test();
+        state.confirm_button = confirm;
+        state.cancel_button = cancel;
+        state.display_verified = true;
+        state.display_verified_at = Some(unsafe { GetTickCount() }.wrapping_sub(1));
+        state.fresh_input_time = Some(unsafe { GetMessageTime() } as u32);
+        unsafe { EnableWindow(confirm, 1) };
+        assert!(confirmation_input_contexts_are_absent(window, &state));
+
+        let input_context = unsafe { ImmCreateContext() };
+        assert!(!input_context.is_null());
+        assert!(unsafe { ImmAssociateContext(window, input_context) }.is_null());
+        assert!(!confirmation_input_contexts_are_absent(window, &state));
+        unsafe {
+            SetWindowLongPtrW(
+                window,
+                GWLP_USERDATA,
+                (&mut state as *mut ConfirmationDialogState) as isize,
+            );
+            confirmation_window_proc(
+                window,
+                WM_COMMAND,
+                CONFIRM_BUTTON_ID | ((BN_CLICKED as usize) << 16),
+                confirm as LPARAM,
+            );
+        }
+
+        assert_eq!(state.outcome, ConfirmationOutcome::Failed);
+        assert!(state.display.is_wiped());
+        assert_eq!(unsafe { IsWindow(window) }, 0);
+        assert_ne!(unsafe { ImmDestroyContext(input_context) }, 0);
+    }
+
+    #[test]
     fn only_a_complete_post_display_hardware_press_creates_fresh_input() {
         let window = hidden_test_window();
         assert!(!window.is_null());
@@ -1836,7 +1907,8 @@ mod tests {
         let mut state = dialog_state_for_test();
         state.confirm_button = confirm;
         state.cancel_button = cancel;
-        assert!(arm_confirmation(&mut state));
+        assert!(disable_text_services(window));
+        assert!(arm_confirmation(window, &mut state));
         unsafe { DestroyWindow(window) };
     }
 

@@ -74,7 +74,10 @@ confirm action. Windows' normal focus-time `WM_IME_SETCONTEXT` notification is s
 after a balanced live check proves that the window remains disassociated; an associated context or
 any composition/input-language route fails closed. While the dialog remains open, the same-thread
 timer rechecks the live input-context association for the dialog and both focusable controls every
-250 milliseconds. Its temporary UTF-16 transaction buffers are zeroized on every exit.
+250 milliseconds. IME absence is also revalidated synchronously after focus and before the display
+is armed, and again immediately before the exact Confirm command can release authority. Failure at
+either transition wipes and closes the ceremony. Its temporary UTF-16 transaction buffers are
+zeroized on every exit.
 
 Cancellation, owner loss, UI failure, panic, Core exit or generation change, wallet/runtime
 revocation, and stale authority destroy the consumed intent without producing confirmation

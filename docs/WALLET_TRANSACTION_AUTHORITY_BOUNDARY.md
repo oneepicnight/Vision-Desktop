@@ -75,8 +75,15 @@ confirm action. Its temporary UTF-16 transaction buffers are zeroized on every e
 Cancellation, owner loss, UI failure, panic, Core exit or generation change, wallet/runtime
 revocation, and stale authority destroy the consumed intent without producing confirmation
 authority. Panic containment invalidates the wallet runtime or terminates if invalidation cannot be
-proven. Only a successful final authority check releases a distinct Rust-only confirmed-intent
-type; that type is not signing authority and has no Clone, Debug, or serialization implementation.
+proven. The Confirm control begins disabled and non-default. It is armed only after every required
+value has been measured to fit its fixed bounds and every checked Win32 draw operation completes.
+Approval then requires a complete, fresh, post-display hardware keyboard or mouse press delivered
+by the exact armed control; pre-display, repeated-key, injected, wrong-control, and synthetic
+command paths fail closed. Only the native-confirmation module can construct the private,
+non-forgeable approval capability consumed by the preview boundary, so a future sibling wallet
+module cannot complete the intent directly. A successful final authority check then releases a
+distinct Rust-only confirmed-intent type; that type is not signing authority and has no Clone,
+Debug, or serialization implementation.
 
 This candidate registers no command, permission, capability, AppManifest entry, managed Tauri
 state, frontend wrapper, or form. It accesses no seed, creates no signature, performs no network

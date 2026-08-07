@@ -177,7 +177,10 @@ impl<S: WalletCoreReadSource> PendingTransferConfirmation<'_, S> {
         self.validate_current().is_ok()
     }
 
-    pub(in crate::wallet) fn confirm(self) -> Result<ConfirmedTransferIntent, WalletPreviewError> {
+    pub(in crate::wallet) fn complete_with_native_approval(
+        self,
+        _approval: super::transaction_confirmation::NativeConfirmationApproval,
+    ) -> Result<ConfirmedTransferIntent, WalletPreviewError> {
         self.validate_current()?;
         let Self {
             permit,

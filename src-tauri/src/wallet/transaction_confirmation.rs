@@ -34,28 +34,34 @@ use windows_sys::Win32::{
     Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::Gdi::{
         BeginPaint, DrawTextW, EndPaint, GetStockObject, GetSysColorBrush, SelectObject, SetBkMode,
-        COLOR_WINDOW, DEFAULT_GUI_FONT, DT_LEFT, DT_SINGLELINE, DT_WORDBREAK, PAINTSTRUCT,
-        TRANSPARENT,
+        COLOR_WINDOW, DEFAULT_GUI_FONT, DT_CALCRECT, DT_LEFT, DT_SINGLELINE, DT_WORDBREAK,
+        PAINTSTRUCT, TRANSPARENT,
     },
-    System::LibraryLoader::GetModuleHandleW,
+    System::{LibraryLoader::GetModuleHandleW, SystemInformation::GetTickCount},
     UI::{
         Input::{
+            GetCurrentInputMessageSource,
             Ime::{ImmAssociateContextEx, ImmGetContext, ImmReleaseContext},
-            KeyboardAndMouse::{EnableWindow, SetFocus},
+            KeyboardAndMouse::{
+                EnableWindow, GetFocus, IsWindowEnabled, SetFocus, VK_RETURN, VK_SPACE,
+            },
+            IMDT_KEYBOARD, IMDT_MOUSE, IMO_HARDWARE, INPUT_MESSAGE_SOURCE,
         },
         WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-            GetWindowLongPtrW, GetWindowRect, IsDialogMessageW, IsWindow, KillTimer, LoadCursorW,
-            PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-            ShowWindow, TranslateMessage, UnregisterClassW, BN_CLICKED, BS_DEFPUSHBUTTON,
-            BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, IDC_ARROW, MSG,
-            SW_SHOW, WM_CHAR, WM_CLEAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE,
-            WM_CUT, WM_GETTEXT, WM_GETTEXTLENGTH, WM_IME_CHAR, WM_IME_COMPOSITION,
-            WM_IME_COMPOSITIONFULL, WM_IME_CONTROL, WM_IME_ENDCOMPOSITION, WM_IME_KEYDOWN,
-            WM_IME_KEYUP, WM_IME_NOTIFY, WM_IME_REQUEST, WM_IME_SELECT, WM_IME_SETCONTEXT,
-            WM_IME_STARTCOMPOSITION, WM_INPUTLANGCHANGE, WM_INPUTLANGCHANGEREQUEST, WM_NCCREATE,
-            WM_NCDESTROY, WM_PAINT, WM_PASTE, WM_SETTEXT, WM_TIMER, WNDCLASSEXW, WS_CAPTION,
-            WS_CHILD, WS_EX_DLGMODALFRAME, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageTime,
+            GetMessageW, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW, IsWindow, KillTimer,
+            LoadCursorW, PostQuitMessage, RegisterClassExW, SendMessageW, SetForegroundWindow,
+            SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage, UnregisterClassW,
+            BM_SETSTYLE, BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CREATESTRUCTW,
+            CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_STYLE, IDC_ARROW, MSG, SW_SHOW, WM_CHAR,
+            WM_CLEAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CREATE, WM_CUT, WM_GETTEXT,
+            WM_GETTEXTLENGTH, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_COMPOSITIONFULL,
+            WM_IME_CONTROL, WM_IME_ENDCOMPOSITION, WM_IME_KEYDOWN, WM_IME_KEYUP, WM_IME_NOTIFY,
+            WM_IME_REQUEST, WM_IME_SELECT, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION,
+            WM_INPUTLANGCHANGE, WM_INPUTLANGCHANGEREQUEST, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+            WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_PASTE, WM_SETTEXT, WM_TIMER,
+            WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_DLGMODALFRAME, WS_POPUP, WS_SYSMENU,
+            WS_TABSTOP, WS_VISIBLE,
         },
     },
 };
@@ -69,6 +75,29 @@ const CONFIRM_BUTTON_ID: usize = 2001;
 const CANCEL_BUTTON_ID: usize = 2002;
 
 static CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// A non-forgeable proof issued only after this module's native ceremony reports an explicit,
+/// post-render hardware approval. Sibling wallet modules can name and consume this type, but its
+/// private non-zero-sized field prevents them from constructing it in safe Rust.
+pub(in crate::wallet) struct NativeConfirmationApproval {
+    _proof: NativeConfirmationApprovalProof,
+}
+
+struct NativeConfirmationApprovalProof(u8);
+
+impl NativeConfirmationApproval {
+    fn issue() -> Self {
+        Self {
+            _proof: NativeConfirmationApprovalProof(0xA5),
+        }
+    }
+}
+
+impl Drop for NativeConfirmationApprovalProof {
+    fn drop(&mut self) {
+        self.0 = 0;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::wallet) enum WalletConfirmationError {
@@ -175,7 +204,9 @@ impl<'a> WalletTransactionConfirmationEngine<'a> {
         self.ceremony
             .present(fields, &|| pending.authority_is_current())
             .map_err(map_native_error)?;
-        pending.confirm().map_err(map_preview_error)
+        pending
+            .complete_with_native_approval(NativeConfirmationApproval::issue())
+            .map_err(map_preview_error)
     }
 
     fn run_fail_closed<T>(
@@ -301,10 +332,23 @@ impl ConfirmationDisplayBuffers {
 struct ConfirmationDialogState {
     display: ConfirmationDisplayBuffers,
     outcome: ConfirmationOutcome,
+    confirm_button: HWND,
+    cancel_button: HWND,
+    display_verified: bool,
+    display_verified_at: Option<u32>,
+    press_started_after_display: bool,
+    fresh_input_time: Option<u32>,
 }
 
 impl ConfirmationDialogState {
     fn wipe(&mut self) {
+        if !self.confirm_button.is_null() && unsafe { IsWindow(self.confirm_button) } != 0 {
+            unsafe { EnableWindow(self.confirm_button, 0) };
+        }
+        self.display_verified = false;
+        self.display_verified_at = None;
+        self.press_started_after_display = false;
+        self.fresh_input_time = None;
         self.display.wipe();
     }
 }
@@ -353,6 +397,12 @@ fn run_native_confirmation(
     let mut state = ConfirmationDialogState {
         display: ConfirmationDisplayBuffers::new(fields),
         outcome: ConfirmationOutcome::Pending,
+        confirm_button: null_mut(),
+        cancel_button: null_mut(),
+        display_verified: false,
+        display_verified_at: None,
+        press_started_after_display: false,
+        fresh_input_time: None,
     };
     let title = wide_null("Confirm Vision Transaction");
     let dialog = unsafe {
@@ -412,6 +462,7 @@ fn run_native_confirmation(
             unsafe { DestroyWindow(dialog) };
             continue;
         }
+        record_fresh_confirmation_input(&mut state, &message);
         if unsafe { IsDialogMessageW(dialog, &message) } == 0 {
             unsafe {
                 TranslateMessage(&message);
@@ -461,10 +512,16 @@ unsafe extern "system" fn confirmation_window_proc(
 
     match message {
         WM_CREATE => {
-            if !disable_text_services(window) || !create_buttons(window) {
+            if !disable_text_services(window) {
                 state.outcome = ConfirmationOutcome::Failed;
                 return -1;
             }
+            let Some((confirm_button, cancel_button)) = create_buttons(window) else {
+                state.outcome = ConfirmationOutcome::Failed;
+                return -1;
+            };
+            state.confirm_button = confirm_button;
+            state.cancel_button = cancel_button;
             0
         }
         WM_COMMAND => {
@@ -474,13 +531,13 @@ unsafe extern "system" fn confirmation_window_proc(
                 return unsafe { DefWindowProcW(window, message, wparam, lparam) };
             }
             match control_id {
-                CONFIRM_BUTTON_ID => {
+                CONFIRM_BUTTON_ID if consume_fresh_confirmation_command(state, lparam as HWND) => {
                     state.outcome = ConfirmationOutcome::Confirmed;
                     state.wipe();
                     unsafe { DestroyWindow(window) };
                     0
                 }
-                CANCEL_BUTTON_ID => {
+                CANCEL_BUTTON_ID if lparam as HWND == state.cancel_button => {
                     state.outcome = ConfirmationOutcome::Cancelled;
                     state.wipe();
                     unsafe { DestroyWindow(window) };
@@ -490,7 +547,9 @@ unsafe extern "system" fn confirmation_window_proc(
             }
         }
         WM_PAINT => {
-            paint_confirmation(window, state);
+            if !paint_confirmation(window, state) || !arm_confirmation(state) {
+                return fail_closed_window(window, state);
+            }
             0
         }
         WM_COPY | WM_CUT | WM_PASTE | WM_CLEAR | WM_CONTEXTMENU | WM_GETTEXT | WM_GETTEXTLENGTH
@@ -519,37 +578,162 @@ fn fail_closed_window(window: HWND, state: &mut ConfirmationDialogState) -> LRES
     0
 }
 
-fn paint_confirmation(window: HWND, state: &ConfirmationDialogState) {
+fn arm_confirmation(state: &mut ConfirmationDialogState) -> bool {
+    if state.display_verified {
+        return true;
+    }
+    if state.confirm_button.is_null()
+        || state.cancel_button.is_null()
+        || unsafe { IsWindow(state.confirm_button) } == 0
+        || unsafe { IsWindow(state.cancel_button) } == 0
+        || unsafe { IsWindowEnabled(state.confirm_button) } != 0
+    {
+        return false;
+    }
+    unsafe {
+        SendMessageW(state.cancel_button, BM_SETSTYLE, BS_PUSHBUTTON as usize, 1);
+        SendMessageW(
+            state.confirm_button,
+            BM_SETSTYLE,
+            BS_DEFPUSHBUTTON as usize,
+            1,
+        );
+        EnableWindow(state.confirm_button, 1);
+        SetFocus(state.confirm_button);
+    }
+    let confirm_style = unsafe { GetWindowLongPtrW(state.confirm_button, GWL_STYLE) } as i32;
+    let cancel_style = unsafe { GetWindowLongPtrW(state.cancel_button, GWL_STYLE) } as i32;
+    if confirm_style & BS_TYPEMASK != BS_DEFPUSHBUTTON
+        || cancel_style & BS_TYPEMASK != BS_PUSHBUTTON
+        || unsafe { IsWindowEnabled(state.confirm_button) } == 0
+        || unsafe { GetFocus() } != state.confirm_button
+    {
+        return false;
+    }
+    state.display_verified = true;
+    state.display_verified_at = Some(unsafe { GetTickCount() });
+    true
+}
+
+fn record_fresh_confirmation_input(state: &mut ConfirmationDialogState, message: &MSG) {
+    let mut source = INPUT_MESSAGE_SOURCE::default();
+    let source = if unsafe { GetCurrentInputMessageSource(&mut source) } != 0 {
+        Some(source)
+    } else {
+        None
+    };
+    apply_confirmation_input_source(state, message, source);
+}
+
+fn apply_confirmation_input_source(
+    state: &mut ConfirmationDialogState,
+    message: &MSG,
+    source: Option<INPUT_MESSAGE_SOURCE>,
+) {
+    state.fresh_input_time = None;
+    let Some(source) = source else {
+        state.press_started_after_display = false;
+        return;
+    };
+    if !state.display_verified
+        || message.hwnd != state.confirm_button
+        || source.originId != IMO_HARDWARE
+        || !state
+            .display_verified_at
+            .is_some_and(|verified_at| tick_is_strictly_after(message.time, verified_at))
+    {
+        state.press_started_after_display = false;
+        return;
+    }
+
+    let keyboard_key = u16::try_from(message.wParam).unwrap_or_default();
+    match message.message {
+        WM_LBUTTONDOWN if source.deviceType == IMDT_MOUSE => {
+            state.press_started_after_display = true;
+        }
+        WM_LBUTTONUP if source.deviceType == IMDT_MOUSE => {
+            if state.press_started_after_display {
+                state.fresh_input_time = Some(message.time);
+            }
+            state.press_started_after_display = false;
+        }
+        WM_KEYDOWN
+            if source.deviceType == IMDT_KEYBOARD
+                && (keyboard_key == VK_RETURN || keyboard_key == VK_SPACE)
+                && (message.lParam & (1_isize << 30)) == 0 =>
+        {
+            state.press_started_after_display = true;
+        }
+        WM_KEYUP
+            if source.deviceType == IMDT_KEYBOARD
+                && (keyboard_key == VK_RETURN || keyboard_key == VK_SPACE) =>
+        {
+            if state.press_started_after_display {
+                state.fresh_input_time = Some(message.time);
+            }
+            state.press_started_after_display = false;
+        }
+        _ => state.press_started_after_display = false,
+    }
+}
+
+const fn tick_is_strictly_after(candidate: u32, baseline: u32) -> bool {
+    let elapsed = candidate.wrapping_sub(baseline);
+    elapsed != 0 && elapsed < (1_u32 << 31)
+}
+
+fn consume_fresh_confirmation_command(state: &mut ConfirmationDialogState, control: HWND) -> bool {
+    let fresh_input_time = state.fresh_input_time.take();
+    let approved = state.display_verified
+        && !state.confirm_button.is_null()
+        && control == state.confirm_button
+        && unsafe { IsWindow(state.confirm_button) } != 0
+        && unsafe { IsWindowEnabled(state.confirm_button) } != 0
+        && fresh_input_time == Some(unsafe { GetMessageTime() } as u32);
+    state.press_started_after_display = false;
+    approved
+}
+
+fn paint_confirmation(window: HWND, state: &ConfirmationDialogState) -> bool {
     let mut paint = PAINTSTRUCT::default();
     let device = unsafe { BeginPaint(window, &mut paint) };
     if device.is_null() {
-        return;
+        return false;
     }
     let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+    if font.is_null() {
+        unsafe { EndPaint(window, &paint) };
+        return false;
+    }
     let previous = unsafe { SelectObject(device, font) };
-    unsafe { SetBkMode(device, i32::try_from(TRANSPARENT).unwrap_or(1)) };
+    if previous.is_null()
+        || unsafe { SetBkMode(device, i32::try_from(TRANSPARENT).unwrap_or(1)) } == 0
+    {
+        unsafe { EndPaint(window, &paint) };
+        return false;
+    }
 
-    draw_literal(
+    let mut rendered = draw_literal(
         device,
         "Verify every value. This confirms only this exact unsigned transaction; it does not sign or submit it.",
         RECT { left: 24, top: 18, right: 816, bottom: 54 },
         DT_LEFT | DT_WORDBREAK,
     );
-    draw_label(device, "Sender", 70);
-    draw_buffer(device, &state.display.sender, 92, 132);
-    draw_label(device, "Recipient", 142);
-    draw_buffer(device, &state.display.recipient, 164, 204);
-    draw_label(device, "Amount", 214);
-    draw_buffer(device, &state.display.amount, 236, 260);
-    draw_label(device, "Fees", 270);
-    draw_buffer(device, &state.display.fee, 292, 318);
-    draw_label(device, "Total debit", 328);
-    draw_buffer(device, &state.display.total, 350, 374);
-    draw_label(device, "Nonce", 384);
-    draw_buffer(device, &state.display.nonce, 406, 430);
-    draw_label(device, "Transaction identifier", 440);
-    draw_buffer(device, &state.display.transaction_id, 462, 502);
-    draw_literal(
+    rendered &= draw_label(device, "Sender", 70);
+    rendered &= draw_buffer(device, &state.display.sender, 92, 132);
+    rendered &= draw_label(device, "Recipient", 142);
+    rendered &= draw_buffer(device, &state.display.recipient, 164, 204);
+    rendered &= draw_label(device, "Amount", 214);
+    rendered &= draw_buffer(device, &state.display.amount, 236, 260);
+    rendered &= draw_label(device, "Fees", 270);
+    rendered &= draw_buffer(device, &state.display.fee, 292, 318);
+    rendered &= draw_label(device, "Total debit", 328);
+    rendered &= draw_buffer(device, &state.display.total, 350, 374);
+    rendered &= draw_label(device, "Nonce", 384);
+    rendered &= draw_buffer(device, &state.display.nonce, 406, 430);
+    rendered &= draw_label(device, "Transaction identifier", 440);
+    rendered &= draw_buffer(device, &state.display.transaction_id, 462, 502);
+    rendered &= draw_literal(
         device,
         "Mined transactions can reorganize and are never presented as irreversible.",
         RECT {
@@ -561,13 +745,14 @@ fn paint_confirmation(window: HWND, state: &ConfirmationDialogState) {
         DT_LEFT | DT_WORDBREAK,
     );
 
-    unsafe {
+    let paint_ended = unsafe {
         SelectObject(device, previous);
-        EndPaint(window, &paint);
-    }
+        EndPaint(window, &paint)
+    } != 0;
+    rendered && paint_ended
 }
 
-fn draw_label(device: windows_sys::Win32::Graphics::Gdi::HDC, label: &str, top: i32) {
+fn draw_label(device: windows_sys::Win32::Graphics::Gdi::HDC, label: &str, top: i32) -> bool {
     draw_literal(
         device,
         label,
@@ -578,7 +763,7 @@ fn draw_label(device: windows_sys::Win32::Graphics::Gdi::HDC, label: &str, top: 
             bottom: top + 20,
         },
         DT_LEFT | DT_SINGLELINE,
-    );
+    )
 }
 
 fn draw_literal(
@@ -586,17 +771,9 @@ fn draw_literal(
     text: &str,
     mut bounds: RECT,
     format: u32,
-) {
+) -> bool {
     let wide: Vec<u16> = text.encode_utf16().collect();
-    unsafe {
-        DrawTextW(
-            device,
-            wide.as_ptr(),
-            i32::try_from(wide.len()).unwrap_or(i32::MAX),
-            &mut bounds,
-            format,
-        )
-    };
+    draw_text_checked(device, &wide, &mut bounds, format)
 }
 
 fn draw_buffer(
@@ -604,25 +781,56 @@ fn draw_buffer(
     text: &[u16],
     top: i32,
     bottom: i32,
-) {
+) -> bool {
     let mut bounds = RECT {
         left: 24,
         top,
         right: 816,
         bottom,
     };
-    unsafe {
+    draw_text_checked(device, text, &mut bounds, DT_LEFT | DT_WORDBREAK)
+}
+
+fn draw_text_checked(
+    device: windows_sys::Win32::Graphics::Gdi::HDC,
+    text: &[u16],
+    bounds: &mut RECT,
+    format: u32,
+) -> bool {
+    if device.is_null()
+        || text.is_empty()
+        || bounds.right <= bounds.left
+        || bounds.bottom <= bounds.top
+    {
+        return false;
+    }
+    let available_width = bounds.right - bounds.left;
+    let available_height = bounds.bottom - bounds.top;
+    let mut measured = RECT {
+        left: 0,
+        top: 0,
+        right: available_width,
+        bottom: available_height,
+    };
+    let length = i32::try_from(text.len()).unwrap_or(i32::MAX);
+    if unsafe {
         DrawTextW(
             device,
             text.as_ptr(),
-            i32::try_from(text.len()).unwrap_or(i32::MAX),
-            &mut bounds,
-            DT_LEFT | DT_WORDBREAK,
+            length,
+            &mut measured,
+            format | DT_CALCRECT,
         )
-    };
+    } <= 0
+        || measured.right - measured.left > available_width
+        || measured.bottom - measured.top > available_height
+    {
+        return false;
+    }
+    (unsafe { DrawTextW(device, text.as_ptr(), length, bounds, format) }) > 0
 }
 
-fn create_buttons(window: HWND) -> bool {
+fn create_buttons(window: HWND) -> Option<(HWND, HWND)> {
     let button_class = wide_null("BUTTON");
     let confirm_text = wide_null("Confirm exact transaction");
     let cancel_text = wide_null("Cancel");
@@ -630,7 +838,7 @@ fn create_buttons(window: HWND) -> bool {
         window,
         &button_class,
         &confirm_text,
-        BS_DEFPUSHBUTTON as u32,
+        BS_PUSHBUTTON as u32,
         520,
         558,
         190,
@@ -640,13 +848,30 @@ fn create_buttons(window: HWND) -> bool {
         window,
         &button_class,
         &cancel_text,
-        BS_PUSHBUTTON as u32,
+        BS_DEFPUSHBUTTON as u32,
         724,
         558,
         90,
         CANCEL_BUTTON_ID,
     );
-    !confirm.is_null() && !cancel.is_null()
+    if confirm.is_null() || cancel.is_null() {
+        if !confirm.is_null() {
+            unsafe { DestroyWindow(confirm) };
+        }
+        if !cancel.is_null() {
+            unsafe { DestroyWindow(cancel) };
+        }
+        return None;
+    }
+    unsafe { EnableWindow(confirm, 0) };
+    if unsafe { IsWindowEnabled(confirm) } != 0 {
+        unsafe {
+            DestroyWindow(confirm);
+            DestroyWindow(cancel);
+        }
+        return None;
+    }
+    Some((confirm, cancel))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -786,6 +1011,10 @@ mod tests {
         vault::EncryptedWalletVault,
     };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use windows_sys::Win32::{
+        Graphics::Gdi::{CreateCompatibleDC, DeleteDC},
+        UI::Input::IMO_INJECTED,
+    };
 
     const MAIN: &str = "main";
     const PASSWORD: &str = "correct horse battery staple";
@@ -854,6 +1083,51 @@ mod tests {
             "amount": "2.5"
         }))
         .unwrap()
+    }
+
+    fn dialog_state_for_test() -> ConfirmationDialogState {
+        let sender = "5".repeat(64);
+        let recipient = "6".repeat(64);
+        let transaction_id = "7".repeat(64);
+        ConfirmationDialogState {
+            display: ConfirmationDisplayBuffers::new(TransferConfirmationFields {
+                sender_address: &sender,
+                recipient_address: &recipient,
+                amount_raw_units: 1,
+                charged_fee_raw_units: 1,
+                fee_limit_raw_units: 201,
+                total_debit_raw_units: 2,
+                nonce: 7,
+                transaction_id: &transaction_id,
+            }),
+            outcome: ConfirmationOutcome::Pending,
+            confirm_button: null_mut(),
+            cancel_button: null_mut(),
+            display_verified: false,
+            display_verified_at: None,
+            press_started_after_display: false,
+            fresh_input_time: None,
+        }
+    }
+
+    fn hidden_test_window() -> HWND {
+        let button_class = wide_null("BUTTON");
+        unsafe {
+            CreateWindowExW(
+                0,
+                button_class.as_ptr(),
+                null(),
+                WS_POPUP,
+                0,
+                0,
+                DIALOG_WIDTH,
+                DIALOG_HEIGHT,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        }
     }
 
     fn pending<'a>(
@@ -1109,41 +1383,10 @@ mod tests {
 
     #[test]
     fn unexpected_character_input_wipes_and_closes_the_native_confirmation() {
-        let button_class = wide_null("BUTTON");
-        let window = unsafe {
-            CreateWindowExW(
-                0,
-                button_class.as_ptr(),
-                null(),
-                WS_POPUP,
-                0,
-                0,
-                1,
-                1,
-                null_mut(),
-                null_mut(),
-                GetModuleHandleW(null()),
-                null_mut(),
-            )
-        };
+        let window = hidden_test_window();
         assert!(!window.is_null());
 
-        let sender = "5".repeat(64);
-        let recipient = "6".repeat(64);
-        let transaction_id = "7".repeat(64);
-        let mut state = ConfirmationDialogState {
-            display: ConfirmationDisplayBuffers::new(TransferConfirmationFields {
-                sender_address: &sender,
-                recipient_address: &recipient,
-                amount_raw_units: 1,
-                charged_fee_raw_units: 1,
-                fee_limit_raw_units: 201,
-                total_debit_raw_units: 2,
-                nonce: 7,
-                transaction_id: &transaction_id,
-            }),
-            outcome: ConfirmationOutcome::Pending,
-        };
+        let mut state = dialog_state_for_test();
         unsafe {
             SetWindowLongPtrW(
                 window,
@@ -1155,6 +1398,146 @@ mod tests {
         assert_eq!(state.outcome, ConfirmationOutcome::Failed);
         assert!(state.display.is_wiped());
         assert_eq!(unsafe { IsWindow(window) }, 0);
+    }
+
+    #[test]
+    fn confirmation_stays_disabled_until_verified_display_and_exact_fresh_command() {
+        let window = hidden_test_window();
+        assert!(!window.is_null());
+        let (confirm, cancel) = create_buttons(window).unwrap();
+        let mut state = dialog_state_for_test();
+        state.confirm_button = confirm;
+        state.cancel_button = cancel;
+
+        assert_eq!(unsafe { IsWindowEnabled(confirm) }, 0);
+        state.fresh_input_time = Some(unsafe { GetMessageTime() } as u32);
+        assert!(!consume_fresh_confirmation_command(&mut state, confirm));
+
+        state.display_verified = true;
+        state.display_verified_at = Some(100);
+        unsafe { EnableWindow(confirm, 1) };
+        state.fresh_input_time = Some(unsafe { GetMessageTime() } as u32);
+        assert!(!consume_fresh_confirmation_command(&mut state, cancel));
+        state.fresh_input_time = Some(unsafe { GetMessageTime() } as u32);
+        assert!(consume_fresh_confirmation_command(&mut state, confirm));
+        assert!(state.fresh_input_time.is_none());
+
+        unsafe { DestroyWindow(window) };
+    }
+
+    #[test]
+    fn only_a_complete_post_display_hardware_press_creates_fresh_input() {
+        let window = hidden_test_window();
+        assert!(!window.is_null());
+        let (confirm, cancel) = create_buttons(window).unwrap();
+        let mut state = dialog_state_for_test();
+        state.confirm_button = confirm;
+        state.cancel_button = cancel;
+
+        let hardware_keyboard = INPUT_MESSAGE_SOURCE {
+            deviceType: IMDT_KEYBOARD,
+            originId: IMO_HARDWARE,
+        };
+        let injected_mouse = INPUT_MESSAGE_SOURCE {
+            deviceType: IMDT_MOUSE,
+            originId: IMO_INJECTED,
+        };
+        let mut message = MSG {
+            hwnd: confirm,
+            message: WM_KEYDOWN,
+            wParam: usize::from(VK_RETURN),
+            lParam: 0,
+            time: 101,
+            ..MSG::default()
+        };
+
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        message.message = WM_KEYUP;
+        message.time = 102;
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        assert!(state.fresh_input_time.is_none());
+
+        state.display_verified = true;
+        state.display_verified_at = Some(100);
+        message.message = WM_KEYDOWN;
+        message.lParam = 0;
+        message.time = 99;
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        message.message = WM_KEYUP;
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        assert!(state.fresh_input_time.is_none());
+
+        message.message = WM_KEYDOWN;
+        message.lParam = 1_isize << 30;
+        message.time = 101;
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        message.message = WM_KEYUP;
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        assert!(state.fresh_input_time.is_none());
+
+        message.message = WM_LBUTTONDOWN;
+        message.lParam = 0;
+        apply_confirmation_input_source(&mut state, &message, Some(injected_mouse));
+        message.message = WM_LBUTTONUP;
+        apply_confirmation_input_source(&mut state, &message, Some(injected_mouse));
+        assert!(state.fresh_input_time.is_none());
+
+        message.message = WM_KEYDOWN;
+        message.wParam = usize::from(VK_RETURN);
+        message.time = 201;
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        message.message = WM_KEYUP;
+        message.time = 202;
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        assert_eq!(state.fresh_input_time, Some(202));
+
+        message.hwnd = cancel;
+        message.message = WM_KEYDOWN;
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        assert!(state.fresh_input_time.is_none());
+
+        unsafe { DestroyWindow(window) };
+    }
+
+    #[test]
+    fn text_rendering_rejects_content_that_does_not_fit_its_verified_bounds() {
+        let device = unsafe { CreateCompatibleDC(null_mut()) };
+        assert!(!device.is_null());
+        let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+        assert!(!font.is_null());
+        let previous = unsafe { SelectObject(device, font) };
+        assert!(!previous.is_null());
+        let text: Vec<u16> = "Complete verified transaction value"
+            .encode_utf16()
+            .collect();
+        let mut too_small = RECT {
+            left: 0,
+            top: 0,
+            right: 1,
+            bottom: 1,
+        };
+        assert!(!draw_text_checked(
+            device,
+            &text,
+            &mut too_small,
+            DT_LEFT | DT_SINGLELINE
+        ));
+        let mut sufficient = RECT {
+            left: 0,
+            top: 0,
+            right: 800,
+            bottom: 40,
+        };
+        assert!(draw_text_checked(
+            device,
+            &text,
+            &mut sufficient,
+            DT_LEFT | DT_SINGLELINE
+        ));
+        unsafe {
+            SelectObject(device, previous);
+            DeleteDC(device);
+        }
     }
 
     #[test]
@@ -1175,5 +1558,10 @@ mod tests {
         assert!(production.contains("ImmAssociateContextEx"));
         assert!(production.contains("ImmGetContext"));
         assert!(production.contains("ImmReleaseContext"));
+        assert!(production.contains("NativeConfirmationApproval::issue()"));
+        let preview_source = include_str!("preview.rs");
+        assert!(!preview_source.contains("pub(in crate::wallet) fn confirm("));
+        assert!(preview_source
+            .contains("_approval: super::transaction_confirmation::NativeConfirmationApproval"));
     }
 }

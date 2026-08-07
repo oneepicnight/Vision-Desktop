@@ -291,6 +291,12 @@ enum ConfirmationInputDevice {
     Mouse,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfirmationPress {
+    Keyboard(u16),
+    Mouse,
+}
+
 struct ConfirmationDisplayBuffers {
     sender: Zeroizing<Vec<u16>>,
     recipient: Zeroizing<Vec<u16>>,
@@ -361,7 +367,7 @@ struct ConfirmationDialogState {
     cancel_button: HWND,
     display_verified: bool,
     display_verified_at: Option<u32>,
-    press_started_after_display: Option<ConfirmationInputDevice>,
+    press_started_after_display: Option<ConfirmationPress>,
     fresh_input_time: Option<u32>,
     fresh_input_device: Option<ConfirmationInputDevice>,
 }
@@ -834,10 +840,10 @@ fn apply_confirmation_input_source(
     let keyboard_key = u16::try_from(message.wParam).unwrap_or_default();
     match message.message {
         WM_LBUTTONDOWN if source.deviceType == IMDT_MOUSE => {
-            state.press_started_after_display = Some(ConfirmationInputDevice::Mouse);
+            state.press_started_after_display = Some(ConfirmationPress::Mouse);
         }
         WM_LBUTTONUP if source.deviceType == IMDT_MOUSE => {
-            if state.press_started_after_display == Some(ConfirmationInputDevice::Mouse) {
+            if state.press_started_after_display == Some(ConfirmationPress::Mouse) {
                 state.fresh_input_time = Some(message.time);
                 state.fresh_input_device = Some(ConfirmationInputDevice::Mouse);
             }
@@ -848,13 +854,14 @@ fn apply_confirmation_input_source(
                 && (keyboard_key == VK_RETURN || keyboard_key == VK_SPACE)
                 && (message.lParam & (1_isize << 30)) == 0 =>
         {
-            state.press_started_after_display = Some(ConfirmationInputDevice::Keyboard);
+            state.press_started_after_display = Some(ConfirmationPress::Keyboard(keyboard_key));
         }
         WM_KEYUP
             if source.deviceType == IMDT_KEYBOARD
                 && (keyboard_key == VK_RETURN || keyboard_key == VK_SPACE) =>
         {
-            if state.press_started_after_display == Some(ConfirmationInputDevice::Keyboard) {
+            if state.press_started_after_display == Some(ConfirmationPress::Keyboard(keyboard_key))
+            {
                 state.fresh_input_time = Some(message.time);
                 state.fresh_input_device = Some(ConfirmationInputDevice::Keyboard);
             }
@@ -1840,6 +1847,22 @@ mod tests {
 
         message.message = WM_KEYDOWN;
         message.wParam = usize::from(VK_RETURN);
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        message.message = WM_KEYUP;
+        message.wParam = usize::from(VK_SPACE);
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        assert!(state.fresh_input_time.is_none());
+
+        message.message = WM_KEYDOWN;
+        message.wParam = usize::from(VK_SPACE);
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        message.message = WM_KEYUP;
+        message.wParam = usize::from(VK_RETURN);
+        apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
+        assert!(state.fresh_input_time.is_none());
+
+        message.message = WM_KEYDOWN;
+        message.wParam = usize::from(VK_RETURN);
         message.time = 201;
         apply_confirmation_input_source(&mut state, &message, Some(hardware_keyboard));
         message.message = WM_KEYUP;
@@ -1893,7 +1916,7 @@ mod tests {
             Some(hardware_keyboard)
         ));
         assert!(!consume_fresh_confirmation_command(&mut state, confirm));
-        assert!(state.press_started_after_display == Some(ConfirmationInputDevice::Keyboard));
+        assert!(state.press_started_after_display == Some(ConfirmationPress::Keyboard(VK_RETURN)));
         message.message = WM_KEYUP;
         assert!(apply_confirmation_input_source(
             &mut state,

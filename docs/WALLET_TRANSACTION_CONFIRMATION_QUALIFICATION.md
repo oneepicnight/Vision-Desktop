@@ -117,7 +117,8 @@ Either failure wipes and closes the ceremony without confirmation.
 
 The keyboard test preserves a physical key-down across the standard dialog's early,
 non-authoritative command and drives the exact Confirm action only after the matching hardware
-key-up. This permits Microsoft IME layouts to retain keyboard operation without accepting a
+key-up for that identical virtual key. Enter and Space cannot complete one another. This permits
+Microsoft IME layouts to retain keyboard operation without accepting a
 key-down-only, repeated, injected, or mixed-device ceremony.
 
 ## Trust-boundary note

@@ -334,6 +334,12 @@ qualify the production peer-identity boundary.
 
 ## Signing
 
+The detailed pre-implementation design is
+[`WALLET_PRIVATE_SIGNING_INTEGRATION_DESIGN.md`](WALLET_PRIVATE_SIGNING_INTEGRATION_DESIGN.md).
+It requires atomic promotion of the still-live confirmation permit into signing scope; the current
+release-then-reacquire `ConfirmedTransferIntent` handoff must not be used for signing. No signing
+integration has been implemented or approved by this cross-reference.
+
 Signing occurs inside one narrow closure over the unlocked `WalletSeed`. Secret-derived storage
 remains zeroizing and non-serializable. Rust never returns a seed, private key, activation proof, or
 session handle.

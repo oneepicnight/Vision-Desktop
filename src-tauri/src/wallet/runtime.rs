@@ -905,7 +905,6 @@ impl WalletOperationPermit<'_> {
         if !valid {
             return Err(WalletRuntimeError::InvalidRequest);
         }
-        inner.active_operation = None;
         Ok(preview.intent)
     }
 

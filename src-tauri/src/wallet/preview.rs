@@ -29,6 +29,7 @@ use super::{
     },
 };
 use crate::supervisor::SupervisorState;
+use std::time::Instant;
 
 const NORMAL_RECOVERY_STATE: &str = "normal";
 const REORGANIZATION_WARNING: &str =
@@ -63,6 +64,10 @@ impl BoundTransferPreview {
 
     pub(in crate::wallet) fn sender_public_key(&self) -> &str {
         self.sender_public_key.as_str()
+    }
+
+    fn matches_core_identity(&self, fingerprint: &[u8; 32]) -> bool {
+        self.core_identity_fingerprint == *fingerprint
     }
 }
 
@@ -153,6 +158,7 @@ impl<'a> WalletTransactionPreviewEngine<'a> {
 
     pub(in crate::wallet) fn consume(
         &self,
+        supervisor: &'a SupervisorState,
         owner_window: &str,
         handle: &str,
     ) -> Result<BoundTransferPreview, WalletPreviewError> {
@@ -160,9 +166,11 @@ impl<'a> WalletTransactionPreviewEngine<'a> {
             .runtime
             .begin_operation(owner_window, WalletOperationKind::ConsumePreview)
             .map_err(map_runtime_error)?;
-        permit
+        let intent = permit
             .consume_transaction_preview(handle)
-            .map_err(map_runtime_error)
+            .map_err(map_runtime_error)?;
+        let client = WalletCoreReadClient::from_supervisor(supervisor).map_err(map_core_error)?;
+        release_consumed_preview(&permit, intent, &client)
     }
 
     pub(in crate::wallet) fn cancel(
@@ -170,8 +178,53 @@ impl<'a> WalletTransactionPreviewEngine<'a> {
         owner_window: &str,
         handle: &str,
     ) -> Result<(), WalletPreviewError> {
-        self.consume(owner_window, handle).map(drop)
+        let permit = self
+            .runtime
+            .begin_operation(owner_window, WalletOperationKind::ConsumePreview)
+            .map_err(map_runtime_error)?;
+        let intent = permit
+            .consume_transaction_preview(handle)
+            .map_err(map_runtime_error)?;
+        drop(intent);
+        permit.complete(()).map_err(map_runtime_error)
     }
+}
+
+fn consume_with_source(
+    permit: &super::runtime::WalletOperationPermit<'_>,
+    handle: &str,
+    source: &impl WalletCoreReadSource,
+) -> Result<BoundTransferPreview, WalletPreviewError> {
+    let intent = permit
+        .consume_transaction_preview(handle)
+        .map_err(map_runtime_error)?;
+    release_consumed_preview(permit, intent, source)
+}
+
+fn release_consumed_preview(
+    permit: &super::runtime::WalletOperationPermit<'_>,
+    intent: BoundTransferPreview,
+    source: &impl WalletCoreReadSource,
+) -> Result<BoundTransferPreview, WalletPreviewError> {
+    let identity_before_release = source
+        .validated_identity_fingerprint()
+        .map_err(map_core_error)?;
+    permit.ensure_current().map_err(map_runtime_error)?;
+    if !intent.matches_core_identity(&identity_before_release) {
+        return Err(WalletPreviewError::CoreUnavailable);
+    }
+
+    let identity_after_consumption = source
+        .validated_identity_fingerprint()
+        .map_err(map_core_error)?;
+    permit.ensure_current().map_err(map_runtime_error)?;
+    if identity_before_release != identity_after_consumption
+        || !intent.matches_core_identity(&identity_after_consumption)
+    {
+        return Err(WalletPreviewError::CoreUnavailable);
+    }
+
+    permit.complete(intent).map_err(map_runtime_error)
 }
 
 fn prepare_with_source(
@@ -192,6 +245,7 @@ fn prepare_with_source(
     }
 
     permit.ensure_current().map_err(map_runtime_error)?;
+    let observation_started_at = Instant::now();
     let core_account = source
         .account_snapshot(&account.address)
         .map_err(map_core_error)?;
@@ -266,6 +320,8 @@ fn prepare_with_source(
         .complete_transaction_preview(intent)
         .map_err(map_runtime_error)?;
     let (handle, _issued_at_monotonic_ms) = receipt.into_parts();
+    let data_age_ms =
+        u64::try_from(observation_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(PreparedTransferPreview {
         handle,
         sender_address: account.address,
@@ -286,7 +342,7 @@ fn prepare_with_source(
         canonical_tip_hash,
         core_contract,
         status_version,
-        data_age_ms: 0,
+        data_age_ms,
         expires_after_ms: TRANSACTION_PREVIEW_TTL_MS,
         warning: REORGANIZATION_WARNING.to_string(),
     })
@@ -352,6 +408,11 @@ mod tests {
         secrets::{WalletPassword, WalletSeed},
         vault::EncryptedWalletVault,
     };
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        thread,
+        time::Duration,
+    };
 
     const MAIN: &str = "main";
     const PASSWORD: &str = "correct horse battery staple";
@@ -362,6 +423,11 @@ mod tests {
         balance: u128,
         nonce: u64,
         recovery_state: String,
+        identity_fingerprint: [u8; 32],
+        replacement_fingerprint: Option<[u8; 32]>,
+        identity_error_on_call: Option<usize>,
+        identity_calls: AtomicUsize,
+        identity_delay: Duration,
     }
 
     impl WalletCoreReadSource for FakeCore {
@@ -387,7 +453,19 @@ mod tests {
             })
         }
         fn validated_identity_fingerprint(&self) -> Result<[u8; 32], WalletCoreClientError> {
-            Ok([0x42; 32])
+            let call = self.identity_calls.fetch_add(1, Ordering::SeqCst);
+            if !self.identity_delay.is_zero() {
+                thread::sleep(self.identity_delay);
+            }
+            if self.identity_error_on_call == Some(call) {
+                return Err(WalletCoreClientError::CoreUnavailable);
+            }
+            Ok(if call > 0 {
+                self.replacement_fingerprint
+                    .unwrap_or(self.identity_fingerprint)
+            } else {
+                self.identity_fingerprint
+            })
         }
     }
 
@@ -426,6 +504,11 @@ mod tests {
             balance: 10_000_000_000,
             nonce: 7,
             recovery_state: NORMAL_RECOVERY_STATE.to_string(),
+            identity_fingerprint: [0x42; 32],
+            replacement_fingerprint: None,
+            identity_error_on_call: None,
+            identity_calls: AtomicUsize::new(0),
+            identity_delay: Duration::ZERO,
         }
     }
 
@@ -439,6 +522,17 @@ mod tests {
             .begin_operation(MAIN, WalletOperationKind::PreparePreview)
             .unwrap();
         prepare_with_source(&permit, request(recipient, amount), core).unwrap()
+    }
+
+    fn consume(
+        runtime: &WalletRuntimeState,
+        core: &FakeCore,
+        handle: &str,
+    ) -> Result<BoundTransferPreview, WalletPreviewError> {
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::ConsumePreview)
+            .map_err(map_runtime_error)?;
+        consume_with_source(&permit, handle, core)
     }
 
     #[test]
@@ -467,9 +561,7 @@ mod tests {
         assert_eq!(preview.expires_after_ms, TRANSACTION_PREVIEW_TTL_MS);
         assert!(preview.warning.contains("reorganized"));
 
-        let intent = WalletTransactionPreviewEngine::new(&runtime)
-            .consume(MAIN, &preview.handle)
-            .unwrap();
+        let intent = consume(&runtime, &source(&sender), &preview.handle).unwrap();
         assert!(intent.unsigned_transaction.sig.is_empty());
         assert_eq!(intent.transaction_id, preview.transaction_id);
         assert_eq!(intent.recipient_address, preview.recipient_address);
@@ -493,7 +585,9 @@ mod tests {
         let engine = WalletTransactionPreviewEngine::new(&runtime);
         engine.cancel(MAIN, &preview.handle).unwrap();
         assert_eq!(
-            engine.consume(MAIN, &preview.handle).err().unwrap(),
+            consume(&runtime, &source(&sender), &preview.handle)
+                .err()
+                .unwrap(),
             WalletPreviewError::WalletUnavailable
         );
     }
@@ -519,13 +613,72 @@ mod tests {
         let (runtime, sender) = unlocked_runtime(9);
         let first = prepare(&runtime, &source(&sender), &"4".repeat(64), "1");
         let second = prepare(&runtime, &source(&sender), &"5".repeat(64), "2");
-        let engine = WalletTransactionPreviewEngine::new(&runtime);
-        assert!(engine.consume(MAIN, &first.handle).is_err());
-        assert!(engine.consume(MAIN, &second.handle).is_err());
+        assert!(consume(&runtime, &source(&sender), &first.handle).is_err());
+        assert!(consume(&runtime, &source(&sender), &second.handle).is_err());
 
         let third = prepare(&runtime, &source(&sender), &"6".repeat(64), "3");
         runtime.invalidate_all().unwrap();
-        assert!(engine.consume(MAIN, &third.handle).is_err());
+        assert!(consume(&runtime, &source(&sender), &third.handle).is_err());
+    }
+
+    #[test]
+    fn consumption_rejects_a_stopped_core_and_consumes_the_handle() {
+        let (runtime, sender) = unlocked_runtime(19);
+        let preview = prepare(&runtime, &source(&sender), &"9".repeat(64), "1");
+        let mut stopped = source(&sender);
+        stopped.identity_error_on_call = Some(0);
+
+        assert_eq!(
+            consume(&runtime, &stopped, &preview.handle).err().unwrap(),
+            WalletPreviewError::CoreUnavailable
+        );
+        assert_eq!(
+            consume(&runtime, &source(&sender), &preview.handle)
+                .err()
+                .unwrap(),
+            WalletPreviewError::WalletUnavailable
+        );
+    }
+
+    #[test]
+    fn consumption_rejects_a_restarted_core_between_identity_checks() {
+        let (runtime, sender) = unlocked_runtime(20);
+        let preview = prepare(&runtime, &source(&sender), &"a".repeat(64), "1");
+        let mut restarted = source(&sender);
+        restarted.replacement_fingerprint = Some([0x43; 32]);
+
+        assert_eq!(
+            consume(&runtime, &restarted, &preview.handle)
+                .err()
+                .unwrap(),
+            WalletPreviewError::CoreUnavailable
+        );
+    }
+
+    #[test]
+    fn consumption_rejects_a_replacement_generation_fingerprint() {
+        let (runtime, sender) = unlocked_runtime(21);
+        let preview = prepare(&runtime, &source(&sender), &"b".repeat(64), "1");
+        let mut replacement = source(&sender);
+        replacement.identity_fingerprint = [0x44; 32];
+
+        assert_eq!(
+            consume(&runtime, &replacement, &preview.handle)
+                .err()
+                .unwrap(),
+            WalletPreviewError::CoreUnavailable
+        );
+    }
+
+    #[test]
+    fn preview_reports_monotonic_age_of_authoritative_observations() {
+        let (runtime, sender) = unlocked_runtime(22);
+        let mut delayed = source(&sender);
+        delayed.identity_delay = Duration::from_millis(20);
+
+        let preview = prepare(&runtime, &delayed, &"c".repeat(64), "1");
+
+        assert!(preview.data_age_ms >= 10);
     }
 
     #[test]

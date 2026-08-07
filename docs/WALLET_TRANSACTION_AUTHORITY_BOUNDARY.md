@@ -147,7 +147,9 @@ The preview displays exact, non-floating-point values:
 - charged fee and maximum authorized fee;
 - total debit only after the Core contract proves its calculation;
 - nonce and canonical transaction identifier;
-- data age and Core compatibility identity; and
+- monotonic data age measured from before the first authoritative Core read through preview
+  publication, without exposing an absolute or process-relative timestamp;
+- Core compatibility identity; and
 - a warning that mined transactions may reorganize.
 
 Rust rejects invalid or zero amounts, self-transfer, overflow, insufficient spendable balance under
@@ -159,6 +161,13 @@ and unapproved compatibility state before confirmation.
 The preview handle is random, single-use, short-lived, capability-bearing, and non-secret. Only its
 opaque encoding crosses IPC; the transaction remains in private Rust state. Only one transaction
 operation may exist. A new preview, lock, wallet change, or restart invalidates the old preview.
+
+Consuming a preview removes it before any private intent can escape. Rust then constructs a fresh
+supervisor-issued `CoreConnectionAuthority`, compares its exact generation-bound identity
+fingerprint with the identity retained in the preview, and revalidates that identity immediately
+before releasing the private intent to the next native-only stage. Core exit, stop, restart,
+generation or manifest replacement, identity mismatch, or inability to obtain current authority
+fails closed and permanently consumes that preview handle.
 
 Neither the identifier nor preview handle is sufficient signing authority. Signing also requires a
 current runtime permit, matching unlocked session, consumed confirmation, and signing scope.

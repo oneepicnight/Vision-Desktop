@@ -4,11 +4,13 @@
 
 This document specifies a future interface. No wallet command is registered with Tauri, no wallet service wrapper exists in React, and wallet creation, restore, unlock, signing, and submission remain unavailable. The pinned single-instance plugin is active first on Windows, followed by the pinned native dialog plugin for private Rust use. Neither plugin has a WebView permission.
 
-`WALLET_LIFECYCLE_TAURI_EXPOSURE_DESIGN.md` now defines the exact lifecycle command contract and
-supersedes this document where activation sequencing is concerned. In particular, lifecycle
-commands must not be exposed as a partial wallet: their eventual registration is atomic with the
-separately reviewed spending surface and supported private-loopback Core release. That design is
-documentation only and grants no implementation or exposure authority.
+`WALLET_LIFECYCLE_TAURI_EXPOSURE_DESIGN.md` is now the sole normative lifecycle command, complete
+invoke-envelope, request, response, error, and activation contract. This threat model supplies
+background and protected-asset analysis only; any older lifecycle interface wording here is
+non-normative. In particular, lifecycle commands must not be exposed as a partial wallet: their
+eventual registration is atomic with the separately reviewed spending surface and supported
+private-loopback Core release. The primary design is documentation only and grants no
+implementation or exposure authority.
 
 The specification is fail-closed. An implementation must not register a partial subset that weakens the ordering, origin, path, lifecycle, or compatibility gates below.
 
@@ -257,28 +259,11 @@ process, but it is not part of this lifecycle design.
 
 ## Error contract
 
-Commands return stable enumerated codes with short operator-safe messages. They never return formatted filesystem errors, selected paths, wallet contents, passwords, Core response bodies, ciphertext, or backoff internals.
-
-Required codes include:
-
-- `wallet_unavailable`
-- `security_review_required`
-- `private_loopback_required`
-- `operation_in_progress`
-- `invalid_request`
-- `password_policy`
-- `invalid_recovery_credential`
-- `destination_cancelled`
-- `destination_expired`
-- `destination_invalid`
-- `destination_exists`
-- `backup_verification_failed`
-- `vault_exists`
-- `invalid_password_or_vault`
-- `temporarily_locked`
-- `storage_unavailable`
-
-Frontend messages map from codes locally. Unknown codes display one generic failure and do not expose the raw payload.
+The closed vocabulary in the `Fixed error contract` section of
+`WALLET_LIFECYCLE_TAURI_EXPOSURE_DESIGN.md` is the only authoritative lifecycle IPC error contract.
+This threat model intentionally defines no second list or aliases. Frontend messages map those
+exact codes locally. Unknown codes display one generic failure and do not expose the raw payload.
+Changing, adding, or aliasing a code requires review of the primary lifecycle exposure design.
 
 ## Lifecycle requirements
 

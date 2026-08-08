@@ -104,11 +104,49 @@ panic invalidates the complete wallet runtime. If invalidation cannot be proven,
 terminates under the reviewed fail-closed policy. Raw panic text and operating-system errors never
 cross IPC.
 
+### Whole-invoke-envelope boundary
+
+The pinned Tauri `2.11.5` generated wrapper does not provide this property for an ordinary Serde
+argument. It looks up each named argument independently in the top-level payload; unrelated keys
+are ignored. A no-argument command performs no payload deserialization. Argument extraction also
+precedes entry into the command function. Consequently, none of the lifecycle commands may use an
+ordinary typed command parameter as its security boundary.
+
+Each future lifecycle command instead accepts an injected `tauri::ipc::Request<'_>` (or an
+independently reviewed equivalent whole-message argument) plus framework-injected window and state
+authority. `Request` extraction itself performs no payload parsing. Inside the first
+`catch_unwind`/fail-closed guard, one shared `WalletInvokeEnvelope` parser must:
+
+- reject `InvokeBody::Raw` unconditionally;
+- require a JSON object as the complete body;
+- verify the exact command name and exact allowed top-level key set before deserializing a value;
+- require exactly `{}` for every command documented as `Input: none`: `wallet_get_status`, both
+  recovery-selection commands, `wallet_unlock`, and `wallet_lock`;
+- require exactly one top-level key named `request` for `wallet_create` and `wallet_restore`;
+- deserialize the nested value into the exact bounded request type with unknown and duplicate field
+  rejection;
+- reject missing, extra, repeated, wrong-case, wrong-type, oversized, noncanonical, and
+  secret-like fields with only `invalid_request`; and
+- finish all response and fixed-error serialization before the guard commits.
+
+Tauri's JSON `Value` normalization may make a duplicate textual key unobservable by the time an
+injected `Request` is constructed. The implementation must prove that the supported invoke
+transport cannot deliver such an encoding, or add a reviewed pre-normalization duplicate-detecting
+parser at the earliest raw JSON boundary. If neither can be proven with the pinned release, wallet
+commands remain unregistered. Silently accepting last-key-wins normalization is prohibited.
+
+The wrapper returns a `tauri::ipc::Response` containing JSON that was fully serialized inside the
+guard, or a preconstructed fixed `InvokeError`. Tauri's outer generated response step may only emit
+that already converted body; it may not perform fallible wallet response serialization after the
+fail-closed guard commits. The implementation must pin and source-test this behavior for the exact
+Tauri version used by the release.
+
 ## Exact request and response contract
 
-All command payloads are bounded, typed, and `#[serde(deny_unknown_fields)]`. Missing, duplicate,
-unknown, wrong-type, oversized, or noncanonical fields fail before window prompting, token
-consumption, vault inspection, filesystem access, or cryptographic work.
+After whole-envelope validation, all accepted public request values are bounded, typed, and
+`#[serde(deny_unknown_fields)]`. Missing, duplicate, unknown, wrong-type, oversized, or
+noncanonical fields fail before window prompting, token consumption, vault inspection, filesystem
+access, or cryptographic work.
 
 ### `wallet_get_status`
 
@@ -138,7 +176,7 @@ single-use, expires within two minutes, and authorizes only one create-new recov
 
 ### `wallet_create`
 
-Input: the existing `WalletCreateRequest` only:
+Input: exactly one top-level `request` object containing the existing `WalletCreateRequest` only:
 
 - bounded `wallet_id`;
 - bounded `label`; and
@@ -159,7 +197,7 @@ destination write or vice versa.
 
 ### `wallet_restore`
 
-Input: the existing `WalletRestoreRequest` only:
+Input: exactly one top-level `request` object containing the existing `WalletRestoreRequest` only:
 
 - bounded `wallet_id`;
 - bounded `label`; and
@@ -278,11 +316,22 @@ Automated ACL tests must fail if invoke registration, `AppManifest`, generated p
 the `main-desktop` capability, documented inventory, or `coreApi.ts` wrappers disagree. They must
 also prove that a second window, remote origin, and every command not explicitly listed are denied.
 
+The tests must invoke the actual generated wrappers, not only the private parser. For every command
+they exercise an exact valid JSON envelope, raw bytes, non-object JSON, extra and missing top-level
+keys, wrong command envelopes, secret-like keys, empty-body requirements, malformed nested values,
+and any duplicate-key representation reachable through the supported IPC transport. They also
+prove that parsing, lifecycle execution, success serialization, and fixed-error construction are
+inside the fail-closed panic boundary. A unit test calling the Rust function directly is
+insufficient acceptance evidence.
+
 ## Required adversarial evidence
 
 Before any registration or activation, the exact implementation must prove:
 
-- all public requests reject unknown, duplicate, malformed, oversized, and secret-like fields;
+- all generated command wrappers reject raw bodies and unknown, duplicate, missing, malformed,
+  oversized, and secret-like top-level or nested fields;
+- every no-input generated wrapper accepts only an exact empty JSON object;
+- injected parser and response-conversion panics invalidate authority and return no stale success;
 - a caller cannot supply or forge window, path, exposure, runtime, process, Core, or operation
   authority;
 - every lifecycle command rejects non-main, remote, destroyed, replaced, reloaded, and stale window

@@ -691,6 +691,36 @@ impl WalletRuntimeState {
         self.pending_revocations.load(Ordering::Acquire) != 0
     }
 
+    pub(in crate::wallet) fn wallet_exposure_scopes_satisfied(&self) -> bool {
+        self.activation.all_wallet_scopes_satisfied()
+    }
+
+    pub(in crate::wallet) fn capture_boundary_epoch(&self) -> Result<u64, WalletRuntimeError> {
+        if self.revocation_is_pending() {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let epoch = self.revocation_epoch.load(Ordering::Acquire);
+        let _inner = self.lock_inner()?;
+        if self.revocation_is_pending() || self.revocation_epoch.load(Ordering::Acquire) != epoch {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(epoch)
+    }
+
+    pub(in crate::wallet) fn validate_boundary_epoch(
+        &self,
+        epoch: u64,
+    ) -> Result<(), WalletRuntimeError> {
+        if self.revocation_is_pending() || self.revocation_epoch.load(Ordering::Acquire) != epoch {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let _inner = self.lock_inner()?;
+        if self.revocation_is_pending() || self.revocation_epoch.load(Ordering::Acquire) != epoch {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(in crate::wallet) fn revocation_is_pending_for_test(&self) -> bool {
         self.revocation_is_pending()

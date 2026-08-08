@@ -983,7 +983,10 @@ impl WalletLifecycleAdapters {
     }
 
     #[cfg(test)]
-    fn for_test(runtime: Arc<WalletRuntimeState>, vault_path: &std::path::Path) -> Self {
+    pub(in crate::wallet) fn for_test(
+        runtime: Arc<WalletRuntimeState>,
+        vault_path: &std::path::Path,
+    ) -> Self {
         let test_recovery_ceremony = Arc::new(TestRecoveryCredentialCeremony::verified());
         Self {
             runtime,

@@ -124,6 +124,17 @@ impl WalletActivationPolicy {
             }
     }
 
+    pub(super) fn all_wallet_scopes_satisfied(&self) -> bool {
+        [
+            WalletActivationScope::Lifecycle,
+            WalletActivationScope::Signing,
+            WalletActivationScope::Submission,
+            WalletActivationScope::Reconciliation,
+        ]
+        .into_iter()
+        .all(|scope| self.is_satisfied(scope))
+    }
+
     #[cfg(test)]
     pub(super) fn satisfied_for_test() -> Self {
         Self {

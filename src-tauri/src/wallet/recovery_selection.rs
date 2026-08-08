@@ -1,8 +1,3 @@
-#![expect(
-    dead_code,
-    reason = "recovery selection stays private until wallet commands pass review"
-)]
-
 use super::{
     recovery::MAX_RECOVERY_JSON_BYTES,
     runtime::{

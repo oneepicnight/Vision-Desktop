@@ -16,6 +16,8 @@ mod kdf;
 #[cfg(windows)]
 mod lifecycle;
 #[cfg(windows)]
+mod lifecycle_command_boundary;
+#[cfg(windows)]
 mod native_secret_buffer;
 mod onboarding;
 mod panic_policy;

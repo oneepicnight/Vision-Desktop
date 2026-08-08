@@ -370,13 +370,16 @@ custody.
    with command-shaped methods and focused Rust tests. Do not use `#[tauri::command]`, register an
    invoke handler, create permissions, change capabilities, add frontend code, or change flags.
 3. Submit that exact private implementation for independent review and correct every finding.
-4. Integrate and qualify the supported private-loopback Core release through the separate Core
+4. Independently review, implement, and accept the generated-wrapper and raw-transport
+   qualification defined by `WALLET_TAURI_TRANSPORT_QUALIFICATION_DESIGN.md`. Keep all qualification
+   commands test-only and keep production duplicate-key approval structurally false.
+5. Integrate and qualify the supported private-loopback Core release through the separate Core
    compatibility workflow without changing Vision-Core here.
-5. Complete the final packaged Windows and clean-device end-to-end wallet matrix, including a real
+6. Complete the final packaged Windows and clean-device end-to-end wallet matrix, including a real
    funded send and spend-after-restore drill.
-6. Obtain final independent review of the combined lifecycle and transaction command contract,
+7. Obtain final independent review of the combined lifecycle and transaction command contract,
    permissions, frontend public-intent UI, binaries, evidence, and support-package exclusions.
-7. Only then land the one atomic activation tranche described above.
+8. Only then land the one atomic activation tranche described above.
 
 Any failed gate returns to the private, unreachable state. There is no temporary lifecycle-only
 exposure, beta custody address, hidden command, developer bypass, mock production authority, or

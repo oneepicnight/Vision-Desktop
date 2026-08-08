@@ -333,12 +333,17 @@ Before activation:
     generated permissions, capability grants, frontend wrappers/forms, or true activation flags.
     Completed privately, including IME disassociation/fail-closed routing, pre-initialization
     non-emitting panic policy, recovery-selection unwind/drop protection, and bounded request
-    consumption at the unregistered production entry points. Exact-commit re-review is pending.
-11. Independently review the exact unreachable implementation and its adversarial evidence.
-12. Integrate and qualify a supported private-loopback Core release, signing, submission, receipt
+    consumption at the unregistered production entry points.
+11. Implement and independently approve the private whole-envelope lifecycle command boundary.
+    Completed at `58e0843d57fec6a7b47004ed868d57df910d61d9`; no command, permission,
+    capability, frontend wrapper, or production activation exists.
+12. Design, implement, and independently accept the test-only generated-wrapper and raw-transport
+    qualification specified by `WALLET_TAURI_TRANSPORT_QUALIFICATION_DESIGN.md`. Production
+    duplicate-key approval remains structurally false until a later separately reviewed decision.
+13. Integrate and qualify a supported private-loopback Core release, signing, submission, receipt
     tracking, recovery, and the complete spending path specified in
     `WALLET_TRANSACTION_AUTHORITY_BOUNDARY.md` through their separate reviews.
-13. Obtain explicit activation review, then register only the exact approved commands and
+14. Obtain explicit activation review, then register only the exact approved commands and
     permissions and run adversarial, recovery, packaging, and signed-release validation.
 
 ## Decision record

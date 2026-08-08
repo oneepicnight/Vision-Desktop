@@ -71,7 +71,8 @@ activation scope were later enabled.
 
 The only approved transport policy exists under `cfg(test)`. Removing this blocker requires the
 separate exact generated-wrapper and raw-transport qualification mandated by
-`WALLET_LIFECYCLE_TAURI_EXPOSURE_DESIGN.md` and another review.
+`WALLET_LIFECYCLE_TAURI_EXPOSURE_DESIGN.md`, specified in detail by
+`WALLET_TAURI_TRANSPORT_QUALIFICATION_DESIGN.md`, and accepted through another independent review.
 
 ## Authority and privacy properties
 

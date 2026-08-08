@@ -10,8 +10,9 @@ use super::{
     account::derive_account_identity,
     activation::{WalletActivationPolicy, WalletActivationScope},
     contract::{WalletAccountSummary, WalletLifecycleStatus, WalletPublicMetadata},
-    core_client::{WalletCoreSubmissionSource, SUPPORTED_WALLET_CORE_CONTRACT},
+    core_client::WalletCoreSubmissionSource,
     journal::{append_accepted_evidence, WalletJournalAuthenticator},
+    lifecycle::WalletCustodyPathAuthority,
     preview::BoundTransferPreview,
     receipt::prove_exact_reconciliation_lookup,
     reconciliation::{
@@ -23,6 +24,7 @@ use super::{
     },
     secrets::WalletPassword,
     session::{WalletSession, WalletSessionError},
+    submission::{compatibility_contract_digest, SubmissionRejectionPolicy},
     transaction::{
         sign_confirmed_cash_transfer, TransactionSigningObserver, VisionTransaction,
         WalletTransactionError,
@@ -1407,7 +1409,7 @@ impl WalletSubmissionPermit<'_> {
 
     pub(in crate::wallet) fn record_accepted_evidence(
         &self,
-        journal_path: &std::path::Path,
+        custody: &WalletCustodyPathAuthority,
         evidence: &AcceptedSubmissionEvidence,
     ) -> Result<(), WalletRuntimeError> {
         self.ensure_current()?;
@@ -1424,7 +1426,7 @@ impl WalletSubmissionPermit<'_> {
                 return Err(());
             }
             let authenticator = WalletJournalAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
-            append_accepted_evidence(journal_path, &authenticator, evidence)
+            append_accepted_evidence(custody.journal_path(), &authenticator, evidence)
                 .map(|_| ())
                 .map_err(|_| ())
         });
@@ -1514,16 +1516,18 @@ impl Drop for WalletSubmissionPermit<'_> {
 impl WalletReconciliationPermit<'_> {
     pub(in crate::wallet) fn discover(
         &self,
-        store: &ReconciliationStore,
+        custody: &WalletCustodyPathAuthority,
     ) -> Result<Option<RestartReconciliationPermit>, WalletRuntimeError> {
-        self.run_fail_closed(|| self.discover_inner(store))
+        self.run_fail_closed(|| self.discover_inner(custody))
     }
 
     fn discover_inner(
         &self,
-        store: &ReconciliationStore,
+        custody: &WalletCustodyPathAuthority,
     ) -> Result<Option<RestartReconciliationPermit>, WalletRuntimeError> {
         self.ensure_current()?;
+        let store = ReconciliationStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
         let discovery = ReconciliationDiscoveryPermit::new(&self.permit.activation_proof)?;
         let mut inner = self.permit.state.lock_inner()?;
         let result = inner.session.with_seed(|wallet_id, seed| {
@@ -1531,7 +1535,7 @@ impl WalletReconciliationPermit<'_> {
                 return Err(ReconciliationError::AuthenticationFailed);
             }
             let authenticator = ReconciliationAuthenticator::new(wallet_id, seed)?;
-            discovery.discover(store, &authenticator)
+            discovery.discover(&store, &authenticator)
         });
         let result = match result {
             Ok(Ok(value)) => value,
@@ -1546,25 +1550,27 @@ impl WalletReconciliationPermit<'_> {
 
     pub(in crate::wallet) fn resolve_prepared(
         &self,
-        store: &ReconciliationStore,
+        custody: &WalletCustodyPathAuthority,
         restart: RestartReconciliationPermit,
     ) -> Result<(), WalletRuntimeError> {
-        self.run_fail_closed(|| self.resolve_prepared_inner(store, restart))
+        self.run_fail_closed(|| self.resolve_prepared_inner(custody, restart))
     }
 
     fn resolve_prepared_inner(
         &self,
-        store: &ReconciliationStore,
+        custody: &WalletCustodyPathAuthority,
         restart: RestartReconciliationPermit,
     ) -> Result<(), WalletRuntimeError> {
         self.ensure_current()?;
+        let store = ReconciliationStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
         let mut inner = self.permit.state.lock_inner()?;
         let result = inner.session.with_seed(|wallet_id, seed| {
             if wallet_id != self.wallet_id {
                 return Err(ReconciliationError::AuthenticationFailed);
             }
             let authenticator = ReconciliationAuthenticator::new(wallet_id, seed)?;
-            restart.resolve_prepared(store, &authenticator)
+            restart.resolve_prepared(&store, &authenticator)
         });
         if !matches!(result, Ok(Ok(()))) {
             return Err(WalletRuntimeError::ReconciliationUnavailable);
@@ -1575,22 +1581,20 @@ impl WalletReconciliationPermit<'_> {
 
     pub(in crate::wallet) fn complete_accepted_recording(
         &self,
-        store: &ReconciliationStore,
-        journal_path: &std::path::Path,
+        custody: &WalletCustodyPathAuthority,
         restart: RestartReconciliationPermit,
     ) -> Result<(), WalletRuntimeError> {
-        self.run_fail_closed(|| {
-            self.complete_accepted_recording_inner(store, journal_path, restart)
-        })
+        self.run_fail_closed(|| self.complete_accepted_recording_inner(custody, restart))
     }
 
     fn complete_accepted_recording_inner(
         &self,
-        store: &ReconciliationStore,
-        journal_path: &std::path::Path,
+        custody: &WalletCustodyPathAuthority,
         restart: RestartReconciliationPermit,
     ) -> Result<(), WalletRuntimeError> {
         self.ensure_current()?;
+        let store = ReconciliationStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
         let (accepted, evidence) = restart
             .accepted_evidence()
             .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
@@ -1601,10 +1605,10 @@ impl WalletReconciliationPermit<'_> {
             }
             let journal_authenticator = WalletJournalAuthenticator::new(wallet_id, seed)
                 .map_err(|_| ReconciliationError::StorageUnavailable)?;
-            append_accepted_evidence(journal_path, &journal_authenticator, &evidence)
+            append_accepted_evidence(custody.journal_path(), &journal_authenticator, &evidence)
                 .map_err(|_| ReconciliationError::StorageUnavailable)?;
             let reconciliation_authenticator = ReconciliationAuthenticator::new(wallet_id, seed)?;
-            accepted.resolve_recorded(store, &reconciliation_authenticator)
+            accepted.resolve_recorded(&store, &reconciliation_authenticator)
         });
         if !matches!(result, Ok(Ok(()))) {
             return Err(WalletRuntimeError::ReconciliationUnavailable);
@@ -1615,33 +1619,28 @@ impl WalletReconciliationPermit<'_> {
 
     pub(in crate::wallet) fn reconcile_ambiguous_acceptance(
         &self,
-        store: &ReconciliationStore,
-        journal_path: &std::path::Path,
+        custody: &WalletCustodyPathAuthority,
         restart: RestartReconciliationPermit,
         source: &impl WalletCoreSubmissionSource,
     ) -> Result<bool, WalletRuntimeError> {
-        self.run_fail_closed(|| {
-            self.reconcile_ambiguous_acceptance_inner(store, journal_path, restart, source)
-        })
+        self.run_fail_closed(|| self.reconcile_ambiguous_acceptance_inner(custody, restart, source))
     }
 
     fn reconcile_ambiguous_acceptance_inner(
         &self,
-        store: &ReconciliationStore,
-        journal_path: &std::path::Path,
+        custody: &WalletCustodyPathAuthority,
         restart: RestartReconciliationPermit,
         source: &impl WalletCoreSubmissionSource,
     ) -> Result<bool, WalletRuntimeError> {
         self.ensure_current()?;
+        let store = ReconciliationStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
         let (restart, expectation) = restart
             .lookup_expectation()
             .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
         let fingerprint = source
             .validated_identity_fingerprint()
             .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
-        if hex::encode(fingerprint) != expectation.original_core_identity_fingerprint_hex() {
-            return Err(WalletRuntimeError::ReconciliationUnavailable);
-        }
         let body = source
             .transaction_lookup(expectation.transaction_id())
             .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
@@ -1664,17 +1663,17 @@ impl WalletReconciliationPermit<'_> {
             }
             let reconciliation_authenticator = ReconciliationAuthenticator::new(wallet_id, seed)?;
             let accepted = restart.publish_reconciled_acceptance(
-                store,
+                &store,
                 &reconciliation_authenticator,
                 proof,
-                compatibility_contract_digest_hex(),
+                compatibility_contract_digest(&SubmissionRejectionPolicy::production()),
             )?;
             let evidence = accepted.evidence()?;
             let journal_authenticator = WalletJournalAuthenticator::new(wallet_id, seed)
                 .map_err(|_| ReconciliationError::StorageUnavailable)?;
-            append_accepted_evidence(journal_path, &journal_authenticator, &evidence)
+            append_accepted_evidence(custody.journal_path(), &journal_authenticator, &evidence)
                 .map_err(|_| ReconciliationError::StorageUnavailable)?;
-            accepted.resolve_recorded(store, &reconciliation_authenticator)
+            accepted.resolve_recorded(&store, &reconciliation_authenticator)
         });
         if !matches!(result, Ok(Ok(()))) {
             return Err(WalletRuntimeError::ReconciliationUnavailable);
@@ -1717,13 +1716,6 @@ impl WalletReconciliationPermit<'_> {
         }
         result
     }
-}
-
-fn compatibility_contract_digest_hex() -> String {
-    let mut hasher =
-        blake3::Hasher::new_derive_key("com.vision.desktop.wallet-submission-contract.v1");
-    hasher.update(SUPPORTED_WALLET_CORE_CONTRACT.as_bytes());
-    hasher.finalize().to_hex().to_string()
 }
 
 impl Drop for WalletReconciliationPermit<'_> {

@@ -18,6 +18,20 @@ manifest relaxation, or Vision-Core change. Lifecycle, signing, and submission s
 constants remain `false`. The current Core manifest still cannot construct production wallet Core
 authority.
 
+The first implementation review of commit `9e47e2c26018622af9a36bb4608436f7758390ba`
+reported zero High, two Medium, and two Low findings. This corrective candidate addresses all four:
+
+- lifecycle now issues one non-constructible `WalletCustodyPathAuthority`; submission and restart
+  reconciliation accept that authority rather than caller-selected vault or journal paths;
+- the canonical journal and both reconciliation files are derived from the same lifecycle-owned
+  custody directory;
+- restart lookup retains the original Core fingerprint as authenticated provenance, but permits a
+  newer independently validated Core generation and requires that one fresh generation to remain
+  unchanged before and after the read;
+- live and restart acceptance call one canonical compatibility-digest implementation; and
+- exact restart lookup independently verifies the Ed25519 signature against the sender key after
+  exact field validation and before accepting the signed-body digest.
+
 ## Authority path
 
 The reviewed native approval and private signing path now promotes the continuously occupied
@@ -54,6 +68,11 @@ The fixed store uses:
 - restrictive Windows file protections;
 - create-new staging files, flush, handle verification, and handle-bound atomic publication; and
 - authenticated transition-head recovery that accepts only the complete old or new state.
+
+Its location is not accepted as a raw submission argument. The lifecycle boundary derives the
+canonical vault and activity-journal names and issues a single-owner path authority. The store and
+journal paths are derived internally from that authority, so an accepted journal write cannot be
+redirected away from the marker or unlocked wallet directory.
 
 Live authority advances linearly through `Prepared`, `MayHaveBeenSubmitted`,
 `AcceptedRecordingPending`, and one terminal phase. No ordinary caller selects an arbitrary next
@@ -108,9 +127,11 @@ Its phase-specific operations are limited to:
 - `AcceptedRecordingPending`: complete idempotent journal recording without Core.
 
 `NotFound` remains unresolved. Acceptance requires exact signed-envelope identity, including the
-signature and the zeroizing signed-body digest. The same unsigned identifier with another signature
-is rejected. Restart lookup panics are caught, revoke runtime authority, and preserve the last
-authenticated phase.
+signature, independent Ed25519 verification against the sender key, and the zeroizing signed-body
+digest. The same unsigned identifier with another or invalid signature is rejected. The historical
+Core fingerprint remains authenticated provenance; restart recovery uses a fresh supervisor-issued
+read authority and rejects any generation change during the lookup. Restart lookup panics are
+caught, revoke runtime authority, and preserve the last authenticated phase.
 
 ## Journal and receipt boundary
 
@@ -136,6 +157,10 @@ Deterministic tests cover:
 - Core replacement immediately before and after the write;
 - a write panic after durable ambiguity;
 - a restart lookup panic;
+- acceptance under a newer stable, independently validated Core generation;
+- rejection when the fresh Core generation changes during restart lookup;
+- canonical custody-directory binding for the vault, journal, and reconciliation files;
+- independent Ed25519 rejection even when forged envelope fields and body digest agree;
 - accepted response loss, malformed response, transport failure, and duplicate response;
 - exactly one write and no retry;
 - restart cleanup, journal-only completion, exact accepted lookup, and persistent `NotFound`;
@@ -156,7 +181,8 @@ The unreviewed implementation candidate passed:
 
 - Rust formatting check;
 - strict Clippy with warnings denied;
-- full Rust suite: 274 passed, 0 failed, 4 operator-only tests ignored;
+- full serialized Rust suite (`--test-threads=1`): 277 passed, 0 failed, 4 operator-only tests
+  ignored;
 - Tauri authority suite: 7 passed;
 - WebView isolation suite: 2 passed;
 - frontend TypeScript typecheck;

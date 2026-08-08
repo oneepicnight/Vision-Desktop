@@ -11,6 +11,7 @@ use super::{
         WalletCoreClientError, WalletCoreReadSource, WalletCoreSubmissionSource,
         SUPPORTED_STATUS_VERSION, SUPPORTED_WALLET_CORE_CONTRACT,
     },
+    lifecycle::WalletCustodyPathAuthority,
     preview::{BoundTransferPreview, PendingTransferConfirmation, WalletPreviewError},
     runtime::{WalletRuntimeError, WalletSigningPermit},
     transaction::{
@@ -92,12 +93,10 @@ pub(in crate::wallet) fn sign_after_native_approval<S: WalletCoreReadSource>(
     sign_after_native_approval_with_observer(pending, approval, &NoopSigningCoordinatorObserver)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(in crate::wallet) fn sign_and_submit_after_native_approval<S: WalletCoreSubmissionSource>(
     pending: PendingTransferConfirmation<'_, S>,
     approval: NativeConfirmationApproval,
-    vault_path: &std::path::Path,
-    journal_path: &std::path::Path,
+    custody: &WalletCustodyPathAuthority,
     created_at_unix_ms: u64,
     rejection_policy: &crate::wallet::submission::SubmissionRejectionPolicy,
 ) -> Result<submission_coordinator::PrivateSubmissionResult, WalletPrivateSigningError> {
@@ -105,8 +104,7 @@ pub(in crate::wallet) fn sign_and_submit_after_native_approval<S: WalletCoreSubm
         sign_and_submit_after_native_approval_inner(
             pending,
             approval,
-            vault_path,
-            journal_path,
+            custody,
             created_at_unix_ms,
             rejection_policy,
         )
@@ -116,12 +114,10 @@ pub(in crate::wallet) fn sign_and_submit_after_native_approval<S: WalletCoreSubm
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn sign_and_submit_after_native_approval_inner<S: WalletCoreSubmissionSource>(
     pending: PendingTransferConfirmation<'_, S>,
     approval: NativeConfirmationApproval,
-    vault_path: &std::path::Path,
-    journal_path: &std::path::Path,
+    custody: &WalletCustodyPathAuthority,
     created_at_unix_ms: u64,
     rejection_policy: &crate::wallet::submission::SubmissionRejectionPolicy,
 ) -> Result<submission_coordinator::PrivateSubmissionResult, WalletPrivateSigningError> {
@@ -152,8 +148,7 @@ fn sign_and_submit_after_native_approval_inner<S: WalletCoreSubmissionSource>(
         submission_permit,
         artifact,
         &source,
-        vault_path,
-        journal_path,
+        custody,
         created_at_unix_ms,
         rejection_policy,
     )

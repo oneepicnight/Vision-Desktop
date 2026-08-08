@@ -147,6 +147,12 @@ impl TransactionSigningObserver for NoopTransactionSigningObserver {
     fn checkpoint(&self, _stage: TransactionSigningStage) {}
 }
 
+struct SignatureVerificationObserver;
+
+impl TransactionSigningObserver for SignatureVerificationObserver {
+    fn checkpoint(&self, _stage: TransactionSigningStage) {}
+}
+
 /// Produces the exact RC2 unsigned signing bytes without exposing the seed.
 pub(in crate::wallet) fn canonical_unsigned_payload(
     transaction: &VisionTransaction,
@@ -162,6 +168,19 @@ pub(in crate::wallet) fn canonical_transaction_id(
 ) -> Result<String, WalletTransactionError> {
     let payload = canonical_unsigned_payload(transaction)?;
     Ok(hex::encode(blake3::hash(&payload).as_bytes()))
+}
+
+/// Independently verifies the exact signed envelope returned by Core during reconciliation.
+pub(in crate::wallet) fn verify_signed_transaction(
+    transaction: &VisionTransaction,
+) -> Result<(), WalletTransactionError> {
+    let payload = canonical_unsigned_payload(transaction)?;
+    verify_signature(
+        &transaction.sig,
+        &payload,
+        &transaction.sender_pubkey,
+        &SignatureVerificationObserver,
+    )
 }
 
 /// Constructs the complete unsigned RC2 cash transfer from Rust-authoritative fields.

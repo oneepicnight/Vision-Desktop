@@ -1,5 +1,6 @@
 use super::{
     account::derive_account_identity,
+    lifecycle::WalletCustodyPathAuthority,
     runtime::{WalletActivationProof, WalletRuntimeError},
     secrets::WalletSeed,
     secure_filesystem::{
@@ -23,7 +24,6 @@ const HEAD_SCHEMA: &str = "vision-desktop-wallet-submission-reconciliation-head"
 const HEAD_VERSION: u32 = 1;
 const RECORD_FILE: &str = "wallet.submission-reconciliation.json";
 const HEAD_FILE: &str = "wallet.submission-reconciliation.head.json";
-const VAULT_FILE: &str = "wallet.vault.json";
 const STAGING_PREFIX: &str = ".wallet-submission-reconciliation-stage-";
 const AUTHENTICATION_BYTES: usize = 32;
 const MAX_RECORD_BYTES: usize = 16 * 1024;
@@ -199,7 +199,6 @@ pub(super) struct ReconciliationLookupExpectation {
     tip_raw_units: u64,
     fee_limit_raw_units: u64,
     signed_body_digest_hex: String,
-    original_core_identity_fingerprint_hex: String,
 }
 
 pub(super) struct AcceptedSubmissionEvidence {
@@ -224,16 +223,13 @@ pub(super) enum ReconciliationError {
 }
 
 impl ReconciliationStore {
-    pub(super) fn for_vault_path(vault_path: &Path) -> Result<Self, ReconciliationError> {
-        if vault_path.file_name().and_then(|value| value.to_str()) != Some(VAULT_FILE) {
-            return Err(ReconciliationError::InvalidRequest);
-        }
-        let directory = vault_path
+    pub(super) fn for_custody(
+        custody: &WalletCustodyPathAuthority,
+    ) -> Result<Self, ReconciliationError> {
+        let directory = custody
+            .vault_path()
             .parent()
             .ok_or(ReconciliationError::InvalidRequest)?;
-        if !directory.is_absolute() {
-            return Err(ReconciliationError::InvalidRequest);
-        }
         Ok(Self {
             record_path: directory.join(RECORD_FILE),
             head_path: directory.join(HEAD_FILE),
@@ -254,6 +250,12 @@ impl ReconciliationStore {
             .map_err(|_| ReconciliationError::StorageUnavailable)?;
         Ok(self.record_path.try_exists().unwrap_or(true)
             || self.head_path.try_exists().unwrap_or(true))
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_bound_to(&self, custody: &WalletCustodyPathAuthority) -> bool {
+        let directory = custody.vault_path().parent();
+        self.record_path.parent() == directory && self.head_path.parent() == directory
     }
 
     pub(super) fn load_authenticated(
@@ -711,10 +713,6 @@ impl RestartReconciliationPermit {
             tip_raw_units: self.record.tip_raw_units,
             fee_limit_raw_units: self.record.fee_limit_raw_units,
             signed_body_digest_hex: self.record.signed_body_digest_hex.clone(),
-            original_core_identity_fingerprint_hex: self
-                .record
-                .original_core_identity_fingerprint_hex
-                .clone(),
         };
         Ok((self, expectation))
     }
@@ -770,8 +768,29 @@ impl ReconciliationLookupExpectation {
     pub(super) fn signed_body_digest_hex(&self) -> &str {
         &self.signed_body_digest_hex
     }
-    pub(super) fn original_core_identity_fingerprint_hex(&self) -> &str {
-        &self.original_core_identity_fingerprint_hex
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn for_test(
+        transaction_id: String,
+        sender_address: String,
+        recipient_address: String,
+        amount_raw_units: String,
+        nonce: u64,
+        tip_raw_units: u64,
+        fee_limit_raw_units: u64,
+        signed_body_digest_hex: String,
+    ) -> Self {
+        Self {
+            transaction_id,
+            sender_address,
+            recipient_address,
+            amount_raw_units,
+            nonce,
+            tip_raw_units,
+            fee_limit_raw_units,
+            signed_body_digest_hex,
+        }
     }
 }
 
@@ -1291,6 +1310,7 @@ fn read_protected(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, Reconc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wallet::lifecycle::WalletCustodyPathAuthority;
     use std::{
         fs,
         sync::atomic::{AtomicU64, Ordering},
@@ -1305,7 +1325,7 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         storage_security::protect_directory(&path).unwrap();
-        path.join(VAULT_FILE)
+        path.join("wallet.vault.json")
     }
 
     fn fixture() -> (
@@ -1318,7 +1338,8 @@ mod tests {
         let seed = WalletSeed::for_test(0x31);
         let authenticator = ReconciliationAuthenticator::new("wallet-primary", &seed).unwrap();
         let sender = derive_account_identity(&seed).address;
-        let store = ReconciliationStore::for_vault_path(&vault_path).unwrap();
+        let custody = WalletCustodyPathAuthority::issue_for_test(&vault_path);
+        let store = ReconciliationStore::for_custody(&custody).unwrap();
         let record = ReconciliationRecord::prepared(
             "wallet-primary".to_string(),
             "11".repeat(32),
@@ -1382,7 +1403,8 @@ mod tests {
         let seed = WalletSeed::for_test(0x41);
         let sender = derive_account_identity(&seed).address;
         let first = ReconciliationAuthenticator::new("primary", &seed).unwrap();
-        let store = ReconciliationStore::for_vault_path(&vault_path).unwrap();
+        let custody = WalletCustodyPathAuthority::issue_for_test(&vault_path);
+        let store = ReconciliationStore::for_custody(&custody).unwrap();
         let record = ReconciliationRecord::prepared(
             "primary".to_string(),
             "11".repeat(32),

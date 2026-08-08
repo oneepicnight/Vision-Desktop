@@ -1,11 +1,4 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "transaction submission remains unreachable until every wallet gate passes"
-    )
-)]
-
+use super::core_client::{SUPPORTED_STATUS_VERSION, SUPPORTED_WALLET_CORE_CONTRACT};
 use serde::Deserialize;
 use std::fmt;
 
@@ -68,6 +61,8 @@ pub(in crate::wallet) struct SubmissionRejectionPolicy {
 }
 
 const REVIEWED_NON_MUTATING_REJECTIONS: &[(u16, WalletSubmissionRejection)] = &[];
+const CONTRACT_DIGEST_CONTEXT: &str = "com.vision.desktop.wallet-submission-contract.v1";
+const PRIVATE_SUBMISSION_BOUNDARY_CONTRACT: &str = "vision-wallet-private-submission-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::wallet) enum WalletSubmissionParseError {
@@ -227,6 +222,24 @@ impl SubmissionRejectionPolicy {
     fn contains(&self, status: u16, code: WalletSubmissionRejection) -> bool {
         self.allowed.contains(&(status, code))
     }
+}
+
+/// Canonical authenticated binding shared by live and restart acceptance paths.
+pub(in crate::wallet) fn compatibility_contract_digest(
+    rejection_policy: &SubmissionRejectionPolicy,
+) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key(CONTRACT_DIGEST_CONTEXT);
+    let rejection_digest = rejection_policy.digest_hex();
+    for value in [
+        PRIVATE_SUBMISSION_BOUNDARY_CONTRACT,
+        SUPPORTED_WALLET_CORE_CONTRACT,
+        SUPPORTED_STATUS_VERSION,
+        rejection_digest.as_str(),
+    ] {
+        hasher.update(value.as_bytes());
+        hasher.update(&[0]);
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 impl WalletSubmissionRejection {

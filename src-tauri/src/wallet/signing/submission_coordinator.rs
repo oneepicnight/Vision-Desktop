@@ -1,8 +1,7 @@
 use super::SignedTransferArtifact;
 use crate::wallet::{
-    core_client::{
-        WalletCoreSubmissionSource, SUPPORTED_STATUS_VERSION, SUPPORTED_WALLET_CORE_CONTRACT,
-    },
+    core_client::WalletCoreSubmissionSource,
+    lifecycle::WalletCustodyPathAuthority,
     reconciliation::{ReconciliationRecord, ReconciliationStore},
     runtime::{WalletRuntimeError, WalletSubmissionPermit},
     submission::{
@@ -12,13 +11,10 @@ use crate::wallet::{
     transaction::canonical_transaction_id,
 };
 use serde::Deserialize;
-use std::path::Path;
 use zeroize::Zeroizing;
 
 const MAX_SIGNED_BODY_BYTES: usize = 64 * 1024;
 const BODY_DIGEST_CONTEXT: &str = "com.vision.desktop.wallet-signed-envelope-digest.v1";
-const CONTRACT_DIGEST_CONTEXT: &str = "com.vision.desktop.wallet-submission-contract.v1";
-const PRIVATE_SUBMISSION_BOUNDARY_CONTRACT: &str = "vision-wallet-private-submission-v1";
 
 pub(in crate::wallet) enum PrivateSubmissionResult {
     Accepted,
@@ -45,8 +41,7 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
     mut permit: WalletSubmissionPermit<'_>,
     artifact: SignedTransferArtifact,
     source: &S,
-    vault_path: &Path,
-    journal_path: &Path,
+    custody: &WalletCustodyPathAuthority,
     created_at_unix_ms: u64,
     rejection_policy: &SubmissionRejectionPolicy,
 ) -> Result<PrivateSubmissionResult, PrivateSubmissionError> {
@@ -64,7 +59,7 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
     let mut attempt_bytes = Zeroizing::new([0_u8; 32]);
     getrandom::fill(&mut *attempt_bytes)
         .map_err(|_| PrivateSubmissionError::ReconciliationUnavailable)?;
-    let store = ReconciliationStore::for_vault_path(vault_path)
+    let store = ReconciliationStore::for_custody(custody)
         .map_err(|_| PrivateSubmissionError::ReconciliationUnavailable)?;
     let record = ReconciliationRecord::prepared(
         artifact.wallet_id.clone(),
@@ -150,14 +145,14 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
                     &store,
                     transaction_id,
                     nonce,
-                    compatibility_contract_digest(rejection_policy),
+                    crate::wallet::submission::compatibility_contract_digest(rejection_policy),
                 )
                 .map_err(map_runtime_error)?;
             let evidence = accepted
                 .evidence()
                 .map_err(|_| PrivateSubmissionError::ReconciliationUnavailable)?;
             permit
-                .record_accepted_evidence(journal_path, &evidence)
+                .record_accepted_evidence(custody, &evidence)
                 .map_err(map_runtime_error)?;
             permit
                 .resolve_recorded(accepted, &store)
@@ -269,21 +264,6 @@ fn digest_hex(context: &'static str, bytes: &[u8]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn compatibility_contract_digest(rejection_policy: &SubmissionRejectionPolicy) -> String {
-    let mut hasher = blake3::Hasher::new_derive_key(CONTRACT_DIGEST_CONTEXT);
-    let rejection_digest = rejection_policy.digest_hex();
-    for value in [
-        PRIVATE_SUBMISSION_BOUNDARY_CONTRACT,
-        SUPPORTED_WALLET_CORE_CONTRACT,
-        SUPPORTED_STATUS_VERSION,
-        rejection_digest.as_str(),
-    ] {
-        hasher.update(value.as_bytes());
-        hasher.update(&[0]);
-    }
-    hasher.finalize().to_hex().to_string()
-}
-
 fn is_lower_hex_32(value: &str) -> bool {
     value.len() == 64
         && value
@@ -322,6 +302,7 @@ mod tests {
             WalletCoreAccountSnapshot, WalletCoreClientError, WalletCoreHttpResponse,
             WalletCoreReadSource, WalletCoreStatus,
         },
+        lifecycle::WalletCustodyPathAuthority,
         preview::{
             bind_consumed_preview_for_test, prepare_with_source_for_test,
             PendingTransferConfirmation,
@@ -358,6 +339,7 @@ mod tests {
         CoreReplacementAfterWrite,
         PanicDuringWrite,
         PanicDuringLookup,
+        CoreReplacementDuringRestartLookup,
     }
 
     struct FakeSubmissionCore {
@@ -403,6 +385,8 @@ mod tests {
             if (matches!(self.mode, ResponseMode::CoreReplacementBeforeWrite) && call >= 10)
                 || (matches!(self.mode, ResponseMode::CoreReplacementAfterWrite)
                     && self.writes.load(Ordering::SeqCst) > 0)
+                || (matches!(self.mode, ResponseMode::CoreReplacementDuringRestartLookup)
+                    && call >= 2)
             {
                 return Ok([0x43; 32]);
             }
@@ -452,7 +436,8 @@ mod tests {
                 ResponseMode::Accepted
                 | ResponseMode::CoreReplacementBeforeWrite
                 | ResponseMode::CoreReplacementAfterWrite
-                | ResponseMode::PanicDuringLookup => ("accepted", None),
+                | ResponseMode::PanicDuringLookup
+                | ResponseMode::CoreReplacementDuringRestartLookup => ("accepted", None),
                 ResponseMode::Duplicate => ("rejected", Some("duplicate_canonical_tx_id")),
                 ResponseMode::Rejected => ("rejected", Some("stale_nonce")),
                 ResponseMode::TransportFailure
@@ -580,12 +565,9 @@ mod tests {
         .unwrap()
     }
 
-    fn paths(directory: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    fn custody(directory: &tempfile::TempDir) -> WalletCustodyPathAuthority {
         crate::wallet::storage_security::protect_directory(directory.path()).unwrap();
-        (
-            directory.path().join("wallet.vault.json"),
-            directory.path().join("wallet.activity.json"),
-        )
+        WalletCustodyPathAuthority::issue_for_test(&directory.path().join("wallet.vault.json"))
     }
 
     #[test]
@@ -603,12 +585,12 @@ mod tests {
             ResponseMode::Accepted,
         );
         let directory = tempfile::tempdir().unwrap();
-        let (vault_path, journal_path) = paths(&directory);
+        let custody = custody(&directory);
+        let journal_path = custody.journal_path().to_path_buf();
         let result = super::super::sign_and_submit_after_native_approval(
             pending,
             NativeConfirmationApproval::issue_for_test(),
-            &vault_path,
-            &journal_path,
+            &custody,
             1_700_000_000_123,
             &SubmissionRejectionPolicy::production(),
         )
@@ -640,12 +622,12 @@ mod tests {
                 mode,
             );
             let directory = tempfile::tempdir().unwrap();
-            let (vault_path, journal_path) = paths(&directory);
+            let custody = custody(&directory);
+            let journal_path = custody.journal_path().to_path_buf();
             let result = super::super::sign_and_submit_after_native_approval(
                 pending,
                 NativeConfirmationApproval::issue_for_test(),
-                &vault_path,
-                &journal_path,
+                &custody,
                 1_700_000_000_123,
                 &SubmissionRejectionPolicy::production(),
             )
@@ -656,20 +638,22 @@ mod tests {
             let record = fs_read_record(&directory);
             assert_eq!(record["phase"]["kind"], "may_have_been_submitted");
             if !matches!(mode, ResponseMode::TransportFailure) {
-                let store = ReconciliationStore::for_vault_path(&vault_path).unwrap();
                 let reconciliation = runtime.begin_reconciliation_discovery(MAIN).unwrap();
-                let restart = reconciliation.discover(&store).unwrap().unwrap();
+                let restart = reconciliation.discover(&custody).unwrap().unwrap();
                 let source = FakeSubmissionCore {
                     address: sender.clone(),
                     writes: writes.clone(),
                     mode,
-                    fingerprint: [0x42; 32],
+                    // Restart reconciliation deliberately accepts a newer, independently
+                    // validated Core generation while retaining the original fingerprint as
+                    // authenticated provenance.
+                    fingerprint: [0x43; 32],
                     identity_calls: Arc::new(AtomicUsize::new(0)),
                     revoke_on_identity_call: None,
                     lookup_body,
                 };
                 assert!(reconciliation
-                    .reconcile_ambiguous_acceptance(&store, &journal_path, restart, &source,)
+                    .reconcile_ambiguous_acceptance(&custody, restart, &source)
                     .unwrap());
                 reconciliation.complete(()).unwrap();
                 assert!(journal_path.exists());
@@ -679,6 +663,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn restart_lookup_rejects_a_core_generation_change_during_the_read() {
+        let (runtime, sender) = unlocked_runtime();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let lookup_body = Arc::new(Mutex::new(None));
+        let pending = pending(
+            &runtime,
+            &sender,
+            &"b".repeat(64),
+            writes.clone(),
+            lookup_body.clone(),
+            ResponseMode::AcceptedResponseLost,
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let custody = custody(&directory);
+        let result = super::super::sign_and_submit_after_native_approval(
+            pending,
+            NativeConfirmationApproval::issue_for_test(),
+            &custody,
+            1_700_000_000_123,
+            &SubmissionRejectionPolicy::production(),
+        )
+        .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
+        assert!(matches!(result, PrivateSubmissionResult::OutcomeUnknown));
+
+        let reconciliation = runtime.begin_reconciliation_discovery(MAIN).unwrap();
+        let restart = reconciliation.discover(&custody).unwrap().unwrap();
+        let source = FakeSubmissionCore {
+            address: sender,
+            writes,
+            mode: ResponseMode::CoreReplacementDuringRestartLookup,
+            fingerprint: [0x55; 32],
+            identity_calls: Arc::new(AtomicUsize::new(0)),
+            revoke_on_identity_call: None,
+            lookup_body,
+        };
+        assert_eq!(
+            reconciliation
+                .reconcile_ambiguous_acceptance(&custody, restart, &source)
+                .err(),
+            Some(WalletRuntimeError::ReconciliationUnavailable)
+        );
+        drop(reconciliation);
+        assert!(runtime.lifecycle_status(true).unwrap().locked);
+        assert_eq!(
+            fs_read_record(&directory)["phase"]["kind"],
+            "may_have_been_submitted"
+        );
+    }
+
+    #[test]
+    fn custody_authority_derives_all_submission_files_from_one_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let custody = custody(&directory);
+        let store = ReconciliationStore::for_custody(&custody).unwrap();
+        assert_eq!(
+            custody.vault_path().parent(),
+            custody.journal_path().parent()
+        );
+        assert_eq!(
+            custody
+                .journal_path()
+                .file_name()
+                .and_then(|value| value.to_str()),
+            Some("wallet.activity.json")
+        );
+        assert!(store.is_bound_to(&custody));
     }
 
     #[test]
@@ -694,7 +747,8 @@ mod tests {
             ResponseMode::Rejected,
         );
         let directory = tempfile::tempdir().unwrap();
-        let (vault_path, journal_path) = paths(&directory);
+        let custody = custody(&directory);
+        let journal_path = custody.journal_path().to_path_buf();
         let policy = SubmissionRejectionPolicy::for_test(&[(
             422,
             crate::wallet::submission::WalletSubmissionRejection::StaleNonce,
@@ -702,8 +756,7 @@ mod tests {
         let result = super::super::sign_and_submit_after_native_approval(
             pending,
             NativeConfirmationApproval::issue_for_test(),
-            &vault_path,
-            &journal_path,
+            &custody,
             1_700_000_000_123,
             &policy,
         )
@@ -731,12 +784,12 @@ mod tests {
             ResponseMode::TransportFailure,
         );
         let directory = tempfile::tempdir().unwrap();
-        let (vault_path, journal_path) = paths(&directory);
+        let custody = custody(&directory);
+        let journal_path = custody.journal_path().to_path_buf();
         let result = super::super::sign_and_submit_after_native_approval(
             pending,
             NativeConfirmationApproval::issue_for_test(),
-            &vault_path,
-            &journal_path,
+            &custody,
             1_700_000_000_123,
             &SubmissionRejectionPolicy::production(),
         )
@@ -755,9 +808,8 @@ mod tests {
             }))
             .unwrap(),
         );
-        let store = ReconciliationStore::for_vault_path(&vault_path).unwrap();
         let reconciliation = runtime.begin_reconciliation_discovery(MAIN).unwrap();
-        let restart = reconciliation.discover(&store).unwrap().unwrap();
+        let restart = reconciliation.discover(&custody).unwrap().unwrap();
         let source = FakeSubmissionCore {
             address: sender,
             writes: writes.clone(),
@@ -768,7 +820,7 @@ mod tests {
             lookup_body,
         };
         assert!(!reconciliation
-            .reconcile_ambiguous_acceptance(&store, &journal_path, restart, &source)
+            .reconcile_ambiguous_acceptance(&custody, restart, &source)
             .unwrap());
         reconciliation.complete(()).unwrap();
         assert_eq!(writes.load(Ordering::SeqCst), 1);
@@ -783,16 +835,17 @@ mod tests {
     fn restart_permit_resolves_prepared_and_completes_accepted_recording_without_write_authority() {
         let (runtime, sender) = unlocked_runtime();
         let directory = tempfile::tempdir().unwrap();
-        let (vault_path, journal_path) = paths(&directory);
-        let store = ReconciliationStore::for_vault_path(&vault_path).unwrap();
+        let custody = custody(&directory);
+        let journal_path = custody.journal_path().to_path_buf();
+        let store = ReconciliationStore::for_custody(&custody).unwrap();
         let seed = WalletSeed::for_test(0x41);
         let authenticator = ReconciliationAuthenticator::new("primary", &seed).unwrap();
 
         publish_prepared_for_test(&store, &authenticator, reconciliation_record(&sender, "11"))
             .unwrap();
         let cleanup = runtime.begin_reconciliation_discovery(MAIN).unwrap();
-        let prepared = cleanup.discover(&store).unwrap().unwrap();
-        cleanup.resolve_prepared(&store, prepared).unwrap();
+        let prepared = cleanup.discover(&custody).unwrap().unwrap();
+        cleanup.resolve_prepared(&custody, prepared).unwrap();
         cleanup.complete(()).unwrap();
         assert_eq!(
             fs_read_record(&directory)["phase"]["kind"],
@@ -802,9 +855,9 @@ mod tests {
         publish_accepted_for_test(&store, &authenticator, reconciliation_record(&sender, "77"))
             .unwrap();
         let recording = runtime.begin_reconciliation_discovery(MAIN).unwrap();
-        let accepted = recording.discover(&store).unwrap().unwrap();
+        let accepted = recording.discover(&custody).unwrap().unwrap();
         recording
-            .complete_accepted_recording(&store, &journal_path, accepted)
+            .complete_accepted_recording(&custody, accepted)
             .unwrap();
         recording.complete(()).unwrap();
         assert!(journal_path.exists());
@@ -827,12 +880,11 @@ mod tests {
             ResponseMode::PanicDuringWrite,
         );
         let directory = tempfile::tempdir().unwrap();
-        let (vault_path, journal_path) = paths(&directory);
+        let custody = custody(&directory);
         let result = super::super::sign_and_submit_after_native_approval(
             pending,
             NativeConfirmationApproval::issue_for_test(),
-            &vault_path,
-            &journal_path,
+            &custody,
             1_700_000_000_123,
             &SubmissionRejectionPolicy::production(),
         );
@@ -865,12 +917,12 @@ mod tests {
                 mode,
             );
             let directory = tempfile::tempdir().unwrap();
-            let (vault_path, journal_path) = paths(&directory);
+            let custody = custody(&directory);
+            let journal_path = custody.journal_path().to_path_buf();
             let result = super::super::sign_and_submit_after_native_approval(
                 pending,
                 NativeConfirmationApproval::issue_for_test(),
-                &vault_path,
-                &journal_path,
+                &custody,
                 1_700_000_000_123,
                 &SubmissionRejectionPolicy::production(),
             )
@@ -905,12 +957,11 @@ mod tests {
                 Some((identity_call, Arc::clone(&runtime))),
             );
             let directory = tempfile::tempdir().unwrap();
-            let (vault_path, journal_path) = paths(&directory);
+            let custody = custody(&directory);
             let result = super::super::sign_and_submit_after_native_approval(
                 pending,
                 NativeConfirmationApproval::issue_for_test(),
-                &vault_path,
-                &journal_path,
+                &custody,
                 1_700_000_000_123,
                 &SubmissionRejectionPolicy::production(),
             );
@@ -938,21 +989,19 @@ mod tests {
             ResponseMode::TransportFailure,
         );
         let directory = tempfile::tempdir().unwrap();
-        let (vault_path, journal_path) = paths(&directory);
+        let custody = custody(&directory);
         let result = super::super::sign_and_submit_after_native_approval(
             pending,
             NativeConfirmationApproval::issue_for_test(),
-            &vault_path,
-            &journal_path,
+            &custody,
             1_700_000_000_123,
             &SubmissionRejectionPolicy::production(),
         )
         .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
         assert!(matches!(result, PrivateSubmissionResult::OutcomeUnknown));
 
-        let store = ReconciliationStore::for_vault_path(&vault_path).unwrap();
         let reconciliation = runtime.begin_reconciliation_discovery(MAIN).unwrap();
-        let restart = reconciliation.discover(&store).unwrap().unwrap();
+        let restart = reconciliation.discover(&custody).unwrap().unwrap();
         let source = FakeSubmissionCore {
             address: sender,
             writes,
@@ -964,7 +1013,7 @@ mod tests {
         };
         assert_eq!(
             reconciliation
-                .reconcile_ambiguous_acceptance(&store, &journal_path, restart, &source)
+                .reconcile_ambiguous_acceptance(&custody, restart, &source)
                 .err(),
             Some(WalletRuntimeError::RuntimeUnavailable)
         );

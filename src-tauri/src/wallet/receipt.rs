@@ -8,7 +8,7 @@
 
 use super::{
     reconciliation::ReconciliationLookupExpectation,
-    transaction::{canonical_transaction_id, VisionTransaction},
+    transaction::{canonical_transaction_id, verify_signed_transaction, VisionTransaction},
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -267,6 +267,11 @@ fn is_lowercase_hex_32_bytes(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wallet::{
+        reconciliation::ReconciliationLookupExpectation,
+        secrets::WalletSeed,
+        transaction::{sign_cash_transfer_for_test, CashTransferDraft},
+    };
 
     fn sample_transaction() -> VisionTransaction {
         VisionTransaction {
@@ -517,6 +522,55 @@ mod tests {
             Err(WalletReceiptError::SignedEnvelopeMismatch)
         );
     }
+
+    #[test]
+    fn restart_lookup_independently_rejects_an_invalid_ed25519_signature() {
+        let recipient = "22".repeat(32);
+        let draft = CashTransferDraft::for_current_nonce(7, recipient.clone(), 42);
+        let transaction = sign_cash_transfer_for_test(&WalletSeed::for_test(7), &draft).unwrap();
+        let transaction_id = canonical_transaction_id(&transaction).unwrap();
+        let digest = signed_body_digest(&transaction);
+        let expected = ReconciliationLookupExpectation::for_test(
+            transaction_id,
+            transaction.sender_pubkey.clone(),
+            recipient,
+            "42".to_string(),
+            transaction.nonce,
+            transaction.tip,
+            transaction.fee_limit,
+            digest,
+        );
+        let body = snapshot_json(Some(&transaction), true, None, None, None);
+        assert!(prove_exact_reconciliation_lookup(&body, &expected)
+            .unwrap()
+            .is_some());
+
+        let mut forged = transaction;
+        forged.sig = "00".repeat(64);
+        let forged_expected = ReconciliationLookupExpectation::for_test(
+            canonical_transaction_id(&forged).unwrap(),
+            forged.sender_pubkey.clone(),
+            "22".repeat(32),
+            "42".to_string(),
+            forged.nonce,
+            forged.tip,
+            forged.fee_limit,
+            signed_body_digest(&forged),
+        );
+        let forged_body = snapshot_json(Some(&forged), true, None, None, None);
+        assert!(matches!(
+            prove_exact_reconciliation_lookup(&forged_body, &forged_expected),
+            Err(WalletReceiptError::SignedEnvelopeMismatch)
+        ));
+    }
+
+    fn signed_body_digest(transaction: &VisionTransaction) -> String {
+        let body = serde_json::to_vec(transaction).unwrap();
+        let mut hasher =
+            blake3::Hasher::new_derive_key("com.vision.desktop.wallet-signed-envelope-digest.v1");
+        hasher.update(&body);
+        hasher.finalize().to_hex().to_string()
+    }
 }
 
 pub(super) struct ExactAcceptedLookup {
@@ -584,6 +638,8 @@ pub(super) fn prove_exact_reconciliation_lookup(
     {
         return Err(WalletReceiptError::SignedEnvelopeMismatch);
     }
+    verify_signed_transaction(&transaction)
+        .map_err(|_| WalletReceiptError::SignedEnvelopeMismatch)?;
     let exact_body =
         serde_json::to_vec(&transaction).map_err(|_| WalletReceiptError::SignedEnvelopeMismatch)?;
     let mut hasher =

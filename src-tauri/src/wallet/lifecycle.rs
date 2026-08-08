@@ -48,6 +48,48 @@ use zeroize::Zeroizing;
 
 const WALLET_DIRECTORY: &str = "wallet";
 const WALLET_VAULT_FILE: &str = "wallet.vault.json";
+const WALLET_ACTIVITY_FILE: &str = "wallet.activity.json";
+
+/// Lifecycle-issued authority for this installation's canonical custody files.
+///
+/// The fields and constructor stay private to the lifecycle boundary. Other wallet modules may
+/// borrow this authority, but cannot substitute a vault, journal, or reconciliation directory.
+/// It deliberately implements neither `Clone`, `Debug`, nor serialization.
+pub(in crate::wallet) struct WalletCustodyPathAuthority {
+    vault_path: PathBuf,
+    journal_path: PathBuf,
+}
+
+impl WalletCustodyPathAuthority {
+    fn issue(vault_path: PathBuf) -> Result<Self, WalletLifecycleError> {
+        if !vault_path.is_absolute()
+            || vault_path.file_name().and_then(|value| value.to_str()) != Some(WALLET_VAULT_FILE)
+        {
+            return Err(WalletLifecycleError::VaultStorageUnavailable);
+        }
+        let directory = vault_path
+            .parent()
+            .ok_or(WalletLifecycleError::VaultStorageUnavailable)?
+            .to_path_buf();
+        Ok(Self {
+            vault_path,
+            journal_path: directory.join(WALLET_ACTIVITY_FILE),
+        })
+    }
+
+    pub(super) fn vault_path(&self) -> &Path {
+        &self.vault_path
+    }
+
+    pub(super) fn journal_path(&self) -> &Path {
+        &self.journal_path
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn issue_for_test(vault_path: &Path) -> Self {
+        Self::issue(vault_path.to_path_buf()).expect("test custody path must be canonical")
+    }
+}
 
 /// Private Rust-only orchestration for the first local wallet lifecycle.
 ///
@@ -55,7 +97,7 @@ const WALLET_VAULT_FILE: &str = "wallet.vault.json";
 /// Serde traits, `Clone`, nor `Debug`.
 pub(crate) struct WalletLifecycleAdapters {
     runtime: Arc<WalletRuntimeState>,
-    vault_path: PathBuf,
+    custody: WalletCustodyPathAuthority,
     recovery_ceremony: Arc<dyn RecoveryCredentialCeremony>,
     secret_ceremony: Arc<dyn WalletSecretCeremony>,
     #[cfg(test)]
@@ -377,9 +419,10 @@ impl WalletLifecycleAdapters {
                 .parent()
                 .ok_or(WalletLifecycleError::VaultStorageUnavailable)?,
         )?;
+        let custody = WalletCustodyPathAuthority::issue(vault_path)?;
         Ok(Self {
             runtime,
-            vault_path,
+            custody,
             recovery_ceremony,
             secret_ceremony,
             #[cfg(test)]
@@ -402,14 +445,18 @@ impl WalletLifecycleAdapters {
         })
     }
 
+    pub(in crate::wallet) fn custody_path_authority(&self) -> &WalletCustodyPathAuthority {
+        &self.custody
+    }
+
     fn status_inner(&self) -> Result<WalletLifecycleStatus, WalletLifecycleError> {
-        match self.vault_path.try_exists() {
+        match self.custody.vault_path().try_exists() {
             Ok(false) => self
                 .runtime
                 .lifecycle_status(false)
                 .map_err(map_runtime_error),
             Ok(true) => {
-                let vault = load_vault(&self.vault_path).map_err(map_vault_load_error)?;
+                let vault = load_vault(self.custody.vault_path()).map_err(map_vault_load_error)?;
                 self.runtime
                     .lifecycle_status_for_vault(&vault)
                     .map_err(map_runtime_error)
@@ -611,7 +658,7 @@ impl WalletLifecycleAdapters {
         let metadata = operation
             .run_authorized(|_| {
                 verified
-                    .store_local_vault(&self.vault_path)
+                    .store_local_vault(self.custody.vault_path())
                     .map_err(map_onboarding_error)
             })
             .map_err(map_runtime_error)??;
@@ -793,7 +840,7 @@ impl WalletLifecycleAdapters {
         let metadata = operation
             .run_authorized(|_| {
                 restored
-                    .store_local_vault(&self.vault_path)
+                    .store_local_vault(self.custody.vault_path())
                     .map_err(map_onboarding_error)
             })
             .map_err(map_runtime_error)??;
@@ -826,7 +873,9 @@ impl WalletLifecycleAdapters {
                 .begin_operation(owner_window, WalletOperationKind::Unlock)
                 .map_err(map_runtime_error)?;
             let vault = operation
-                .run_authorized(|_| load_vault(&self.vault_path).map_err(map_vault_load_error))
+                .run_authorized(|_| {
+                    load_vault(self.custody.vault_path()).map_err(map_vault_load_error)
+                })
                 .map_err(map_runtime_error)??;
             #[cfg(test)]
             self.panic_at(WalletLifecyclePanicCheckpoint::BeforeNativeSecretCeremony);
@@ -854,7 +903,9 @@ impl WalletLifecycleAdapters {
                 .begin_operation(owner_window, WalletOperationKind::Unlock)
                 .map_err(map_runtime_error)?;
             let vault = operation
-                .run_authorized(|_| load_vault(&self.vault_path).map_err(map_vault_load_error))
+                .run_authorized(|_| {
+                    load_vault(self.custody.vault_path()).map_err(map_vault_load_error)
+                })
                 .map_err(map_runtime_error)??;
             let wallet_password = wallet_secret.into_wallet_password();
             self.unlock_authorized_with_password(operation, vault, wallet_password)
@@ -924,7 +975,7 @@ impl WalletLifecycleAdapters {
     }
 
     fn require_vault_absent(&self) -> Result<(), WalletLifecycleError> {
-        match self.vault_path.try_exists() {
+        match self.custody.vault_path().try_exists() {
             Ok(false) => Ok(()),
             Ok(true) => Err(WalletLifecycleError::WalletAlreadyExists),
             Err(_) => Err(WalletLifecycleError::VaultStorageUnavailable),
@@ -936,7 +987,7 @@ impl WalletLifecycleAdapters {
         let test_recovery_ceremony = Arc::new(TestRecoveryCredentialCeremony::verified());
         Self {
             runtime,
-            vault_path: vault_path.to_path_buf(),
+            custody: WalletCustodyPathAuthority::issue_for_test(vault_path),
             recovery_ceremony: Arc::clone(&test_recovery_ceremony)
                 as Arc<dyn RecoveryCredentialCeremony>,
             secret_ceremony: Arc::new(TestWalletSecretCeremony),
@@ -955,7 +1006,7 @@ impl WalletLifecycleAdapters {
         let test_recovery_ceremony = Arc::new(TestRecoveryCredentialCeremony::verified());
         Self {
             runtime,
-            vault_path: vault_path.to_path_buf(),
+            custody: WalletCustodyPathAuthority::issue_for_test(vault_path),
             recovery_ceremony: Arc::clone(&test_recovery_ceremony)
                 as Arc<dyn RecoveryCredentialCeremony>,
             secret_ceremony: Arc::new(TestWalletSecretCeremony),
@@ -977,7 +1028,7 @@ impl WalletLifecycleAdapters {
         ));
         Self {
             runtime,
-            vault_path: vault_path.to_path_buf(),
+            custody: WalletCustodyPathAuthority::issue_for_test(vault_path),
             recovery_ceremony: Arc::clone(&test_recovery_ceremony)
                 as Arc<dyn RecoveryCredentialCeremony>,
             secret_ceremony: Arc::new(TestWalletSecretCeremony),
@@ -1492,7 +1543,7 @@ mod tests {
         let runtime = Arc::new(WalletRuntimeState::for_test());
         let adapter = WalletLifecycleAdapters::for_test(
             Arc::clone(&runtime),
-            &directory.path().join("wallet.json"),
+            &directory.path().join(WALLET_VAULT_FILE),
         );
         let operation = runtime
             .begin_operation(MAIN, WalletOperationKind::Create)

@@ -13,6 +13,15 @@ independent implementation review.
 
 This tranche is private Rust infrastructure only. It does not register or expose a wallet command.
 
+## M-01 corrective implementation
+
+The callback now explicitly cancels and disarms the pending recovery-selection permit before it
+returns a cancellation or invalid-selection result. The intended fixed selection result therefore
+reaches the lifecycle boundary while its captured exposure and window authorities are still valid.
+The boundary serializes that exact result and then performs its ordinary fail-closed authority
+revocation. Failure to cancel the permit still fails closed through the armed permit and boundary
+guards. No selected path, path token, stale success, or raw validation detail escapes on an error.
+
 ## Implemented boundary
 
 `src-tauri/src/wallet/lifecycle_command_boundary.rs` adds:
@@ -43,7 +52,8 @@ This tranche is private Rust infrastructure only. It does not register or expose
   proven;
 - command-shaped status, create, restore, unlock, and lock dispatch into the existing private
   lifecycle adapters;
-- private Rust-owned recovery destination/source dispatch and callback completion; and
+- private Rust-owned recovery destination/source dispatch and callback completion, with explicit
+  permit cancellation before cancellation or invalid-selection results cross the boundary; and
 - a post-lock authority renewal that treats successful explicit lock as the intentional revocation
   epoch transition it is, while still requiring a fresh exposure proof before returning success.
 
@@ -101,7 +111,9 @@ The implementation directly covers:
 - panic containment during response serialization;
 - exact storage-independent lock response with post-lock authority renewal;
 - opaque selection-handle response with path exclusion; and
-- fixed cancellation response with runtime revocation.
+- end-to-end destination and source callback regressions for cancellation and invalid selection,
+  proving the exact fixed code, no handle or stale success, a valid pre-response epoch, and
+  post-response authority revocation.
 
 The Tauri ACL regression test also proves that this module has no command attribute, that the
 custom whole-message argument borrows both the actual command and complete payload, that raw and

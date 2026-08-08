@@ -631,9 +631,11 @@ fn is_bundled_windows_url(url: &Url) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::runtime::RecoveryPathPurpose;
     use super::*;
     use std::path::Path;
     use tauri::ipc::IpcResponse;
+    use tauri_plugin_dialog::FilePath;
     use tempfile::TempDir;
 
     const TEST_HWND: isize = 0x1234;
@@ -1075,6 +1077,81 @@ mod tests {
             serde_json::json!({ "code": "recovery_selection_cancelled" })
         );
         assert!(runtime.validate_boundary_epoch(epoch).is_err());
+    }
+
+    #[test]
+    fn real_selection_failures_preserve_fixed_error_then_revoke_authority() {
+        let invalid_url = || FilePath::Url(Url::parse("file:///C:/rejected.json").unwrap());
+        let cases = [
+            (
+                RecoveryPathPurpose::Destination,
+                None,
+                WalletRuntimeError::RecoverySelectionCancelled,
+                "recovery_selection_cancelled",
+            ),
+            (
+                RecoveryPathPurpose::Source,
+                None,
+                WalletRuntimeError::RecoverySelectionCancelled,
+                "recovery_selection_cancelled",
+            ),
+            (
+                RecoveryPathPurpose::Destination,
+                Some(invalid_url()),
+                WalletRuntimeError::RecoveryDestinationInvalid,
+                "recovery_storage_unavailable",
+            ),
+            (
+                RecoveryPathPurpose::Source,
+                Some(invalid_url()),
+                WalletRuntimeError::RecoverySourceInvalid,
+                "recovery_storage_unavailable",
+            ),
+        ];
+
+        for (purpose, selected, expected_runtime_error, expected_boundary_code) in cases {
+            let directory = TempDir::new().unwrap();
+            let (runtime, boundary) = runtime_and_boundary(directory.path());
+            let exposure = WalletExposureAuthority::issue(
+                &runtime,
+                &WholeEnvelopeTransportPolicy::approved_for_test(),
+            )
+            .unwrap();
+            let epoch = exposure.revocation_epoch;
+            let window = main_window_authority(&boundary, &exposure).unwrap();
+            let permit = runtime
+                .begin_recovery_path_selection(MAIN_WINDOW_LABEL, purpose)
+                .unwrap();
+
+            let result = match purpose {
+                RecoveryPathPurpose::Destination => {
+                    super::super::recovery_selection::finish_destination_selection_for_test(
+                        &runtime, permit, selected,
+                    )
+                }
+                RecoveryPathPurpose::Source => {
+                    super::super::recovery_selection::finish_source_selection_for_test(
+                        &runtime, permit, selected,
+                    )
+                }
+            };
+            assert_eq!(result.err(), Some(expected_runtime_error));
+            assert!(runtime.validate_boundary_epoch(epoch).is_ok());
+
+            let error = match boundary.finish_recovery_selection(
+                Err(expected_runtime_error),
+                exposure,
+                window,
+            ) {
+                Ok(_) => panic!("failed selection must not return a stale success"),
+                Err(error) => error,
+            };
+            let value = error_json(error);
+            assert_eq!(value, serde_json::json!({ "code": expected_boundary_code }));
+            assert_eq!(value.as_object().map(Map::len), Some(1));
+            assert!(value.get("recovery_selection_handle").is_none());
+            assert!(runtime.validate_boundary_epoch(epoch).is_err());
+        }
     }
 
     #[test]

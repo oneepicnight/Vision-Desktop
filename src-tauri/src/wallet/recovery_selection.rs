@@ -158,34 +158,58 @@ fn run_selection_callback(runtime: Arc<WalletRuntimeState>, callback: impl FnOnc
 
 fn finish_destination_selection(
     runtime: &WalletRuntimeState,
-    permit: RecoverySelectionPermit,
+    mut permit: RecoverySelectionPermit,
     selected: Option<FilePath>,
 ) -> Result<RecoveryPathToken, WalletRuntimeError> {
-    let Some(FilePath::Path(path)) = selected else {
-        return Err(if selected.is_none() {
-            WalletRuntimeError::RecoverySelectionCancelled
-        } else {
-            WalletRuntimeError::RecoveryDestinationInvalid
-        });
+    let selected_path = match selected {
+        Some(FilePath::Path(path)) => validate_destination(path),
+        None => Err(WalletRuntimeError::RecoverySelectionCancelled),
+        Some(FilePath::Url(_)) => Err(WalletRuntimeError::RecoveryDestinationInvalid),
     };
-    let path = validate_destination(path)?;
-    runtime.complete_recovery_path_selection(permit, path)
+    match selected_path {
+        Ok(path) => runtime.complete_recovery_path_selection(permit, path),
+        Err(selection_error) => {
+            runtime.cancel_recovery_path_selection(&mut permit)?;
+            Err(selection_error)
+        }
+    }
 }
 
 fn finish_source_selection(
     runtime: &WalletRuntimeState,
+    mut permit: RecoverySelectionPermit,
+    selected: Option<FilePath>,
+) -> Result<RecoveryPathToken, WalletRuntimeError> {
+    let selected_path = match selected {
+        Some(FilePath::Path(path)) => validate_source(path),
+        None => Err(WalletRuntimeError::RecoverySelectionCancelled),
+        Some(FilePath::Url(_)) => Err(WalletRuntimeError::RecoverySourceInvalid),
+    };
+    match selected_path {
+        Ok(path) => runtime.complete_recovery_path_selection(permit, path),
+        Err(selection_error) => {
+            runtime.cancel_recovery_path_selection(&mut permit)?;
+            Err(selection_error)
+        }
+    }
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn finish_destination_selection_for_test(
+    runtime: &WalletRuntimeState,
     permit: RecoverySelectionPermit,
     selected: Option<FilePath>,
 ) -> Result<RecoveryPathToken, WalletRuntimeError> {
-    let Some(FilePath::Path(path)) = selected else {
-        return Err(if selected.is_none() {
-            WalletRuntimeError::RecoverySelectionCancelled
-        } else {
-            WalletRuntimeError::RecoverySourceInvalid
-        });
-    };
-    let path = validate_source(path)?;
-    runtime.complete_recovery_path_selection(permit, path)
+    finish_destination_selection(runtime, permit, selected)
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn finish_source_selection_for_test(
+    runtime: &WalletRuntimeState,
+    permit: RecoverySelectionPermit,
+    selected: Option<FilePath>,
+) -> Result<RecoveryPathToken, WalletRuntimeError> {
+    finish_source_selection(runtime, permit, selected)
 }
 
 fn validate_destination(path: PathBuf) -> Result<PathBuf, WalletRuntimeError> {

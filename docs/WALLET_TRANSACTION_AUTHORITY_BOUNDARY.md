@@ -39,7 +39,7 @@ release.
 
 ### Implemented private preview tranche approved for native-confirmation integration
 
-The next candidate tranche now exists only inside the private Rust wallet module. Its bounded
+This approved tranche exists only inside the private Rust wallet module. Its bounded
 request accepts exactly one canonical public recipient address and one plain decimal amount string;
 unknown, duplicate, secret-bearing, caller-authoritative, malformed, and oversized fields are
 rejected. Rust obtains the unlocked wallet's public identity without exposing or refreshing the
@@ -62,9 +62,9 @@ wrapper or form. It performs no signing, seed access, network write, submission,
 receipt tracking, recovery export, activation change, or Vision-Core modification. Production
 preparation remains unavailable under the current manifest.
 
-### Implemented private native final-confirmation tranche awaiting independent review
+### Implemented and physically qualified private native final-confirmation tranche
 
-The next candidate tranche exists only inside the private Rust wallet module. Preview consumption
+This approved tranche exists only inside the private Rust wallet module. Preview consumption
 retains its runtime operation permit and exact Core-generation authority while a main-window-owned,
 owner-drawn Windows dialog displays the complete sender, recipient, amount, charged fee, maximum
 fee, total debit, nonce, and transaction identifier. The dialog contains no editable transaction
@@ -106,10 +106,25 @@ module cannot complete the intent directly. A successful final authority check t
 distinct Rust-only confirmed-intent type; that type is not signing authority and has no Clone,
 Debug, or serialization implementation.
 
-This candidate registers no command, permission, capability, AppManifest entry, managed Tauri
-state, frontend wrapper, or form. It accesses no seed, creates no signature, performs no network
-write, submission, reconciliation, receipt update, recovery export, approval change, or Vision-Core
-modification. It requires independent review before any signing integration begins.
+This tranche was independently accepted at implementation commit
+`a54bdf06be75b762755b96c87294c82af1dd6920` and tree
+`42b5332fb163bdd187c44b658f3626a32c31b843`. Its complete six-case Microsoft Pinyin and Japanese
+physical qualification evidence was independently accepted at evidence commit
+`5e6acbc7c8e7003c11b0520cf42bc4729118d278`. It registers no command, permission, capability,
+AppManifest entry, managed Tauri state, frontend wrapper, or form.
+
+### Implemented and independently approved private signing tranche
+
+The native approval is now consumed through an atomic permit promotion into the private signing
+module. The reviewed implementation retains continuous runtime and Core-generation authority,
+provides only purpose-specific seed access, validates and signs the exact native-approved
+transaction, verifies the resulting Ed25519 signature, and destroys the single-owner signed artifact
+inside the private module. The required adversarial signing matrix is complete.
+
+Independent approval applies to commit `7a3f6f3ceaf8f24d35244a7c103dc98ea600f7fd` and tree
+`6a2a0a5e4ed6120ba7706d0db685ae207008198a`. This approval does not activate signing and does not
+authorize a command, permission, capability, frontend boundary, signed-byte transport, network
+write, submission, recovery export, approval-flag change, or Vision-Core modification.
 
 ## Security objective
 
@@ -336,9 +351,8 @@ qualify the production peer-identity boundary.
 
 The detailed pre-implementation design is
 [`WALLET_PRIVATE_SIGNING_INTEGRATION_DESIGN.md`](WALLET_PRIVATE_SIGNING_INTEGRATION_DESIGN.md).
-It requires atomic promotion of the still-live confirmation permit into signing scope; the current
-release-then-reacquire `ConfirmedTransferIntent` handoff must not be used for signing. No signing
-integration has been implemented or approved by this cross-reference.
+The private implementation and mandatory adversarial matrix were independently approved at the
+exact commit and tree recorded above. Production signing remains disabled and unreachable.
 
 Signing occurs inside one narrow closure over the unlocked `WalletSeed`. Secret-derived storage
 remains zeroizing and non-serializable. Rust never returns a seed, private key, activation proof, or
@@ -349,6 +363,13 @@ verifies its signature and identifier before submission. The signed transaction 
 the reducer, support packages, command-line arguments, crash messages, or the journal.
 
 ## Submission and ambiguous outcomes
+
+The detailed pre-implementation design is
+[`WALLET_PRIVATE_TRANSACTION_SUBMISSION_DESIGN.md`](WALLET_PRIVATE_TRANSACTION_SUBMISSION_DESIGN.md).
+It requires a separate false-by-default submission activation scope, continuous atomic
+`Sign`-to-`Submit` permit promotion, a durable authenticated reconciliation state machine, one
+write attempt maximum, and capability-bound accepted journal recording. This cross-reference does
+not implement or approve submission.
 
 Desktop submits only the exact reviewed `POST /transactions` body. HTTP success alone is not
 transaction success.
@@ -447,18 +468,20 @@ listeners do not replace this gate.
 
 ## Activation order
 
-1. Approve this design.
-2. Implement only the unregistered, bounded, read-only private Core client tranche.
-3. Implement private intent and preview authority (candidate implemented; review pending).
-4. Implement and qualify native final confirmation.
-5. Connect unlocked-session signing.
-6. Add submission, ambiguity reconciliation, receipts, and journal orchestration.
-7. Integrate the supported private-loopback Core and update its compatibility manifest.
-8. Run adversarial, interruption, packaged-Windows, and clean-device tests.
-9. Obtain independent review of the exact commit and tree.
-10. Register only approved commands and main-window permissions.
-11. Add frontend public forms and state without secrets.
-12. Obtain final activation approval.
+1. Approve the transaction authority boundary.
+2. Implement and approve the unregistered, bounded, read-only private Core client tranche.
+3. Implement and approve private intent and preview authority.
+4. Implement, independently approve, and physically qualify native final confirmation.
+5. Implement and independently approve private unlocked-session signing.
+6. Independently approve the private submission design.
+7. Implement and independently approve private submission, ambiguity reconciliation, receipts, and
+   journal orchestration.
+8. Integrate the supported private-loopback Core and update its compatibility manifest.
+9. Run adversarial, interruption, packaged-Windows, and clean-device tests.
+10. Obtain independent review of the exact integrated commit and tree.
+11. Register only approved commands and main-window permissions.
+12. Add frontend public forms and state without secrets.
+13. Obtain final activation approval.
 
 Until every step passes, wallet creation, receive-capable custody, signing, submission, and sending
 remain disabled. Node B must not mine to a newly generated Desktop address merely because private

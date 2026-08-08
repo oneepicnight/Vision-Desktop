@@ -2,8 +2,8 @@
 
 ## Review status
 
-This document records the implementation candidate for independent security review. It does not
-approve or activate signing.
+This document records the private signing implementation that was independently approved. It does
+not activate signing.
 
 Design authority:
 
@@ -11,11 +11,14 @@ Design authority:
 - approved design tree: `47d52195b95b51b4829f74766846e3bfe31eb325`;
 - design finding count: zero open High, Medium, or Low findings.
 
-Independent review of implementation commit
+The first implementation review of commit
 `12b801062fb1d65630b090ad5f5acdf33406729a` and tree
 `074e9257a7810f4c512635d3f57f1f6820fa0edf` found no signing exploit but left M-01
-open because the mandatory adversarial matrix was incomplete. This correction closes only that
-acceptance-evidence gap. It does not widen production authority.
+open because the mandatory adversarial matrix was incomplete. The corrected implementation at
+commit `7a3f6f3ceaf8f24d35244a7c103dc98ea600f7fd` and tree
+`6a2a0a5e4ed6120ba7706d0db685ae207008198a` closed M-01 and was independently approved with zero
+open High, Medium, or Low findings. That approval remains private and does not widen production
+authority.
 
 The correction adds deterministic evidence for:
 
@@ -33,6 +36,11 @@ The implementation remains private and unregistered. Both production approval fl
 the current Core manifest cannot construct production wallet authority, and no wallet command,
 permission, capability, frontend wrapper, form, network write, submission path, or Vision-Core
 change is included.
+
+The next permitted design work is documented in
+[`WALLET_PRIVATE_TRANSACTION_SUBMISSION_DESIGN.md`](WALLET_PRIVATE_TRANSACTION_SUBMISSION_DESIGN.md).
+That document is design-only and requires independent approval before any private submission code is
+implemented.
 
 ## Implemented authority path
 

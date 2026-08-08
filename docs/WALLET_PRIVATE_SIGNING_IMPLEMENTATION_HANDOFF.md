@@ -11,6 +11,24 @@ Design authority:
 - approved design tree: `47d52195b95b51b4829f74766846e3bfe31eb325`;
 - design finding count: zero open High, Medium, or Low findings.
 
+Independent review of implementation commit
+`12b801062fb1d65630b090ad5f5acdf33406729a` and tree
+`074e9257a7810f4c512635d3f57f1f6820fa0edf` found no signing exploit but left M-01
+open because the mandatory adversarial matrix was incomplete. This correction closes only that
+acceptance-evidence gap. It does not widen production authority.
+
+The correction adds deterministic evidence for:
+
+- runtime revocation at every promotion/signing transition, including a revocation queued while the
+  runtime mutex is held;
+- Core fingerprint replacement, unavailable/stopped Core, restarted generation, and peer-validation
+  failure at every signing identity checkpoint;
+- independent mutation of every retained transaction and confirmation field, including canonical
+  argument recipient, amount, ordering, and unknown-field cases;
+- short and cryptographically invalid signatures;
+- the single-use approval, consuming completion, private artifact-destruction, fixed-error,
+  non-emitting diagnostic, and support-package privacy boundaries.
+
 The implementation remains private and unregistered. Both production approval flags remain false,
 the current Core manifest cannot construct production wallet authority, and no wallet command,
 permission, capability, frontend wrapper, form, network write, submission path, or Vision-Core
@@ -95,15 +113,24 @@ Every injected panic leaves the wallet authority revoked.
 
 Focused tests prove:
 
+- lifecycle/session revocation at every promotion and signing checkpoint suppresses the result;
+- a revocation waiting on the locked runtime becomes pending and prevents signed-result escape;
+- every required Core checkpoint rejects stopped/unavailable Core, restarted generation, fingerprint
+  replacement, and peer-identity validation failure;
 - the active-operation slot stays occupied throughout promotion and signing;
 - no ordinary caller can begin a signing operation directly;
 - exact confirmed transactions sign and independently verify;
-- a pre-existing signature is rejected;
-- semantically equivalent but byte-different argument JSON is rejected;
-- stale contract and status versions are rejected;
+- every retained sender, recipient, amount, nonce, fee, module, method, argument, contract, status,
+  identifier, and pre-existing signature mutation is rejected;
+- semantically equivalent but byte-different arguments, changed argument values, and unknown argument
+  fields are rejected;
+- incorrect signature length and signature verification failure both fail closed;
 - signing changes only the signature field and not the unsigned identifier;
-- Core identity replacement after signature construction discards the result and revokes authority;
+- one native approval issues at most one completion, and the private signed artifact is destroyed
+  inside the signing module;
 - all signing-stage panic checkpoints fail closed; and
+- signing privacy markers are rejected in every support-package input while fixed errors and
+  diagnostics remain non-emitting; and
 - the source surface contains no Tauri command, direct network write, or exported signed artifact.
 
 Existing preview tests continue to cover single-use handles, expiry, Core stop/restart and generation
@@ -116,7 +143,7 @@ The implementation candidate passed:
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`;
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`;
-- full serial Rust suite: 243 passed, 0 failed, 4 operator-only tests ignored;
+- full serial Rust suite: 250 passed, 0 failed, 4 operator-only tests ignored;
 - Tauri authority suite: 7 passed;
 - WebView isolation suite: 2 passed;
 - `npm run typecheck`;

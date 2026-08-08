@@ -268,20 +268,7 @@ pub(in crate::wallet) fn sign_confirmed_cash_transfer(
         let signing_key = SigningKey::from_bytes(seed_bytes);
         hex::encode(signing_key.sign(&payload).to_bytes())
     });
-    let signature_bytes: [u8; 64] = hex::decode(&signature_hex)
-        .map_err(|_| WalletTransactionError::SignatureUnavailable)?
-        .try_into()
-        .map_err(|_| WalletTransactionError::SignatureUnavailable)?;
-    let public_key_bytes: [u8; 32] = hex::decode(&identity.public_key)
-        .map_err(|_| WalletTransactionError::SignatureUnavailable)?
-        .try_into()
-        .map_err(|_| WalletTransactionError::SignatureUnavailable)?;
-    let verifying_key = VerifyingKey::from_bytes(&public_key_bytes)
-        .map_err(|_| WalletTransactionError::SignatureUnavailable)?;
-    observer.checkpoint(TransactionSigningStage::SignatureVerification);
-    verifying_key
-        .verify(&payload, &Signature::from_bytes(&signature_bytes))
-        .map_err(|_| WalletTransactionError::SignatureVerificationFailed)?;
+    verify_signature(&signature_hex, &payload, &identity.public_key, observer)?;
 
     let mut signed = confirmed.unsigned_transaction.clone();
     signed.sig = signature_hex;
@@ -289,6 +276,28 @@ pub(in crate::wallet) fn sign_confirmed_cash_transfer(
         return Err(WalletTransactionError::ConfirmedIntentMismatch);
     }
     Ok(signed)
+}
+
+fn verify_signature(
+    signature_hex: &str,
+    payload: &[u8],
+    public_key_hex: &str,
+    observer: &dyn TransactionSigningObserver,
+) -> Result<(), WalletTransactionError> {
+    let signature_bytes: [u8; 64] = hex::decode(signature_hex)
+        .map_err(|_| WalletTransactionError::SignatureUnavailable)?
+        .try_into()
+        .map_err(|_| WalletTransactionError::SignatureUnavailable)?;
+    let public_key_bytes: [u8; 32] = hex::decode(public_key_hex)
+        .map_err(|_| WalletTransactionError::SignatureUnavailable)?
+        .try_into()
+        .map_err(|_| WalletTransactionError::SignatureUnavailable)?;
+    let verifying_key = VerifyingKey::from_bytes(&public_key_bytes)
+        .map_err(|_| WalletTransactionError::SignatureUnavailable)?;
+    observer.checkpoint(TransactionSigningStage::SignatureVerification);
+    verifying_key
+        .verify(payload, &Signature::from_bytes(&signature_bytes))
+        .map_err(|_| WalletTransactionError::SignatureVerificationFailed)
 }
 
 fn validate_confirmed_cash_transfer(
@@ -357,6 +366,7 @@ fn is_lowercase_hex_32_bytes(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wallet::runtime::{WalletOperationKind, WalletRuntimeState};
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
     const CORE_SAMPLE_PAYLOAD_HEX: &str = concat!(
@@ -680,6 +690,232 @@ mod tests {
             &transaction_id,
             "vision-wallet-read-v1",
             "2",
+        );
+    }
+
+    struct OwnedConfirmedFixture {
+        seed: WalletSeed,
+        transaction: VisionTransaction,
+        sender: String,
+        recipient: String,
+        amount_raw_units: u128,
+        charged_fee_raw_units: u64,
+        fee_limit_raw_units: u64,
+        total_debit_raw_units: u128,
+        nonce: u64,
+        transaction_id: String,
+        core_contract: String,
+        status_version: String,
+    }
+
+    impl OwnedConfirmedFixture {
+        fn new() -> Self {
+            let (seed, transaction, sender, recipient, transaction_id) =
+                confirmed_signing_fixture();
+            Self {
+                seed,
+                transaction,
+                sender,
+                recipient,
+                amount_raw_units: 42,
+                charged_fee_raw_units: 1,
+                fee_limit_raw_units: 201,
+                total_debit_raw_units: 43,
+                nonce: 9,
+                transaction_id,
+                core_contract: "vision-wallet-read-v1".to_string(),
+                status_version: "3".to_string(),
+            }
+        }
+
+        fn view(&self) -> ConfirmedCashTransfer<'_> {
+            ConfirmedCashTransfer {
+                unsigned_transaction: &self.transaction,
+                sender_address: &self.sender,
+                recipient_address: &self.recipient,
+                amount_raw_units: self.amount_raw_units,
+                charged_fee_raw_units: self.charged_fee_raw_units,
+                fee_limit_raw_units: self.fee_limit_raw_units,
+                total_debit_raw_units: self.total_debit_raw_units,
+                nonce: self.nonce,
+                transaction_id: &self.transaction_id,
+                core_contract: &self.core_contract,
+                status_version: &self.status_version,
+            }
+        }
+
+        fn sign(
+            &self,
+            observer: &dyn TransactionSigningObserver,
+        ) -> Result<VisionTransaction, WalletTransactionError> {
+            WalletRuntimeState::with_activation_proof_for_test(
+                WalletOperationKind::Sign,
+                |activation| {
+                    sign_confirmed_cash_transfer(
+                        activation,
+                        &self.seed,
+                        self.view(),
+                        "vision-wallet-read-v1",
+                        "3",
+                        observer,
+                    )
+                },
+            )
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum RetainedIntentMutation {
+        SenderEcho,
+        SenderTransaction,
+        SeedAccountMismatch,
+        Recipient,
+        Amount,
+        ZeroAmount,
+        NonceEcho,
+        NonceTransaction,
+        Tip,
+        TransactionFeeLimit,
+        ConfirmedFeeLimit,
+        ChargedFee,
+        TotalDebit,
+        Module,
+        Method,
+        Arguments,
+        ArgumentRecipient,
+        ArgumentAmount,
+        ArgumentUnknownField,
+        Contract,
+        Status,
+        Identifier,
+        ExistingSignature,
+    }
+
+    fn mutate_retained_intent(
+        fixture: &mut OwnedConfirmedFixture,
+        mutation: RetainedIntentMutation,
+    ) {
+        match mutation {
+            RetainedIntentMutation::SenderEcho => fixture.sender = "3".repeat(64),
+            RetainedIntentMutation::SenderTransaction => {
+                fixture.transaction.sender_pubkey = "3".repeat(64)
+            }
+            RetainedIntentMutation::SeedAccountMismatch => {
+                fixture.sender = "3".repeat(64);
+                fixture.transaction.sender_pubkey = fixture.sender.clone();
+                fixture.transaction_id = canonical_transaction_id(&fixture.transaction).unwrap();
+            }
+            RetainedIntentMutation::Recipient => fixture.recipient = "4".repeat(64),
+            RetainedIntentMutation::Amount => fixture.amount_raw_units += 1,
+            RetainedIntentMutation::ZeroAmount => fixture.amount_raw_units = 0,
+            RetainedIntentMutation::NonceEcho => fixture.nonce += 1,
+            RetainedIntentMutation::NonceTransaction => fixture.transaction.nonce += 1,
+            RetainedIntentMutation::Tip => fixture.transaction.tip = 1,
+            RetainedIntentMutation::TransactionFeeLimit => fixture.transaction.fee_limit = 202,
+            RetainedIntentMutation::ConfirmedFeeLimit => fixture.fee_limit_raw_units = 202,
+            RetainedIntentMutation::ChargedFee => fixture.charged_fee_raw_units = 2,
+            RetainedIntentMutation::TotalDebit => fixture.total_debit_raw_units += 1,
+            RetainedIntentMutation::Module => fixture.transaction.module = "stake".to_string(),
+            RetainedIntentMutation::Method => fixture.transaction.method = "mint".to_string(),
+            RetainedIntentMutation::Arguments => {
+                fixture.transaction.args =
+                    format!("{{\"amount\":42,\"to\":\"{}\"}}", fixture.recipient).into_bytes();
+                fixture.transaction_id = canonical_transaction_id(&fixture.transaction).unwrap();
+            }
+            RetainedIntentMutation::ArgumentRecipient => {
+                fixture.transaction.args =
+                    format!("{{\"to\":\"{}\",\"amount\":42}}", "5".repeat(64)).into_bytes();
+                fixture.transaction_id = canonical_transaction_id(&fixture.transaction).unwrap();
+            }
+            RetainedIntentMutation::ArgumentAmount => {
+                fixture.transaction.args =
+                    format!("{{\"to\":\"{}\",\"amount\":43}}", fixture.recipient).into_bytes();
+                fixture.transaction_id = canonical_transaction_id(&fixture.transaction).unwrap();
+            }
+            RetainedIntentMutation::ArgumentUnknownField => {
+                fixture.transaction.args = format!(
+                    "{{\"to\":\"{}\",\"amount\":42,\"memo\":\"unexpected\"}}",
+                    fixture.recipient
+                )
+                .into_bytes();
+                fixture.transaction_id = canonical_transaction_id(&fixture.transaction).unwrap();
+            }
+            RetainedIntentMutation::Contract => {
+                fixture.core_contract = "stale-contract".to_string()
+            }
+            RetainedIntentMutation::Status => fixture.status_version = "2".to_string(),
+            RetainedIntentMutation::Identifier => fixture.transaction_id = "f".repeat(64),
+            RetainedIntentMutation::ExistingSignature => fixture.transaction.sig = "00".repeat(64),
+        }
+    }
+
+    #[test]
+    fn every_retained_transaction_field_mutation_is_rejected_before_release() {
+        for mutation in [
+            RetainedIntentMutation::SenderEcho,
+            RetainedIntentMutation::SenderTransaction,
+            RetainedIntentMutation::SeedAccountMismatch,
+            RetainedIntentMutation::Recipient,
+            RetainedIntentMutation::Amount,
+            RetainedIntentMutation::ZeroAmount,
+            RetainedIntentMutation::NonceEcho,
+            RetainedIntentMutation::NonceTransaction,
+            RetainedIntentMutation::Tip,
+            RetainedIntentMutation::TransactionFeeLimit,
+            RetainedIntentMutation::ConfirmedFeeLimit,
+            RetainedIntentMutation::ChargedFee,
+            RetainedIntentMutation::TotalDebit,
+            RetainedIntentMutation::Module,
+            RetainedIntentMutation::Method,
+            RetainedIntentMutation::Arguments,
+            RetainedIntentMutation::ArgumentRecipient,
+            RetainedIntentMutation::ArgumentAmount,
+            RetainedIntentMutation::ArgumentUnknownField,
+            RetainedIntentMutation::Contract,
+            RetainedIntentMutation::Status,
+            RetainedIntentMutation::Identifier,
+            RetainedIntentMutation::ExistingSignature,
+        ] {
+            let mut fixture = OwnedConfirmedFixture::new();
+            mutate_retained_intent(&mut fixture, mutation);
+            assert!(fixture.sign(&NoopTransactionSigningObserver).is_err());
+        }
+    }
+
+    #[test]
+    fn signature_length_and_verification_faults_fail_closed() {
+        let fixture = OwnedConfirmedFixture::new();
+        let payload = canonical_unsigned_payload(&fixture.transaction).unwrap();
+        let identity = derive_account_identity(&fixture.seed);
+        let mut signature_hex = fixture.seed.with_exposed(|seed_bytes| {
+            let signing_key = SigningKey::from_bytes(seed_bytes);
+            hex::encode(signing_key.sign(&payload).to_bytes())
+        });
+        let mut short_signature = signature_hex.clone();
+        short_signature.truncate(126);
+        assert_eq!(
+            verify_signature(
+                &short_signature,
+                &payload,
+                &identity.public_key,
+                &NoopTransactionSigningObserver,
+            ),
+            Err(WalletTransactionError::SignatureUnavailable)
+        );
+        let replacement = if signature_hex.starts_with("00") {
+            "ff"
+        } else {
+            "00"
+        };
+        signature_hex.replace_range(0..2, replacement);
+        assert_eq!(
+            verify_signature(
+                &signature_hex,
+                &payload,
+                &identity.public_key,
+                &NoopTransactionSigningObserver,
+            ),
+            Err(WalletTransactionError::SignatureVerificationFailed)
         );
     }
 }

@@ -610,6 +610,11 @@ impl WalletRuntimeState {
     }
 
     #[cfg(test)]
+    pub(in crate::wallet) fn revocation_is_pending_for_test(&self) -> bool {
+        self.revocation_is_pending()
+    }
+
+    #[cfg(test)]
     pub(in crate::wallet) fn with_activation_proof_for_test<R>(
         kind: WalletOperationKind,
         operation: impl FnOnce(&WalletActivationProof) -> R,

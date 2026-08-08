@@ -210,3 +210,25 @@ const fn map_transaction_error(error: WalletTransactionError) -> WalletPrivateSi
         }
     }
 }
+
+#[cfg(test)]
+std::thread_local! {
+    static SIGNED_ARTIFACT_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+impl Drop for SignedTransferArtifact {
+    fn drop(&mut self) {
+        SIGNED_ARTIFACT_DROPS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn reset_signed_artifact_drop_count_for_test() {
+    SIGNED_ARTIFACT_DROPS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn signed_artifact_drop_count_for_test() -> usize {
+    SIGNED_ARTIFACT_DROPS.with(std::cell::Cell::get)
+}

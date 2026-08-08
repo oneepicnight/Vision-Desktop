@@ -1260,8 +1260,9 @@ mod tests {
         runtime::{WalletOperationKind, WalletOperationPermit},
         secrets::{WalletPassword, WalletSeed},
         signing::{
-            sign_after_native_approval_with_observer_for_test, SigningCoordinatorObserver,
-            SigningCoordinatorStage,
+            reset_signed_artifact_drop_count_for_test,
+            sign_after_native_approval_with_observer_for_test, signed_artifact_drop_count_for_test,
+            SigningCoordinatorObserver, SigningCoordinatorStage,
         },
         vault::EncryptedWalletVault,
     };
@@ -1269,7 +1270,7 @@ mod tests {
         mem::size_of,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
-            Arc,
+            Arc, Mutex,
         },
         thread,
         time::Duration,
@@ -1295,6 +1296,7 @@ mod tests {
         identity_calls: AtomicUsize,
         panic_on_identity_call: Option<usize>,
         replace_identity_on_call: Option<usize>,
+        identity_error_on_call: Option<(usize, WalletCoreClientError)>,
     }
 
     impl WalletCoreReadSource for FakeCore {
@@ -1324,6 +1326,12 @@ mod tests {
             let call = self.identity_calls.fetch_add(1, AtomicOrdering::SeqCst);
             if self.panic_on_identity_call == Some(call) {
                 panic!("injected final Core identity panic");
+            }
+            if let Some((_, error)) = self
+                .identity_error_on_call
+                .filter(|(error_at, _)| *error_at == call)
+            {
+                return Err(error);
             }
             if self
                 .replace_identity_on_call
@@ -1424,7 +1432,14 @@ mod tests {
         recipient: &str,
         panic_on_identity_call: Option<usize>,
     ) -> PendingTransferConfirmation<'a, FakeCore> {
-        pending_with_core_change(runtime, sender, recipient, panic_on_identity_call, None)
+        pending_with_core_change(
+            runtime,
+            sender,
+            recipient,
+            panic_on_identity_call,
+            None,
+            None,
+        )
     }
 
     fn pending_with_core_change<'a>(
@@ -1433,12 +1448,14 @@ mod tests {
         recipient: &str,
         panic_on_identity_call: Option<usize>,
         replace_identity_on_call: Option<usize>,
+        identity_error_on_call: Option<(usize, WalletCoreClientError)>,
     ) -> PendingTransferConfirmation<'a, FakeCore> {
         let prepare_source = FakeCore {
             address: sender.to_string(),
             identity_calls: AtomicUsize::new(0),
             panic_on_identity_call: None,
             replace_identity_on_call: None,
+            identity_error_on_call: None,
         };
         let prepare_permit = runtime
             .begin_operation(MAIN, WalletOperationKind::PreparePreview)
@@ -1461,6 +1478,7 @@ mod tests {
                 identity_calls: AtomicUsize::new(0),
                 panic_on_identity_call,
                 replace_identity_on_call,
+                identity_error_on_call,
             },
         )
         .unwrap()
@@ -1558,6 +1576,56 @@ mod tests {
                     .err(),
                 Some(super::super::runtime::WalletRuntimeError::OperationInProgress)
             );
+        }
+    }
+
+    struct RevokingSigningObserver {
+        runtime: Arc<WalletRuntimeState>,
+        stage: SigningCoordinatorStage,
+        worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    }
+
+    impl RevokingSigningObserver {
+        fn new(runtime: Arc<WalletRuntimeState>, stage: SigningCoordinatorStage) -> Self {
+            Self {
+                runtime,
+                stage,
+                worker: Mutex::new(None),
+            }
+        }
+
+        fn join(&self) {
+            if let Some(worker) = self.worker.lock().unwrap().take() {
+                worker.join().unwrap();
+            }
+        }
+    }
+
+    impl SigningCoordinatorObserver for RevokingSigningObserver {
+        fn checkpoint(&self, stage: SigningCoordinatorStage) {
+            if stage != self.stage {
+                return;
+            }
+            if matches!(
+                stage,
+                SigningCoordinatorStage::SeedAccountDerivation
+                    | SigningCoordinatorStage::SignatureConstruction
+                    | SigningCoordinatorStage::SignatureVerification
+            ) {
+                let runtime = Arc::clone(&self.runtime);
+                let worker = thread::spawn(move || runtime.invalidate_all().unwrap());
+                *self.worker.lock().unwrap() = Some(worker);
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !self.runtime.revocation_is_pending_for_test() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "revocation did not become pending while the signing mutex was held"
+                    );
+                    thread::yield_now();
+                }
+            } else {
+                self.runtime.invalidate_all().unwrap();
+            }
         }
     }
 
@@ -1670,7 +1738,8 @@ mod tests {
             runtime: &runtime,
             ceremony: &ceremony,
         };
-        let pending = pending_with_core_change(&runtime, &sender, &"7".repeat(64), None, Some(6));
+        let pending =
+            pending_with_core_change(&runtime, &sender, &"7".repeat(64), None, Some(6), None);
 
         assert_eq!(
             engine.confirm_pending(pending),
@@ -1747,6 +1816,158 @@ mod tests {
             .begin_operation(MAIN, WalletOperationKind::PreparePreview)
             .unwrap();
     }
+
+    #[test]
+    fn lifecycle_revocation_at_every_signing_transition_suppresses_the_result() {
+        for (index, stage) in [
+            SigningCoordinatorStage::Promoted,
+            SigningCoordinatorStage::BeforeSeedAccess,
+            SigningCoordinatorStage::SeedAccountDerivation,
+            SigningCoordinatorStage::SignatureConstruction,
+            SigningCoordinatorStage::SignatureVerification,
+            SigningCoordinatorStage::AfterSignatureVerification,
+            SigningCoordinatorStage::BeforeCompletion,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (runtime, sender) = unlocked_runtime(100_u8.saturating_add(index as u8));
+            let runtime = Arc::new(runtime);
+            let ceremony = ConfirmingCeremony;
+            let engine = WalletTransactionConfirmationEngine {
+                runtime: &runtime,
+                ceremony: &ceremony,
+            };
+            let observer = RevokingSigningObserver::new(Arc::clone(&runtime), stage);
+            let pending = pending(&runtime, &sender, &"a".repeat(64));
+
+            let result = engine.run_fail_closed(|| {
+                sign_after_native_approval_with_observer_for_test(
+                    pending,
+                    NativeConfirmationApproval::issue(),
+                    &observer,
+                )
+                .map_err(map_signing_error)
+            });
+            observer.join();
+            assert!(result.is_err());
+            let permit = runtime
+                .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+                .unwrap();
+            assert!(permit.current_public_account().is_err());
+        }
+    }
+
+    #[test]
+    fn every_required_signing_core_checkpoint_rejects_stop_or_generation_replacement() {
+        for identity_call in 3..=7 {
+            for fault in [
+                Ok([0x43; 32]),
+                Err(WalletCoreClientError::CoreUnavailable),
+                Err(WalletCoreClientError::CoreIdentityChanged),
+                Err(WalletCoreClientError::PeerIdentityRejected),
+            ] {
+                let (runtime, sender) =
+                    unlocked_runtime(120_u8.saturating_add(identity_call as u8));
+                let ceremony = ConfirmingCeremony;
+                let engine = WalletTransactionConfirmationEngine {
+                    runtime: &runtime,
+                    ceremony: &ceremony,
+                };
+                let replacement = fault.is_ok().then_some(identity_call);
+                let identity_error = fault.err().map(|error| (identity_call, error));
+                let pending = pending_with_core_change(
+                    &runtime,
+                    &sender,
+                    &"b".repeat(64),
+                    None,
+                    replacement,
+                    identity_error,
+                );
+
+                assert_eq!(
+                    engine.confirm_pending(pending),
+                    Err(WalletConfirmationError::CoreUnavailable)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn approval_completion_and_signed_artifact_are_single_use() {
+        reset_signed_artifact_drop_count_for_test();
+        let (runtime, sender) = unlocked_runtime(150);
+        let ceremony = ConfirmingCeremony;
+        let engine = WalletTransactionConfirmationEngine {
+            runtime: &runtime,
+            ceremony: &ceremony,
+        };
+
+        engine
+            .confirm_pending(pending(&runtime, &sender, &"c".repeat(64)))
+            .unwrap();
+        assert_eq!(signed_artifact_drop_count_for_test(), 1);
+
+        let confirmation_source = include_str!("transaction_confirmation.rs");
+        let normalized_confirmation_source = confirmation_source.replace("\r\n", "\n");
+        let confirmation_production = normalized_confirmation_source
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        assert_eq!(
+            confirmation_production
+                .match_indices("NativeConfirmationApproval::issue()")
+                .count(),
+            1
+        );
+        assert!(confirmation_production
+            .contains("pub(in crate::wallet) struct NativeConfirmationApproval {"));
+        assert!(!confirmation_production.contains("impl Clone for NativeConfirmationApproval"));
+
+        let runtime_source = include_str!("runtime.rs");
+        let normalized_runtime_source = runtime_source.replace("\r\n", "\n");
+        assert!(normalized_runtime_source.contains("pub(in crate::wallet) fn complete<T>(mut self"));
+        let signing_source = include_str!("signing.rs");
+        assert!(signing_source.contains("permit.complete(artifact)"));
+        assert!(signing_source.contains("drop(artifact)"));
+        assert!(!signing_source.contains("pub struct SignedTransferArtifact"));
+        assert!(!signing_source.contains("Result<SignedTransferArtifact"));
+    }
+
+    #[test]
+    fn signing_errors_panics_and_diagnostics_exclude_privacy_canaries() {
+        let privacy_canaries = [
+            "ab".repeat(32),
+            "cd".repeat(32),
+            "ef".repeat(32),
+            "12".repeat(64),
+            "wallet_nonce=18446744073709551615".to_string(),
+        ];
+        for error in [
+            WalletConfirmationError::Cancelled,
+            WalletConfirmationError::AuthorityRevoked,
+            WalletConfirmationError::NativeUiUnavailable,
+            WalletConfirmationError::PreviewUnavailable,
+            WalletConfirmationError::CoreUnavailable,
+            WalletConfirmationError::OperationInProgress,
+            WalletConfirmationError::RuntimeUnavailable,
+            WalletConfirmationError::SigningUnavailable,
+        ] {
+            for canary in &privacy_canaries {
+                assert!(!error.code().contains(canary));
+            }
+        }
+
+        let signing_source = include_str!("signing.rs");
+        for forbidden_sink in ["println!", "eprintln!", "dbg!", "tracing::", "log::"] {
+            assert!(!signing_source.contains(forbidden_sink));
+        }
+        let panic_source = include_str!("panic_policy.rs");
+        for canary in &privacy_canaries {
+            assert!(!panic_source.contains(canary));
+        }
+    }
+
     #[test]
     fn native_display_buffers_are_explicitly_wiped() {
         let sender = "2".repeat(64);
@@ -2514,7 +2735,11 @@ mod tests {
     #[test]
     fn confirmation_source_has_no_editable_control_or_forbidden_authority() {
         let source = include_str!("transaction_confirmation.rs");
-        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let normalized_source = source.replace("\r\n", "\n");
+        let production = normalized_source
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
         assert!(!production.contains(&["#[tauri", "::command]"].concat()));
         assert!(!production.contains("generate_handler"));
         assert!(!production.contains("WalletSeed"));

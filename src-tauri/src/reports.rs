@@ -32,7 +32,7 @@ const EXPECTED_SUPPORT_FILES: [&str; 10] = [
     "stdout.log",
     "summary.json",
 ];
-const FORBIDDEN_CONTENT_MARKERS: [&str; 24] = [
+const FORBIDDEN_CONTENT_MARKERS: [&str; 29] = [
     "wallet",
     "vault",
     "private_key",
@@ -57,6 +57,11 @@ const FORBIDDEN_CONTENT_MARKERS: [&str; 24] = [
     "ciphertext",
     "miner_reward_address",
     "sender_address",
+    "recipient_address",
+    "transaction_id",
+    "signed_transfer",
+    "wallet_nonce",
+    "signature",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -455,6 +460,39 @@ mod tests {
                 "{} accepted a secret canary",
                 contaminated[index].name
             );
+        }
+    }
+
+    #[test]
+    fn classification_rejects_signing_privacy_canaries_in_every_included_file() {
+        let files = build_support_files(
+            "vision-desktop-report-test",
+            fixed_time(),
+            &manifest(),
+            &"B".repeat(64),
+            None,
+        )
+        .unwrap();
+
+        for marker in [
+            "recipient_address",
+            "transaction_id",
+            "signed_transfer",
+            "wallet_nonce",
+            "signature",
+        ] {
+            for index in 0..files.len() {
+                let mut contaminated = files.clone();
+                contaminated[index]
+                    .bytes
+                    .extend_from_slice(marker.as_bytes());
+                assert_eq!(
+                    validate_support_files(&contaminated),
+                    Err(SECURITY_CLASSIFICATION_ERROR.to_string()),
+                    "{} accepted signing privacy marker {marker}",
+                    contaminated[index].name
+                );
+            }
         }
     }
 

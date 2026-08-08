@@ -81,7 +81,18 @@ The exact route is `POST /transactions` with the canonical signed transaction JS
 
 The Rust-only Desktop response parser requires the returned transaction identifier and accepted nonce to match the reviewed transaction. It rejects unknown shapes and error codes, refuses an unapproved replacement even when Core returns HTTP `200`, and never treats an HTTP success alone as proof that a transaction was mined or final. No network submission command is registered yet.
 
-This satisfies the Desktop `SubmissionResponse` gate.
+These verified response shapes do not establish which HTTP `400` or `422` outcomes are guaranteed
+to occur before mempool or chain insertion. The current Desktop compatibility contract therefore has
+an empty definitive-rejection allowlist. In particular, `duplicate_canonical_tx_id` and
+`duplicate_sender_nonce` remain ambiguous until a read-only point lookup returns the exact signed
+envelope and Desktop verifies its body digest and signature. Every other rejection code remains
+`OutcomeUnknown` unless a future versioned Core contract explicitly supplies, qualifies, and
+independently reviews a non-mutating guarantee for that exact code.
+
+This satisfies only the response-shape portion of the Desktop `SubmissionResponse` gate.
+Definitive-rejection semantics remain unmet until the versioned compatibility contract provides the
+reviewed non-mutating allowlist. The private submission design therefore requires a separate
+`SubmissionRejectionSemantics` compatibility gate before production write authority can exist.
 
 ## Verified receipt observations and unresolved finality
 

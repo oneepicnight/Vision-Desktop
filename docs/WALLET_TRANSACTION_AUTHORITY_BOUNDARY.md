@@ -386,14 +386,25 @@ in bounded private reconciliation state and queries `GET /transaction/:txid`. It
 Before the network write, Rust must atomically publish a bounded, seed-authenticated reconciliation
 marker containing the wallet identifier, transaction identifier, a domain-separated digest of the
 exact signed envelope, creation time, and `submitting` phase. It stores neither seed nor signed
-transaction. If this marker cannot be committed, Desktop must not submit. A definitive rejection
-resolves it; exact acceptance transitions it into journal tracking.
+transaction. If this marker cannot be committed, Desktop must not submit. Only a response whose
+exact status/code appears in the independently reviewed, versioned non-mutating allowlist is a
+definitive rejection. The current response-shape contract has an empty allowlist. Duplicate
+canonical identifiers and duplicate sender/nonces always require exact-envelope point lookup.
+Production submission therefore also requires a separate, currently unmet
+`SubmissionRejectionSemantics` compatibility gate. Exact acceptance transitions the record into
+journal tracking.
 
 After restart, reconciliation requires unlocking the matching wallet, authenticating the marker,
-and performing point lookup. The digest of any returned signed transaction must match the stored
-digest. Restart never grants permission to resubmit.
+and using a restart-only reconciliation permit that has no signing or write child. A `Prepared`
+record can resolve only as not attempted, a may-have-been-submitted record can perform only point
+lookup, and an accepted-recording-pending record can finish the journal with Core offline. The
+digest of any returned signed transaction must match the stored digest. Restart never grants
+permission to resubmit.
 
-A nonce rejection requires a fresh authoritative read and a completely new user review.
+A nonce-related response remains `OutcomeUnknown` unless its exact status/code is present in the
+reviewed non-mutating allowlist or exact-envelope lookup proves acceptance. Only after a permitted
+definitive rejection commits `ResolvedRejected` may a later send begin with a fresh authoritative
+read and completely new user review.
 
 ## Receipt reconciliation
 

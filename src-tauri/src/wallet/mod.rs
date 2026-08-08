@@ -23,6 +23,8 @@ mod panic_policy;
 mod preview;
 mod public_request;
 mod receipt;
+#[cfg(windows)]
+mod reconciliation;
 mod recovery;
 #[cfg(windows)]
 mod recovery_ceremony;

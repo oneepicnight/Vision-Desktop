@@ -48,6 +48,27 @@ pub(in crate::wallet) enum WalletSubmissionOutcome {
     MalformedRequest,
 }
 
+pub(in crate::wallet) enum PrivateSubmissionResponseDisposition {
+    Accepted {
+        transaction_id: String,
+        nonce: u64,
+    },
+    DefinitiveRejected {
+        http_status: u16,
+        code: WalletSubmissionRejection,
+        allowlist_digest_hex: String,
+    },
+    OutcomeUnknown,
+}
+
+/// Exact versioned non-mutating rejection policy. The independently reviewed production
+/// allowlist is intentionally empty.
+pub(in crate::wallet) struct SubmissionRejectionPolicy {
+    allowed: &'static [(u16, WalletSubmissionRejection)],
+}
+
+const REVIEWED_NON_MUTATING_REJECTIONS: &[(u16, WalletSubmissionRejection)] = &[];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::wallet) enum WalletSubmissionParseError {
     InvalidResponse,
@@ -177,6 +198,105 @@ pub(in crate::wallet) fn parse_submission_response(
     }
 }
 
+impl SubmissionRejectionPolicy {
+    pub(in crate::wallet) const fn production() -> Self {
+        Self {
+            allowed: REVIEWED_NON_MUTATING_REJECTIONS,
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) const fn for_test(
+        allowed: &'static [(u16, WalletSubmissionRejection)],
+    ) -> Self {
+        Self { allowed }
+    }
+
+    pub(in crate::wallet) fn digest_hex(&self) -> String {
+        let mut hasher = blake3::Hasher::new_derive_key(
+            "com.vision.desktop.wallet-submission-rejection-allowlist.v1",
+        );
+        for (status, code) in self.allowed {
+            hasher.update(&status.to_le_bytes());
+            hasher.update(code.as_str().as_bytes());
+            hasher.update(&[0]);
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn contains(&self, status: u16, code: WalletSubmissionRejection) -> bool {
+        self.allowed.contains(&(status, code))
+    }
+}
+
+impl WalletSubmissionRejection {
+    pub(in crate::wallet) const fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedRequest => "malformed_request",
+            Self::DuplicateCanonicalTxId => "duplicate_canonical_tx_id",
+            Self::NonceGap => "nonce_gap",
+            Self::DuplicateSenderNonce => "duplicate_sender_nonce",
+            Self::StaleNonce => "stale_nonce",
+            Self::TxTooLarge => "tx_too_large",
+            Self::MissingSenderPubkey => "missing_sender_pubkey",
+            Self::MissingSignature => "missing_signature",
+            Self::UnsupportedModuleMethod => "unsupported_module_method",
+            Self::BadTransferArgs => "bad_transfer_args",
+            Self::InvalidTransferDestination => "invalid_transfer_destination",
+            Self::TransferAmountZero => "transfer_amount_zero",
+            Self::TransferToSelf => "transfer_to_self",
+            Self::InvalidSignature => "invalid_signature",
+            Self::FeeLimitTooLow => "fee_limit_too_low",
+            Self::SenderPubkeyWrongLength => "sender_pubkey_wrong_length",
+            Self::SenderPubkeyNotLowercaseHex => "sender_pubkey_not_lowercase_hex",
+            Self::SignatureWrongLength => "signature_wrong_length",
+            Self::SignatureNotLowercaseHex => "signature_not_lowercase_hex",
+            Self::MalformedPublicKey => "malformed_public_key",
+        }
+    }
+
+    const fn is_duplicate(self) -> bool {
+        matches!(
+            self,
+            Self::DuplicateCanonicalTxId | Self::DuplicateSenderNonce
+        )
+    }
+}
+
+pub(in crate::wallet) fn classify_submission_response(
+    http_status: u16,
+    body: &[u8],
+    expected_tx_id: &str,
+    expected_nonce: u64,
+    policy: &SubmissionRejectionPolicy,
+) -> PrivateSubmissionResponseDisposition {
+    let Ok(outcome) = parse_submission_response(http_status, body, expected_tx_id, expected_nonce)
+    else {
+        return PrivateSubmissionResponseDisposition::OutcomeUnknown;
+    };
+    match outcome {
+        WalletSubmissionOutcome::Accepted {
+            tx_id,
+            current_nonce,
+        } => PrivateSubmissionResponseDisposition::Accepted {
+            transaction_id: tx_id,
+            nonce: current_nonce,
+        },
+        WalletSubmissionOutcome::Rejected { code, .. }
+            if !code.is_duplicate() && policy.contains(http_status, code) =>
+        {
+            PrivateSubmissionResponseDisposition::DefinitiveRejected {
+                http_status,
+                code,
+                allowlist_digest_hex: policy.digest_hex(),
+            }
+        }
+        WalletSubmissionOutcome::Rejected { .. } | WalletSubmissionOutcome::MalformedRequest => {
+            PrivateSubmissionResponseDisposition::OutcomeUnknown
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +376,71 @@ mod tests {
             parse_submission_response(500, b"{}", TX_ID, 0),
             Err(WalletSubmissionParseError::InvalidResponse)
         );
+    }
+
+    #[test]
+    fn production_rejection_allowlist_is_empty_and_all_typed_rejections_are_ambiguous() {
+        let policy = SubmissionRejectionPolicy::production();
+        let codes = [
+            "duplicate_canonical_tx_id",
+            "stale_nonce",
+            "nonce_gap",
+            "duplicate_sender_nonce",
+            "tx_too_large",
+            "missing_sender_pubkey",
+            "missing_signature",
+            "unsupported_module_method",
+            "bad_transfer_args",
+            "invalid_transfer_destination",
+            "transfer_amount_zero",
+            "transfer_to_self",
+            "fee_limit_too_low",
+            "sender_pubkey_wrong_length",
+            "sender_pubkey_not_lowercase_hex",
+            "signature_wrong_length",
+            "signature_not_lowercase_hex",
+            "malformed_public_key",
+            "invalid_signature",
+        ];
+        for code in codes {
+            let body = format!(
+                "{{\"status\":\"rejected\",\"tx_id\":\"{TX_ID}\",\"current_nonce\":0,\"error\":{{\"code\":\"{code}\",\"message\":\"rejected\"}}}}"
+            );
+            assert!(matches!(
+                classify_submission_response(422, body.as_bytes(), TX_ID, 0, &policy),
+                PrivateSubmissionResponseDisposition::OutcomeUnknown
+            ));
+        }
+        assert_eq!(policy.allowed.len(), 0);
+    }
+
+    #[test]
+    fn only_nonduplicate_reviewed_codes_can_become_definitive_rejections() {
+        const ALLOWED: &[(u16, WalletSubmissionRejection)] = &[
+            (422, WalletSubmissionRejection::StaleNonce),
+            (422, WalletSubmissionRejection::DuplicateCanonicalTxId),
+            (422, WalletSubmissionRejection::DuplicateSenderNonce),
+        ];
+        let policy = SubmissionRejectionPolicy::for_test(ALLOWED);
+        let body = format!(
+            "{{\"status\":\"rejected\",\"tx_id\":\"{TX_ID}\",\"current_nonce\":1,\"error\":{{\"code\":\"stale_nonce\",\"message\":\"stale\"}}}}"
+        );
+        assert!(matches!(
+            classify_submission_response(422, body.as_bytes(), TX_ID, 0, &policy),
+            PrivateSubmissionResponseDisposition::DefinitiveRejected {
+                http_status: 422,
+                code: WalletSubmissionRejection::StaleNonce,
+                ..
+            }
+        ));
+        for code in ["duplicate_canonical_tx_id", "duplicate_sender_nonce"] {
+            let body = format!(
+                "{{\"status\":\"rejected\",\"tx_id\":\"{TX_ID}\",\"current_nonce\":0,\"error\":{{\"code\":\"{code}\",\"message\":\"duplicate\"}}}}"
+            );
+            assert!(matches!(
+                classify_submission_response(422, body.as_bytes(), TX_ID, 0, &policy),
+                PrivateSubmissionResponseDisposition::OutcomeUnknown
+            ));
+        }
     }
 }

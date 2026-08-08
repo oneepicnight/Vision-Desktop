@@ -489,28 +489,38 @@ fn wallet_sensitive_authority_requires_runtime_activation_proof() {
     assert!(
         activation_source.contains("INDEPENDENT_SIGNING_SECURITY_REVIEW_APPROVED: bool = false")
     );
+    assert!(
+        activation_source.contains("INDEPENDENT_SUBMISSION_SECURITY_REVIEW_APPROVED: bool = false")
+    );
     assert!(activation_source.contains("WalletActivationScope::Lifecycle"));
     assert!(activation_source.contains("WalletActivationScope::Signing"));
+    assert!(activation_source.contains("WalletActivationScope::Submission"));
+    assert!(activation_source.contains("WalletActivationScope::Reconciliation"));
     assert!(activation_source.contains("WalletActivationRequirement::IndependentSecurityReview"));
     assert!(runtime_source.contains("activation: WalletActivationPolicy"));
     assert_eq!(
         runtime_source
             .match_indices("self.require_activation(")
             .count(),
-        2
+        3
     );
     assert!(runtime_source.contains("pub(in crate::wallet) struct WalletActivationProof"));
     assert_eq!(
         runtime_source
             .match_indices("activation_proof: WalletActivationProof {")
             .count(),
-        2
+        4
     );
     assert!(runtime_source.contains("pub(in crate::wallet) fn promote_to_signing("));
-    assert!(runtime_source.contains("if kind == WalletOperationKind::Sign"));
+    assert!(runtime_source.contains("if matches!("));
+    assert!(runtime_source.contains("WalletOperationKind::Sign"));
+    assert!(runtime_source.contains("WalletOperationKind::Submit"));
+    assert!(runtime_source.contains("WalletOperationKind::Reconcile"));
     assert!(runtime_source.contains("return Err(WalletRuntimeError::InvalidRequest)"));
     assert!(runtime_source.contains("scope: WalletActivationScope"));
     assert!(runtime_source.contains("pub(in crate::wallet) fn require_signing"));
+    assert!(runtime_source.contains("pub(in crate::wallet) fn require_submission"));
+    assert!(runtime_source.contains("pub(in crate::wallet) fn require_reconciliation"));
     assert!(runtime_source.contains("activation_proof: WalletActivationProof"));
     assert!(runtime_source.contains("WalletRuntimeError::ActivationUnavailable"));
     assert!(cargo_manifest.contains("argon2 = { version = \"0.5.3\", features = [\"zeroize\"] }"));

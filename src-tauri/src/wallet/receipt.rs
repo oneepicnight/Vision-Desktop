@@ -6,7 +6,10 @@
     )
 )]
 
-use super::transaction::{canonical_transaction_id, VisionTransaction};
+use super::{
+    reconciliation::ReconciliationLookupExpectation,
+    transaction::{canonical_transaction_id, VisionTransaction},
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -56,6 +59,7 @@ pub(in crate::wallet) enum WalletReceiptError {
     InvalidResponse,
     TransactionIdMismatch,
     InvalidBlockReference,
+    SignedEnvelopeMismatch,
 }
 
 impl fmt::Display for WalletReceiptError {
@@ -64,8 +68,53 @@ impl fmt::Display for WalletReceiptError {
             Self::InvalidResponse => "Core returned an invalid transaction observation",
             Self::TransactionIdMismatch => "Core returned a different transaction",
             Self::InvalidBlockReference => "Core returned an invalid canonical block reference",
+            Self::SignedEnvelopeMismatch => "Core returned a different signed transaction",
         })
     }
+}
+
+/// Parses a read-only reconciliation lookup and proves the exact signed JSON envelope, including
+/// its signature, matches the body that may have been submitted. NotFound remains non-authoritative.
+pub(in crate::wallet) fn parse_exact_signed_receipt_observation(
+    body: &[u8],
+    expected_transaction: &VisionTransaction,
+    expected_signed_body_digest_hex: &str,
+    canonical_tip_height: u64,
+) -> Result<WalletReceiptObservation, WalletReceiptError> {
+    let expected_tx_id = canonical_transaction_id(expected_transaction)
+        .map_err(|_| WalletReceiptError::InvalidResponse)?;
+    let wire: TransactionLookupWire =
+        serde_json::from_slice(body).map_err(|_| WalletReceiptError::InvalidResponse)?;
+    if wire.tx_id != expected_tx_id {
+        return Err(WalletReceiptError::TransactionIdMismatch);
+    }
+    if !wire.found {
+        if wire.block_hash.is_none()
+            && wire.block_height.is_none()
+            && wire.tx_index.is_none()
+            && wire.tx.is_none()
+        {
+            return Ok(WalletReceiptObservation::NotFound);
+        }
+        return Err(WalletReceiptError::InvalidResponse);
+    }
+    let observed = wire
+        .tx
+        .as_ref()
+        .ok_or(WalletReceiptError::SignedEnvelopeMismatch)?;
+    if observed != expected_transaction {
+        return Err(WalletReceiptError::SignedEnvelopeMismatch);
+    }
+    let exact_body =
+        serde_json::to_vec(observed).map_err(|_| WalletReceiptError::InvalidResponse)?;
+    let mut hasher =
+        blake3::Hasher::new_derive_key("com.vision.desktop.wallet-signed-envelope-digest.v1");
+    hasher.update(&exact_body);
+    let observed_digest = hasher.finalize().to_hex().to_string();
+    if observed_digest != expected_signed_body_digest_hex {
+        return Err(WalletReceiptError::SignedEnvelopeMismatch);
+    }
+    parse_receipt_observation(body, &expected_tx_id, canonical_tip_height)
 }
 
 impl std::error::Error for WalletReceiptError {}
@@ -441,4 +490,110 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn reconciliation_requires_the_exact_signature_and_signed_body_digest() {
+        let transaction = sample_transaction();
+        let pending = snapshot_json(Some(&transaction), true, None, None, None);
+        let exact_body = serde_json::to_vec(&transaction).unwrap();
+        let mut hasher =
+            blake3::Hasher::new_derive_key("com.vision.desktop.wallet-signed-envelope-digest.v1");
+        hasher.update(&exact_body);
+        let digest = hasher.finalize().to_hex().to_string();
+        assert_eq!(
+            parse_exact_signed_receipt_observation(&pending, &transaction, &digest, 20),
+            Ok(WalletReceiptObservation::Pending)
+        );
+
+        let mut alternate_signature = transaction.clone();
+        alternate_signature.sig = "44".repeat(64);
+        let alternate = snapshot_json(Some(&alternate_signature), true, None, None, None);
+        assert_eq!(
+            parse_exact_signed_receipt_observation(&alternate, &transaction, &digest, 20),
+            Err(WalletReceiptError::SignedEnvelopeMismatch)
+        );
+        assert_eq!(
+            parse_exact_signed_receipt_observation(&pending, &transaction, &"00".repeat(32), 20,),
+            Err(WalletReceiptError::SignedEnvelopeMismatch)
+        );
+    }
+}
+
+pub(super) struct ExactAcceptedLookup {
+    transaction_id: String,
+    nonce: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReconciliationCashTransferArgs {
+    to: String,
+    amount: u128,
+}
+
+impl ExactAcceptedLookup {
+    pub(super) fn transaction_id(&self) -> &str {
+        &self.transaction_id
+    }
+    pub(super) const fn nonce(&self) -> u64 {
+        self.nonce
+    }
+}
+
+pub(super) fn prove_exact_reconciliation_lookup(
+    body: &[u8],
+    expected: &ReconciliationLookupExpectation,
+) -> Result<Option<ExactAcceptedLookup>, WalletReceiptError> {
+    let wire: TransactionLookupWire =
+        serde_json::from_slice(body).map_err(|_| WalletReceiptError::InvalidResponse)?;
+    if wire.tx_id != expected.transaction_id() {
+        return Err(WalletReceiptError::TransactionIdMismatch);
+    }
+    if !wire.found {
+        return if wire.block_hash.is_none()
+            && wire.block_height.is_none()
+            && wire.tx_index.is_none()
+            && wire.tx.is_none()
+        {
+            Ok(None)
+        } else {
+            Err(WalletReceiptError::InvalidResponse)
+        };
+    }
+    let transaction = wire.tx.ok_or(WalletReceiptError::SignedEnvelopeMismatch)?;
+    let args: ReconciliationCashTransferArgs = serde_json::from_slice(&transaction.args)
+        .map_err(|_| WalletReceiptError::SignedEnvelopeMismatch)?;
+    let amount = expected
+        .amount_raw_units()
+        .parse::<u128>()
+        .map_err(|_| WalletReceiptError::SignedEnvelopeMismatch)?;
+    if canonical_transaction_id(&transaction).ok().as_deref() != Some(expected.transaction_id())
+        || transaction.sender_pubkey != expected.sender_address()
+        || transaction.module != "cash"
+        || transaction.method != "transfer"
+        || args.to != expected.recipient_address()
+        || args.amount != amount
+        || transaction.nonce != expected.nonce()
+        || transaction.tip != expected.tip_raw_units()
+        || transaction.fee_limit != expected.fee_limit_raw_units()
+        || transaction.sig.len() != 128
+        || !transaction
+            .sig
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(WalletReceiptError::SignedEnvelopeMismatch);
+    }
+    let exact_body =
+        serde_json::to_vec(&transaction).map_err(|_| WalletReceiptError::SignedEnvelopeMismatch)?;
+    let mut hasher =
+        blake3::Hasher::new_derive_key("com.vision.desktop.wallet-signed-envelope-digest.v1");
+    hasher.update(&exact_body);
+    if hasher.finalize().to_hex().as_str() != expected.signed_body_digest_hex() {
+        return Err(WalletReceiptError::SignedEnvelopeMismatch);
+    }
+    Ok(Some(ExactAcceptedLookup {
+        transaction_id: expected.transaction_id().to_string(),
+        nonce: expected.nonce(),
+    }))
 }

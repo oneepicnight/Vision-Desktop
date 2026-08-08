@@ -115,6 +115,11 @@ impl NativeConfirmationApproval {
             _proof: NativeConfirmationApprovalProof(0xA5),
         }
     }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn issue_for_test() -> Self {
+        Self::issue()
+    }
 }
 
 impl Drop for NativeConfirmationApprovalProof {
@@ -256,7 +261,8 @@ const fn map_signing_error(error: WalletPrivateSigningError) -> WalletConfirmati
         WalletPrivateSigningError::RuntimeRevoked => WalletConfirmationError::AuthorityRevoked,
         WalletPrivateSigningError::ActivationUnavailable
         | WalletPrivateSigningError::IntentRejected
-        | WalletPrivateSigningError::SignatureUnavailable => {
+        | WalletPrivateSigningError::SignatureUnavailable
+        | WalletPrivateSigningError::SubmissionUnavailable => {
             WalletConfirmationError::SigningUnavailable
         }
         WalletPrivateSigningError::CoreUnavailable => WalletConfirmationError::CoreUnavailable,

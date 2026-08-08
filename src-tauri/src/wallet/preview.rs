@@ -506,7 +506,8 @@ fn map_runtime_error(error: WalletRuntimeError) -> WalletPreviewError {
         | WalletRuntimeError::RecoverySelectionCancelled
         | WalletRuntimeError::RecoveryDestinationInvalid
         | WalletRuntimeError::RecoveryDestinationExists
-        | WalletRuntimeError::RecoverySourceInvalid => WalletPreviewError::RuntimeUnavailable,
+        | WalletRuntimeError::RecoverySourceInvalid
+        | WalletRuntimeError::ReconciliationUnavailable => WalletPreviewError::RuntimeUnavailable,
     }
 }
 

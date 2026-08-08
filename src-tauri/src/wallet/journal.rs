@@ -14,6 +14,7 @@ use super::secure_filesystem::{
 use super::{
     account::derive_account_identity,
     receipt::WalletReceiptObservation,
+    reconciliation::AcceptedSubmissionEvidence,
     secrets::WalletSeed,
     storage_security,
     submission::WalletSubmissionOutcome,
@@ -270,6 +271,7 @@ struct CashTransferArgs {
 /// Appends public metadata only after the exact Core response parser has
 /// classified a submission as accepted. Signed bytes and signatures are not
 /// persisted in this journal.
+#[cfg(test)]
 pub(in crate::wallet) fn append_accepted_submission(
     path: &Path,
     authenticator: &WalletJournalAuthenticator<'_>,
@@ -296,6 +298,82 @@ pub(in crate::wallet) fn append_accepted_submission(
         sequence: next_sequence(journal.event_count)?,
         tx_id,
         recorded_at_unix_ms: submitted_at_unix_ms,
+        event: JournalEventData::Submitted(submitted),
+        previous_authentication_tag_hex: hex::encode(journal.last_authentication_tag),
+        authentication_tag_hex: String::new(),
+    };
+    authenticate_event(authenticator, &mut event)?;
+    append_event(
+        path,
+        authenticator,
+        loaded.encoded.as_slice(),
+        &event,
+        journal.event_count == 0,
+        loaded.head_generation,
+    )?;
+    apply_authenticated_event(&mut journal, &event)?;
+    Ok(journal)
+}
+
+/// Appends only a non-forgeable, reconciliation-authenticated acceptance capability.
+pub(in crate::wallet) fn append_accepted_evidence(
+    path: &Path,
+    authenticator: &WalletJournalAuthenticator<'_>,
+    evidence: &AcceptedSubmissionEvidence,
+) -> Result<WalletActivityJournal, WalletJournalError> {
+    let _guard = JOURNAL_WRITE_LOCK
+        .lock()
+        .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    if evidence.wallet_id() != authenticator.wallet_id
+        || evidence.sender_address() != authenticator.sender_address
+    {
+        return Err(WalletJournalError::SubmissionMismatch);
+    }
+    validate_tx_id(evidence.transaction_id())?;
+    if !is_lowercase_hex_32_bytes(evidence.recipient_address())
+        || evidence.recipient_address() == evidence.sender_address()
+        || evidence
+            .amount_raw_units()
+            .parse::<u128>()
+            .ok()
+            .is_none_or(|amount| amount == 0)
+    {
+        return Err(WalletJournalError::InvalidTransaction);
+    }
+    let loaded = load_journal_unlocked(path, authenticator)?;
+    let mut journal = loaded.journal;
+    let submitted = SubmittedEvent {
+        sender_address: evidence.sender_address().to_string(),
+        recipient_address: evidence.recipient_address().to_string(),
+        amount_raw_units: evidence.amount_raw_units().to_string(),
+        nonce: evidence.nonce(),
+        tip_raw_units: evidence.tip_raw_units(),
+        fee_limit_raw_units: evidence.fee_limit_raw_units(),
+    };
+    if let Some(existing) = journal
+        .records
+        .iter()
+        .find(|record| record.tx_id == evidence.transaction_id())
+    {
+        let exact = existing.sender_address == submitted.sender_address
+            && existing.recipient_address == submitted.recipient_address
+            && existing.amount_raw_units == submitted.amount_raw_units
+            && existing.nonce == submitted.nonce
+            && existing.tip_raw_units == submitted.tip_raw_units
+            && existing.fee_limit_raw_units == submitted.fee_limit_raw_units;
+        return if exact {
+            Ok(journal)
+        } else {
+            Err(WalletJournalError::SubmissionMismatch)
+        };
+    }
+    let mut event = JournalEvent {
+        schema: JOURNAL_SCHEMA.to_string(),
+        version: JOURNAL_VERSION,
+        wallet_id: authenticator.wallet_id.to_string(),
+        sequence: next_sequence(journal.event_count)?,
+        tx_id: evidence.transaction_id().to_string(),
+        recorded_at_unix_ms: evidence.submitted_at_unix_ms(),
         event: JournalEventData::Submitted(submitted),
         previous_authentication_tag_hex: hex::encode(journal.last_authentication_tag),
         authentication_tag_hex: String::new(),

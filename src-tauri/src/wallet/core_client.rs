@@ -13,6 +13,7 @@
     )
 )]
 
+use super::reconciliation::CoreWriteOnce;
 use crate::supervisor::{CoreAuthorityError, CoreConnectionAuthority, SupervisorState};
 use serde::Deserialize;
 use std::{
@@ -27,6 +28,7 @@ use windows_sys::Win32::{
     },
     Networking::WinSock::AF_INET,
 };
+use zeroize::Zeroizing;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
@@ -80,6 +82,25 @@ pub(super) trait WalletCoreReadSource {
     ) -> Result<WalletCoreAccountSnapshot, WalletCoreClientError>;
     fn status(&self) -> Result<WalletCoreStatus, WalletCoreClientError>;
     fn validated_identity_fingerprint(&self) -> Result<[u8; 32], WalletCoreClientError>;
+}
+
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+pub(super) struct WalletCoreHttpResponse {
+    pub status: u16,
+    pub body: Zeroizing<Vec<u8>>,
+}
+
+pub(super) trait WalletCoreSubmissionSource: WalletCoreReadSource {
+    fn submit_once(
+        &self,
+        authority: CoreWriteOnce,
+        exact_body: &[u8],
+    ) -> Result<WalletCoreHttpResponse, WalletCoreClientError>;
+
+    fn transaction_lookup(
+        &self,
+        transaction_id: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError>;
 }
 
 #[derive(Deserialize)]
@@ -213,6 +234,24 @@ impl WalletCoreReadSource for WalletCoreReadClient<'_> {
     fn validated_identity_fingerprint(&self) -> Result<[u8; 32], WalletCoreClientError> {
         self.authority.validate().map_err(map_authority_error)?;
         Ok(self.authority.wallet_identity_fingerprint())
+    }
+}
+
+impl WalletCoreSubmissionSource for WalletCoreReadClient<'_> {
+    fn submit_once(
+        &self,
+        authority: CoreWriteOnce,
+        exact_body: &[u8],
+    ) -> Result<WalletCoreHttpResponse, WalletCoreClientError> {
+        submit_json_once_with(&self.authority, authority, exact_body)
+    }
+
+    fn transaction_lookup(
+        &self,
+        transaction_id: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError> {
+        validate_address(transaction_id)?;
+        read_bytes(&self.authority, &format!("/transaction/{transaction_id}"))
     }
 }
 
@@ -364,12 +403,102 @@ fn read_json<T: for<'de> Deserialize<'de>, A: ReadAuthority>(
         .map_err(|_| WalletCoreClientError::TransportFailed)?;
 
     remaining_timeout(deadline)?;
-    let body = read_http_response(&mut stream, deadline)?;
+    let response = read_http_response(&mut stream, deadline)?;
     authority.validate_after()?;
     remaining_timeout(deadline)?;
     authority.validate_peer(&stream)?;
     remaining_timeout(deadline)?;
-    serde_json::from_slice(&body).map_err(|_| WalletCoreClientError::ResponseRejected)
+    if response.status != 200 {
+        return Err(WalletCoreClientError::ResponseRejected);
+    }
+    serde_json::from_slice(&response.body).map_err(|_| WalletCoreClientError::ResponseRejected)
+}
+
+fn read_bytes<A: ReadAuthority>(
+    authority: &A,
+    path: &str,
+) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError> {
+    let deadline = Instant::now() + OPERATION_TIMEOUT;
+    authority.validate_before()?;
+    let endpoint = authority.endpoint();
+    if endpoint.ip() != &Ipv4Addr::LOCALHOST {
+        return Err(WalletCoreClientError::CoreIdentityChanged);
+    }
+    let mut stream = connect_proven(authority, deadline)?;
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        endpoint.port()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.flush())
+        .map_err(|_| WalletCoreClientError::TransportFailed)?;
+    let response = read_http_response(&mut stream, deadline)?;
+    validate_after_io(authority, &stream, deadline)?;
+    if response.status != 200 {
+        return Err(WalletCoreClientError::ResponseRejected);
+    }
+    Ok(response.body)
+}
+
+fn submit_json_once_with<A: ReadAuthority>(
+    authority: &A,
+    _write: CoreWriteOnce,
+    exact_body: &[u8],
+) -> Result<WalletCoreHttpResponse, WalletCoreClientError> {
+    if exact_body.is_empty() || exact_body.len() > MAX_BODY_BYTES {
+        return Err(WalletCoreClientError::ResponseTooLarge);
+    }
+    let deadline = Instant::now() + OPERATION_TIMEOUT;
+    authority.validate_before()?;
+    let endpoint = authority.endpoint();
+    if endpoint.ip() != &Ipv4Addr::LOCALHOST {
+        return Err(WalletCoreClientError::CoreIdentityChanged);
+    }
+    let mut stream = connect_proven(authority, deadline)?;
+    let header = format!(
+        "POST /transactions HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        endpoint.port(),
+        exact_body.len()
+    );
+    stream
+        .write_all(header.as_bytes())
+        .and_then(|_| stream.write_all(exact_body))
+        .and_then(|_| stream.flush())
+        .map_err(|_| WalletCoreClientError::TransportFailed)?;
+    let response = read_http_response(&mut stream, deadline)?;
+    validate_after_io(authority, &stream, deadline)?;
+    Ok(response)
+}
+
+fn connect_proven<A: ReadAuthority>(
+    authority: &A,
+    deadline: Instant,
+) -> Result<TcpStream, WalletCoreClientError> {
+    let endpoint = authority.endpoint();
+    let connect_timeout = remaining_timeout(deadline)?.min(CONNECT_TIMEOUT);
+    let stream = TcpStream::connect_timeout(&SocketAddr::V4(endpoint), connect_timeout)
+        .map_err(|_| WalletCoreClientError::TransportFailed)?;
+    let remaining = remaining_timeout(deadline)?;
+    stream
+        .set_read_timeout(Some(remaining))
+        .and_then(|_| stream.set_write_timeout(Some(remaining)))
+        .map_err(|_| WalletCoreClientError::TransportFailed)?;
+    authority.validate_peer(&stream)?;
+    authority.validate_before()?;
+    Ok(stream)
+}
+
+fn validate_after_io<A: ReadAuthority>(
+    authority: &A,
+    stream: &TcpStream,
+    deadline: Instant,
+) -> Result<(), WalletCoreClientError> {
+    remaining_timeout(deadline)?;
+    authority.validate_after()?;
+    remaining_timeout(deadline)?;
+    authority.validate_peer(stream)?;
+    remaining_timeout(deadline).map(|_| ())
 }
 
 fn remaining_timeout(deadline: Instant) -> Result<Duration, WalletCoreClientError> {
@@ -384,7 +513,7 @@ fn remaining_timeout(deadline: Instant) -> Result<Duration, WalletCoreClientErro
 fn read_http_response(
     stream: &mut TcpStream,
     deadline: Instant,
-) -> Result<Vec<u8>, WalletCoreClientError> {
+) -> Result<WalletCoreHttpResponse, WalletCoreClientError> {
     let mut received = Vec::with_capacity(2048);
     let header_end = loop {
         if let Some(position) = received.windows(4).position(|window| window == b"\r\n\r\n") {
@@ -414,7 +543,7 @@ fn read_http_response(
     }
     let header = std::str::from_utf8(&received[..header_end])
         .map_err(|_| WalletCoreClientError::ResponseRejected)?;
-    let content_length = validate_headers(header)?;
+    let (status, content_length) = validate_headers(header)?;
     if content_length > MAX_BODY_BYTES {
         return Err(WalletCoreClientError::ResponseTooLarge);
     }
@@ -438,16 +567,27 @@ fn read_http_response(
         }
         body.extend_from_slice(&chunk[..read]);
     }
-    Ok(body)
+    Ok(WalletCoreHttpResponse {
+        status,
+        body: Zeroizing::new(body),
+    })
 }
 
-fn validate_headers(header: &str) -> Result<usize, WalletCoreClientError> {
+fn validate_headers(header: &str) -> Result<(u16, usize), WalletCoreClientError> {
     let mut lines = header.split("\r\n");
     let status = lines
         .next()
         .ok_or(WalletCoreClientError::ResponseRejected)?;
     let mut status_parts = status.split_ascii_whitespace();
-    if status_parts.next() != Some("HTTP/1.1") || status_parts.next() != Some("200") {
+    if status_parts.next() != Some("HTTP/1.1") {
+        return Err(WalletCoreClientError::ResponseRejected);
+    }
+    let status = status_parts
+        .next()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|value| (100..=599).contains(value))
+        .ok_or(WalletCoreClientError::ResponseRejected)?;
+    if status_parts.next().is_none() {
         return Err(WalletCoreClientError::ResponseRejected);
     }
 
@@ -487,7 +627,9 @@ fn validate_headers(header: &str) -> Result<usize, WalletCoreClientError> {
     if !media_type.eq_ignore_ascii_case("application/json") {
         return Err(WalletCoreClientError::ResponseRejected);
     }
-    content_length.ok_or(WalletCoreClientError::ResponseRejected)
+    content_length
+        .map(|length| (status, length))
+        .ok_or(WalletCoreClientError::ResponseRejected)
 }
 
 fn verify_connected_peer_owner(
@@ -641,9 +783,7 @@ mod tests {
         };
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 4096];
-            let count = stream.read(&mut request).unwrap();
-            let request = String::from_utf8(request[..count].to_vec()).unwrap();
+            let request = read_complete_test_request(&mut stream);
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n{body}",
                 body.len()
@@ -676,9 +816,7 @@ mod tests {
             let mut requests = Vec::with_capacity(bodies.len());
             for body in bodies {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0_u8; 4096];
-                let count = stream.read(&mut request).unwrap();
-                requests.push(String::from_utf8(request[..count].to_vec()).unwrap());
+                requests.push(read_complete_test_request(&mut stream));
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -689,6 +827,43 @@ mod tests {
             requests
         });
         (authority, server)
+    }
+
+    fn read_complete_test_request(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::with_capacity(4096);
+        let target_length = loop {
+            let mut chunk = [0_u8; 512];
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0, "request closed before its headers completed");
+            request.extend_from_slice(&chunk[..count]);
+            assert!(request.len() <= 4096, "test request exceeded its bound");
+            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                let header_end = header_end + 4;
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("Content-Length: ")
+                            .map(|value| value.parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                break header_end + content_length;
+            }
+        };
+        while request.len() < target_length {
+            let mut chunk = [0_u8; 512];
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0, "request closed before its body completed");
+            request.extend_from_slice(&chunk[..count]);
+            assert!(
+                request.len() <= target_length,
+                "request exceeded Content-Length"
+            );
+        }
+        String::from_utf8(request).unwrap()
     }
 
     fn status_json_with(version: &str, canonical_tip_hash: &str) -> String {
@@ -917,16 +1092,43 @@ mod tests {
     }
 
     #[test]
-    fn source_contains_no_write_transport_or_tauri_boundary() {
+    fn source_keeps_private_write_transport_outside_tauri_and_secret_authority() {
         let source = include_str!("core_client.rs");
-        assert!(!source.contains(&["PO", "ST "].concat()));
+        assert!(source.contains(&["PO", "ST /transactions"].concat()));
         assert!(!source.contains(&["#[tauri", "::command]"].concat()));
         assert!(!source.contains(&["req", "west"].concat()));
         assert!(!source.contains(&["Wallet", "Seed"].concat()));
-        for result_type in ["WalletCoreAccountSnapshot", "WalletCoreStatus"] {
+        for result_type in [
+            "WalletCoreAccountSnapshot",
+            "WalletCoreStatus",
+            "WalletCoreHttpResponse",
+        ] {
             assert!(!source.contains(&format!(
                 "#[derive(Debug, PartialEq, Eq)]\npub(super) struct {result_type}"
             )));
         }
+    }
+
+    #[test]
+    fn private_write_sends_one_exact_bounded_post_and_preserves_typed_status() {
+        let response_body = format!(
+            "{{\"status\":\"accepted\",\"tx_id\":\"{}\",\"current_nonce\":7,\"decision\":{{\"kind\":\"accept\"}}}}",
+            "a".repeat(64)
+        );
+        let (authority, server) = serve_once(response_body.clone(), "200 OK", "", None);
+        let exact_body = br#"{"signed":"envelope"}"#;
+        let response = submit_json_once_with(
+            &authority,
+            crate::wallet::reconciliation::core_write_once_for_test(),
+            exact_body,
+        )
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.as_slice(), response_body.as_bytes());
+        let request = server.join().unwrap();
+        assert!(request.starts_with("POST /transactions HTTP/1.1\r\n"));
+        assert!(request.contains("Content-Type: application/json\r\n"));
+        assert!(request.contains(&format!("Content-Length: {}\r\n", exact_body.len())));
+        assert!(request.ends_with(std::str::from_utf8(exact_body).unwrap()));
     }
 }

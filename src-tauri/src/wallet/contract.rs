@@ -70,6 +70,8 @@ pub enum WalletContractRequirement {
     SignatureVector,
     FeeAndNonceRules,
     SubmissionResponse,
+    SubmissionRejectionSemantics,
+    ReconciliationStoreSchema,
     ReceiptAndHistory,
     PrivateLoopbackBinding,
 }
@@ -87,7 +89,10 @@ pub struct WalletCompatibilityGate {
 pub fn wallet_contract_gate() -> WalletCompatibilityGate {
     WalletCompatibilityGate {
         signing_enabled: false,
-        unmet_requirements: vec![WalletContractRequirement::PrivateLoopbackBinding],
+        unmet_requirements: vec![
+            WalletContractRequirement::SubmissionRejectionSemantics,
+            WalletContractRequirement::PrivateLoopbackBinding,
+        ],
     }
 }
 
@@ -156,7 +161,7 @@ mod tests {
         let gate = wallet_contract_gate();
 
         assert!(!gate.signing_enabled);
-        assert_eq!(gate.unmet_requirements.len(), 1);
+        assert_eq!(gate.unmet_requirements.len(), 2);
         assert!(!gate
             .unmet_requirements
             .contains(&WalletContractRequirement::KeyDerivation));
@@ -178,6 +183,12 @@ mod tests {
         assert!(!gate
             .unmet_requirements
             .contains(&WalletContractRequirement::SubmissionResponse));
+        assert!(gate
+            .unmet_requirements
+            .contains(&WalletContractRequirement::SubmissionRejectionSemantics));
+        assert!(!gate
+            .unmet_requirements
+            .contains(&WalletContractRequirement::ReconciliationStoreSchema));
         assert!(!gate
             .unmet_requirements
             .contains(&WalletContractRequirement::ReceiptAndHistory));

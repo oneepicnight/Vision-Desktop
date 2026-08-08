@@ -1101,7 +1101,8 @@ fn map_runtime_error(error: WalletRuntimeError) -> WalletLifecycleError {
         | WalletRuntimeError::RecoverySelectionCancelled
         | WalletRuntimeError::RecoveryDestinationInvalid
         | WalletRuntimeError::RecoveryDestinationExists
-        | WalletRuntimeError::RecoverySourceInvalid => WalletLifecycleError::RuntimeUnavailable,
+        | WalletRuntimeError::RecoverySourceInvalid
+        | WalletRuntimeError::ReconciliationUnavailable => WalletLifecycleError::RuntimeUnavailable,
     }
 }
 

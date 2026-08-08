@@ -1,7 +1,15 @@
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "private signing and submission remain unregistered pending exact review"
+    )
+)]
+
 use super::{
     core_client::{
-        WalletCoreClientError, WalletCoreReadSource, SUPPORTED_STATUS_VERSION,
-        SUPPORTED_WALLET_CORE_CONTRACT,
+        WalletCoreClientError, WalletCoreReadSource, WalletCoreSubmissionSource,
+        SUPPORTED_STATUS_VERSION, SUPPORTED_WALLET_CORE_CONTRACT,
     },
     preview::{BoundTransferPreview, PendingTransferConfirmation, WalletPreviewError},
     runtime::{WalletRuntimeError, WalletSigningPermit},
@@ -12,6 +20,8 @@ use super::{
     transaction_confirmation::NativeConfirmationApproval,
 };
 
+mod submission_coordinator;
+
 /// Fixed, non-emitting failure categories for the private confirmation-to-signing bridge.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::wallet) enum WalletPrivateSigningError {
@@ -21,6 +31,7 @@ pub(in crate::wallet) enum WalletPrivateSigningError {
     CoreUnavailable,
     IntentRejected,
     SignatureUnavailable,
+    SubmissionUnavailable,
 }
 
 /// Single-owner result reserved for a separately reviewed submission tranche.
@@ -28,10 +39,10 @@ pub(in crate::wallet) enum WalletPrivateSigningError {
 /// This type intentionally implements neither Clone, Debug, Display, nor serialization. In this
 /// tranche it is always destroyed inside this module and no signed bytes escape.
 struct SignedTransferArtifact {
-    _transaction: VisionTransaction,
-    _transaction_id: String,
-    _wallet_id: String,
-    _core_identity_fingerprint: [u8; 32],
+    transaction: VisionTransaction,
+    transaction_id: String,
+    wallet_id: String,
+    core_identity_fingerprint: [u8; 32],
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -81,6 +92,87 @@ pub(in crate::wallet) fn sign_after_native_approval<S: WalletCoreReadSource>(
     sign_after_native_approval_with_observer(pending, approval, &NoopSigningCoordinatorObserver)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(in crate::wallet) fn sign_and_submit_after_native_approval<S: WalletCoreSubmissionSource>(
+    pending: PendingTransferConfirmation<'_, S>,
+    approval: NativeConfirmationApproval,
+    vault_path: &std::path::Path,
+    journal_path: &std::path::Path,
+    created_at_unix_ms: u64,
+    rejection_policy: &crate::wallet::submission::SubmissionRejectionPolicy,
+) -> Result<submission_coordinator::PrivateSubmissionResult, WalletPrivateSigningError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sign_and_submit_after_native_approval_inner(
+            pending,
+            approval,
+            vault_path,
+            journal_path,
+            created_at_unix_ms,
+            rejection_policy,
+        )
+    })) {
+        Ok(result) => result,
+        Err(_) => Err(WalletPrivateSigningError::RuntimeRevoked),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_and_submit_after_native_approval_inner<S: WalletCoreSubmissionSource>(
+    pending: PendingTransferConfirmation<'_, S>,
+    approval: NativeConfirmationApproval,
+    vault_path: &std::path::Path,
+    journal_path: &std::path::Path,
+    created_at_unix_ms: u64,
+    rejection_policy: &crate::wallet::submission::SubmissionRejectionPolicy,
+) -> Result<submission_coordinator::PrivateSubmissionResult, WalletPrivateSigningError> {
+    let (permit, source, intent) = pending
+        .promote_with_native_approval(approval)
+        .map_err(map_preview_error)?;
+    validate_core_and_runtime(&permit, &source, &intent)?;
+    let signed = permit
+        .sign_confirmed_intent_with_observer(
+            &intent,
+            SUPPORTED_WALLET_CORE_CONTRACT,
+            SUPPORTED_STATUS_VERSION,
+            &TransactionObserverAdapter(&NoopSigningCoordinatorObserver),
+        )
+        .map_err(map_runtime_error)?
+        .map_err(map_transaction_error)?;
+    validate_core_and_runtime(&permit, &source, &intent)?;
+    let artifact = SignedTransferArtifact {
+        transaction: signed,
+        transaction_id: intent.confirmation_fields().transaction_id.to_owned(),
+        wallet_id: permit.wallet_id().to_owned(),
+        core_identity_fingerprint: *intent.core_identity_fingerprint(),
+    };
+    let submission_permit = permit
+        .promote_to_submission(artifact.core_identity_fingerprint)
+        .map_err(map_runtime_error)?;
+    submission_coordinator::submit_signed_artifact(
+        submission_permit,
+        artifact,
+        &source,
+        vault_path,
+        journal_path,
+        created_at_unix_ms,
+        rejection_policy,
+    )
+    .map_err(|error| match error {
+        submission_coordinator::PrivateSubmissionError::RuntimeRevoked => {
+            WalletPrivateSigningError::RuntimeRevoked
+        }
+        submission_coordinator::PrivateSubmissionError::ActivationUnavailable => {
+            WalletPrivateSigningError::ActivationUnavailable
+        }
+        submission_coordinator::PrivateSubmissionError::IntentRejected => {
+            WalletPrivateSigningError::IntentRejected
+        }
+        submission_coordinator::PrivateSubmissionError::ReconciliationUnavailable => {
+            WalletPrivateSigningError::SubmissionUnavailable
+        }
+    })
+}
+
 fn sign_after_native_approval_with_observer<S: WalletCoreReadSource>(
     pending: PendingTransferConfirmation<'_, S>,
     approval: NativeConfirmationApproval,
@@ -106,10 +198,10 @@ fn sign_after_native_approval_with_observer<S: WalletCoreReadSource>(
     observer.checkpoint(SigningCoordinatorStage::AfterSignatureVerification);
     validate_core_and_runtime(&permit, &source, &intent)?;
     let artifact = SignedTransferArtifact {
-        _transaction: signed,
-        _transaction_id: intent.confirmation_fields().transaction_id.to_owned(),
-        _wallet_id: permit.wallet_id().to_owned(),
-        _core_identity_fingerprint: *intent.core_identity_fingerprint(),
+        transaction: signed,
+        transaction_id: intent.confirmation_fields().transaction_id.to_owned(),
+        wallet_id: permit.wallet_id().to_owned(),
+        core_identity_fingerprint: *intent.core_identity_fingerprint(),
     };
 
     observer.checkpoint(SigningCoordinatorStage::BeforeCompletion);
@@ -180,7 +272,10 @@ const fn map_runtime_error(error: WalletRuntimeError) -> WalletPrivateSigningErr
         | WalletRuntimeError::RecoverySelectionCancelled
         | WalletRuntimeError::RecoveryDestinationInvalid
         | WalletRuntimeError::RecoveryDestinationExists
-        | WalletRuntimeError::RecoverySourceInvalid => WalletPrivateSigningError::RuntimeRevoked,
+        | WalletRuntimeError::RecoverySourceInvalid
+        | WalletRuntimeError::ReconciliationUnavailable => {
+            WalletPrivateSigningError::RuntimeRevoked
+        }
     }
 }
 

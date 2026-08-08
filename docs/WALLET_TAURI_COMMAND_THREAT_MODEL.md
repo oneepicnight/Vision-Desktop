@@ -4,6 +4,12 @@
 
 This document specifies a future interface. No wallet command is registered with Tauri, no wallet service wrapper exists in React, and wallet creation, restore, unlock, signing, and submission remain unavailable. The pinned single-instance plugin is active first on Windows, followed by the pinned native dialog plugin for private Rust use. Neither plugin has a WebView permission.
 
+`WALLET_LIFECYCLE_TAURI_EXPOSURE_DESIGN.md` now defines the exact lifecycle command contract and
+supersedes this document where activation sequencing is concerned. In particular, lifecycle
+commands must not be exposed as a partial wallet: their eventual registration is atomic with the
+separately reviewed spending surface and supported private-loopback Core release. That design is
+documentation only and grants no implementation or exposure authority.
+
 The specification is fail-closed. An implementation must not register a partial subset that weakens the ordering, origin, path, lifecycle, or compatibility gates below.
 
 ## Evidence inspected

@@ -6,6 +6,12 @@ Vision Desktop separates wallet lifecycle authority from transaction-signing aut
 private Rust runtime. Both production scopes remain disabled. No wallet command, permission,
 password form, or frontend service is registered by this change.
 
+The private signing and submission implementations have since passed their exact-commit reviews,
+but that does not activate either production scope. The approval flags remain false and the current
+Core manifest still lacks the supported private-loopback contract. The future lifecycle Tauri
+boundary and its atomic full-wallet release sequence are specified in
+`WALLET_LIFECYCLE_TAURI_EXPOSURE_DESIGN.md`.
+
 This separation permits lifecycle qualification to proceed without weakening the private-Core and
 transaction gates. It does not approve custody or sending.
 

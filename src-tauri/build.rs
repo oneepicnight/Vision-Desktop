@@ -21,6 +21,19 @@
         "get_default_paths",
     ];
 
+    #[cfg(target_os = "windows")]
+    if std::env::var_os("CARGO_FEATURE_WALLET_LAYER_A_QUALIFICATION").is_some() {
+        let test_manifest =
+            std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
+                .join("windows-test-common-controls.manifest");
+        println!("cargo:rerun-if-changed={}", test_manifest.display());
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
+            test_manifest.display()
+        );
+    }
+
     let attributes = tauri_build::Attributes::new()
         .app_manifest(tauri_build::AppManifest::new().commands(APPLICATION_COMMANDS));
 

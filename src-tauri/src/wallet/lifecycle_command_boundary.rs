@@ -1166,3 +1166,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "wallet-layer-a-qualification"))]
+mod generated_wrapper_qualification;

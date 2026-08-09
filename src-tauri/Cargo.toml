@@ -4,6 +4,9 @@ version = "0.1.0-alpha.1"
 description = "Vision Desktop node manager"
 edition = "2021"
 
+[features]
+wallet-layer-a-qualification = []
+
 [lib]
 name = "vision_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -60,3 +63,4 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 tempfile = "3"
+tauri = { version = "=2.11.5", features = ["test"] }

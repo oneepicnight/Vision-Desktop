@@ -294,6 +294,10 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let recovery_selection_source = read("src/wallet/recovery_selection.rs");
     let wallet_adapter_source = read("src/wallet/lifecycle.rs");
     let wallet_command_boundary_source = read("src/wallet/lifecycle_command_boundary.rs");
+    let layer_a_qualification_source =
+        read("src/wallet/lifecycle_command_boundary/generated_wrapper_qualification.rs");
+    let cargo_manifest = read("Cargo.toml");
+    let build_source = read("build.rs");
     let secure_filesystem_source = read("src/wallet/secure_filesystem.rs");
     let storage_security_source = read("src/wallet/storage_security.rs");
     let vault_source = read("src/wallet/vault.rs");
@@ -402,6 +406,45 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(!wallet_command_boundary_source.contains("impl Clone for MainWalletWindowAuthority"));
     assert!(!wallet_command_boundary_source.contains("pub struct WalletExposureAuthority"));
     assert!(!wallet_command_boundary_source.contains("pub struct MainWalletWindowAuthority"));
+    assert!(wallet_command_boundary_source
+        .contains("#[cfg(all(test, feature = \"wallet-layer-a-qualification\"))]"));
+    assert_eq!(
+        layer_a_qualification_source
+            .match_indices("#[tauri::command]")
+            .count(),
+        7
+    );
+    for command in [
+        "fn wallet_get_status(",
+        "fn wallet_select_recovery_destination(",
+        "fn wallet_create(",
+        "fn wallet_select_recovery_source(",
+        "fn wallet_restore(",
+        "fn wallet_unlock(",
+        "fn wallet_lock(",
+    ] {
+        assert!(layer_a_qualification_source.contains(command));
+    }
+    assert!(layer_a_qualification_source.contains("tauri::generate_handler!["));
+    assert!(layer_a_qualification_source.contains("mock_builder()"));
+    assert!(layer_a_qualification_source.contains("tauri::test::get_ipc_response("));
+    assert!(layer_a_qualification_source.contains("MockRuntime"));
+    assert!(layer_a_qualification_source.contains("!policy.duplicate_key_rejection_proven"));
+    for forbidden in [
+        "WalletRuntimeState",
+        "WalletLifecycleAdapters",
+        "SecretInput",
+        "WalletSeed",
+        "CoreConnectionAuthority",
+        "SignedTransferArtifact",
+        "AppManifest",
+    ] {
+        assert!(!layer_a_qualification_source.contains(forbidden));
+    }
+    assert!(cargo_manifest.contains("wallet-layer-a-qualification = []"));
+    assert!(cargo_manifest.contains("tauri = { version = \"=2.11.5\", features = [\"test\"] }"));
+    assert!(build_source.contains("CARGO_FEATURE_WALLET_LAYER_A_QUALIFICATION"));
+    assert!(build_source.contains("cargo:rustc-link-arg=/MANIFESTINPUT:"));
     assert!(!secure_filesystem_source.contains("#[tauri::command]"));
     assert!(secure_filesystem_source.contains("FILE_FLAG_OPEN_REPARSE_POINT"));
     assert!(secure_filesystem_source.contains("SetFileInformationByHandle"));

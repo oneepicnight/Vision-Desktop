@@ -132,17 +132,30 @@ the fixed invalid/stale-handle error and never recreates a preview.
 `wallet_confirm_and_submit_transfer` consumes the handle before native confirmation. It returns one
 of these public outcomes:
 
-- `accepted`: exact transaction identifier plus the local observation state after accepted
-  submission and authenticated recording;
-- `outcome_unknown`: exact transaction identifier plus a statement that no automatic retry will
-  occur and reconciliation is required; or
+- `{"state":"accepted","transaction_id":"<64 lowercase hex>","observation":<public observation>}`
+  only after Core acceptance and authenticated local activity recording both complete;
+- `{"state":"accepted_recording_pending","transaction_id":"<64 lowercase hex>"}` when exact Core
+  acceptance is proven but authenticated local activity recording has not completed;
+- `{"state":"outcome_unknown","transaction_id":"<64 lowercase hex>"}` only when the one permitted
+  submission attempt may have reached Core but exact acceptance or rejection cannot be proven; or
 - `rejected`: only when a later exact compatibility contract has a separately reviewed,
   non-mutating rejection allowlist entry.
+
+`accepted_recording_pending` is known acceptance, not ambiguity. The UI must say that Core accepted
+the transaction, local activity recording is pending, and the transaction must not be submitted
+again. Only the reviewed authenticated journal-completion transition may resolve it to `accepted`.
+It cannot create new signing or Core-write authority.
+
+`outcome_unknown` has exactly the tagged success representation above. It is never also returned as
+an IPC error. The UI must say that the outcome is genuinely ambiguous, that no automatic or manual
+resubmission should occur, and that read-only reconciliation is required.
 
 Cancellation, native-window failure, runtime revocation, Core replacement, signing failure,
 storage failure before a write, and invalid response are fixed errors, not success states. Once the
 durable state says the write may have occurred, the command must preserve `outcome_unknown`; it may
-not downgrade ambiguity to ordinary failure. Signed bytes never cross IPC in any outcome.
+not downgrade ambiguity to ordinary failure. Once exact Core acceptance is proven, a later journal
+failure must preserve `accepted_recording_pending`; it may not downgrade known acceptance to
+`outcome_unknown` or an error. Signed bytes never cross IPC in any outcome.
 
 `wallet_list_activity` returns at most the newest 100 authenticated local public records, newest
 first, plus `history_complete: false`. Each record contains only transaction identifier, complete
@@ -182,7 +195,6 @@ to fixed IPC codes. It must include, at minimum:
 - `wallet_amount_arithmetic_rejected`
 - `wallet_preview_unavailable`
 - `wallet_confirmation_cancelled`
-- `wallet_submission_outcome_unknown`
 - `wallet_activity_unavailable`
 - `wallet_transaction_unknown`
 
@@ -197,7 +209,8 @@ The eventual managed state owns one wallet runtime, lifecycle adapters, supervis
 exact main-window native identity. Lifecycle and transaction command adapters must share the same
 non-forgeable `WalletExposureAuthority`; there is no second store or parallel exposure authority.
 
-Authority issuance requires all of the following simultaneously:
+Runtime authority issuance in the exact unpublished release candidate requires all of the following
+simultaneously:
 
 1. The accepted whole-envelope transport proof is compiled for the exact pinned Tauri/Wry/WebView2
    release and its qualification identity matches the release manifest.
@@ -211,8 +224,6 @@ Authority issuance requires all of the following simultaneously:
    identity, lifecycle hooks, panic policy, storage roots, and support-package exclusions are valid.
 6. The complete twelve-command inventory, AppManifest, generated permissions, capability, frontend
    wrappers, routes, documentation, and packaged binary pass exact parity checks.
-7. The final packaged Windows and clean-device end-to-end qualification has been independently
-   accepted.
 
 `WalletExposureAuthority` has private fields and no `Clone`, `Copy`, `Debug`, formatting,
 serialization, deserialization, or ordinary constructor. A boolean, feature flag, command name,
@@ -223,6 +234,35 @@ and at the deepest irreversible transition.
 Production construction remains impossible until all conditions are implemented and reviewed. The
 accepted Layer B result must not be represented by manually changing
 `WholeEnvelopeTransportPolicy::production()` in isolation.
+
+## Release-candidate authority and publication gate
+
+Final evidence acceptance is a distribution gate, not an input to runtime authority construction.
+This distinction prevents a circular qualification requirement without introducing a test bypass.
+
+After independent pre-implementation approval, the complete atomic registration diff is committed
+to an unpublished release-candidate tree. That tree contains the final twelve commands, production
+transport policy, three reviewed approval constants, exact Core compatibility entry, permissions,
+capability, frontend, packaging, and runtime authority logic. The final distributable Windows
+artifact is built and signed once from that exact tree. Its commit, tree, lockfile, source,
+configuration, signature, and full-file hash manifest are frozen before any wallet qualification
+begins.
+
+The candidate uses its ordinary production authority path during qualification. There is no test
+authority, environment override, alternate command inventory, hidden permission, manual flag
+change, debugger mutation, or developer bypass. Its commands work only because the exact candidate
+already contains the reviewed production gates and supported Core contract that would ship.
+
+Independent reviewers then qualify that exact frozen artifact and accept or reject its evidence. A
+Failed or Inconclusive result permanently rejects that artifact for distribution. Corrections create
+a new commit, tree, artifact, and complete affected evidence set.
+
+Successful evidence acceptance authorizes publication of only the byte-identical artifact whose
+hash was qualified. Publication metadata records the accepted artifact hash but does not rebuild,
+re-sign, patch, reconfigure, or otherwise mutate it. Any byte, configuration, dependency,
+permission, capability, manifest, frontend, flag, or packaging change creates a new artifact and
+reopens qualification. Thus the publication gate is externally enforced release authorization,
+while the runtime security boundary remains identical before, during, and after qualification.
 
 ## Atomic registration and ACL transaction
 
@@ -327,7 +367,7 @@ production binary.
 
 ## Required integrated qualification
 
-Before the atomic release tranche, independent evidence must prove at least:
+Before publication of the frozen atomic release candidate, independent evidence must prove at least:
 
 - exact parity of all twelve command names across every production surface;
 - the accepted Layer B malformed, duplicate, window, origin, reload, destruction, concurrency,
@@ -361,18 +401,19 @@ boundary.
 3. Correct every finding without registering a production wallet surface.
 4. Through the separate Core workflow, obtain and integrate the supported private-loopback and
    peer-binding release; do not modify Vision-Core from this Desktop workflow.
-5. Build the still-disabled combined lifecycle/transaction release candidate and run static ACL,
-   authority-surface, secret-canary, interruption, and packaged Windows qualification.
-6. Run and independently accept the clean-device end-to-end custody, recovery, spending, ambiguity,
-   receipt, and spend-after-restore evidence.
-7. Obtain independent pre-implementation approval of the exact atomic registration diff, including
-   commands, AppManifest, permissions, capability, frontend, flags, Core manifest, packaging, and
-   rollback.
-8. Land one atomic exposure implementation commit. Do not push or release it as active merely
-   because local tests pass.
-9. Independently review the exact implementation commit and packaged artifact.
-10. Only after final written acceptance, publish the reviewed release artifact and enable the wallet
-    for users.
+5. Prepare and independently approve the exact atomic registration diff, including commands,
+   AppManifest, permissions, capability, frontend, flags, Core manifest, packaging, and rollback.
+6. Land that diff in one unpublished release-candidate commit, independently review its exact tree,
+   and correct every finding before building qualification artifacts.
+7. Build and sign the final distributable artifact once; freeze and record its complete identity and
+   hashes. Do not distribute it.
+8. Run static ACL, authority-surface, secret-canary, interruption, packaged Windows, and clean-device
+   end-to-end custody, recovery, spending, ambiguity, receipt, and spend-after-restore qualification
+   against that exact artifact using its ordinary production authority.
+9. Independently verify and accept both the evidence and the exact artifact. Any Failed,
+   Inconclusive, changed, or unhashed result rejects the candidate.
+10. Only after final written acceptance, publish the byte-identical qualified artifact and enable
+    the wallet for users. Do not rebuild, re-sign, patch, or reconfigure it after qualification.
 
 Failure at any step returns to the private, unreachable state. No earlier private implementation or
 transport qualification is permission to skip later gates.

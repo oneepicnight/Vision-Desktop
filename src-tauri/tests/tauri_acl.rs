@@ -558,6 +558,9 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(layer_b_source.contains("loaded_webview2_version"));
     assert!(layer_b_source.contains("NativeDestructionObservation"));
     assert!(layer_b_source.contains("native_hwnd_absent"));
+    assert!(layer_b_source.contains("native_destruction_records"));
+    assert!(layer_b_source.contains("structural_post_revocation_proven"));
+    assert!(layer_b_source.contains("valid_native_destruction_request"));
     assert!(layer_b_source.contains("mismatch_declared_command"));
     assert!(layer_b_script.contains("appendGeneratedWrapperCases"));
     assert!(layer_b_script.contains("sequential-repeat"));

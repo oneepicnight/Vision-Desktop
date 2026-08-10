@@ -574,14 +574,21 @@ struct NativeDestructionObservation<'a> {
     marker: &'static str,
     case: &'a str,
     command: &'static str,
+    route: &'static str,
+    body_kind: &'static str,
+    top_level_key_count: &'static str,
+    top_level_shape: &'static str,
     result: &'static str,
+    wrapper_ran: bool,
+    command_body_ran: bool,
+    native_destruction_records: usize,
     exact_authorized_hwnd: bool,
     exact_target_window: bool,
     destroy_call_succeeded: bool,
     target_window_absent: bool,
     native_hwnd_absent: bool,
     authority_revoked: bool,
-    post_revocation_proven: bool,
+    structural_post_revocation_proven: bool,
 }
 
 struct NativeDestructionRequest<'a> {
@@ -589,6 +596,7 @@ struct NativeDestructionRequest<'a> {
     invoked_command: &'a str,
     route: FrameworkRoute,
     body: &'a InvokeBody,
+    metadata: &'a BodyMetadata,
     url: &'a tauri::Url,
     hwnd: isize,
 }
@@ -929,6 +937,23 @@ fn expected_wrapper_entries(selected_case: &str, post_required: bool) -> usize {
     }
 }
 
+fn valid_native_destruction_request(
+    selected_case: &str,
+    expected_command: &'static str,
+    invoked_command: &str,
+    route: FrameworkRoute,
+    body: &InvokeBody,
+) -> bool {
+    let selected_wrapper = selected_case
+        .rsplit_once("--")
+        .filter(|(_, selected_route)| *selected_route == "official-invoke")
+        .and_then(|(case, _)| wrapper_case_parts(case));
+    selected_wrapper == Some((expected_command, "window-destruction-race"))
+        && route == FrameworkRoute::CustomProtocol
+        && invoked_command == expected_command
+        && valid_envelope(expected_command, body)
+}
+
 fn complete_native_destruction(
     window: &WebviewWindow,
     state: &QualificationState,
@@ -939,34 +964,46 @@ fn complete_native_destruction(
     let exact_target_window = window.label() == QUALIFICATION_WINDOW
         && is_qualification_origin(request.url)
         && state.window_authority_matches(request.hwnd);
-    let request_valid = request.route != FrameworkRoute::Inconclusive
-        && request.invoked_command == request.expected_command
-        && valid_envelope(request.expected_command, request.body);
+    let request_valid = valid_native_destruction_request(
+        &state.selected_case,
+        request.expected_command,
+        request.invoked_command,
+        request.route,
+        request.body,
+    );
     state.invalidate();
     let destroy_call_succeeded =
         exact_authorized_hwnd && exact_target_window && request_valid && window.destroy().is_ok();
     let target_window_absent = app.get_webview_window(QUALIFICATION_WINDOW).is_none();
     let native_hwnd_absent = unsafe { IsWindow(request.hwnd as HWND) } == 0;
     let authority_revoked = state.revoked.load(Ordering::Acquire);
-    let post_revocation_proven = authority_revoked && target_window_absent && native_hwnd_absent;
+    let structural_post_revocation_proven =
+        authority_revoked && target_window_absent && native_hwnd_absent;
     let passed = destroy_call_succeeded
         && target_window_absent
         && native_hwnd_absent
-        && post_revocation_proven;
+        && structural_post_revocation_proven;
     let result = if passed { "passed" } else { "failed" };
     let runtime_version = state.loaded_webview2_version().unwrap_or("unavailable");
     let emitted = emit_observation(&NativeDestructionObservation {
         marker: "layer_b_native_destruction_observation",
         case: &state.selected_case,
         command: request.expected_command,
+        route: request.route.label(),
+        body_kind: request.metadata.kind,
+        top_level_key_count: request.metadata.key_count,
+        top_level_shape: request.metadata.shape,
         result,
+        wrapper_ran: true,
+        command_body_ran: true,
+        native_destruction_records: 1,
         exact_authorized_hwnd,
         exact_target_window,
         destroy_call_succeeded,
         target_window_absent,
         native_hwnd_absent,
         authority_revoked,
-        post_revocation_proven,
+        structural_post_revocation_proven,
     })
     .and_then(|()| {
         emit_observation(&TerminalObservation {
@@ -974,8 +1011,8 @@ fn complete_native_destruction(
             case: &state.selected_case,
             result,
             wrapper_entries: state.wrapper_entries.load(Ordering::Acquire),
-            primary_records: 1,
-            post_records: 1,
+            primary_records: 0,
+            post_records: 0,
             revoked: authority_revoked,
             webview2_runtime_version: runtime_version,
         })
@@ -1283,6 +1320,7 @@ fn qualify(
                     invoked_command: request.invoked_command,
                     route,
                     body: request.body,
+                    metadata: &metadata,
                     url: &url,
                     hwnd,
                 },
@@ -1848,6 +1886,40 @@ mod tests {
             assert_eq!(mismatch_declared_command(&selected, declared), None);
             assert_eq!(expected_wrapper_entries(&selected, true), 2);
         }
+    }
+
+    #[test]
+    fn native_destruction_requires_the_exact_selected_transport_and_envelope() {
+        let selected = "wrapper-wallet_get_status-window-destruction-race--official-invoke";
+        let body = json(serde_json::json!({}));
+        assert!(valid_native_destruction_request(
+            selected,
+            GET_STATUS,
+            GET_STATUS,
+            FrameworkRoute::CustomProtocol,
+            &body,
+        ));
+        assert!(!valid_native_destruction_request(
+            selected,
+            GET_STATUS,
+            GET_STATUS,
+            FrameworkRoute::PostMessage,
+            &body,
+        ));
+        assert!(!valid_native_destruction_request(
+            selected,
+            GET_STATUS,
+            LOCK,
+            FrameworkRoute::CustomProtocol,
+            &body,
+        ));
+        assert!(!valid_native_destruction_request(
+            "wrapper-wallet_get_status-window-destruction-race--internals-post-message",
+            GET_STATUS,
+            GET_STATUS,
+            FrameworkRoute::PostMessage,
+            &body,
+        ));
     }
 
     #[test]

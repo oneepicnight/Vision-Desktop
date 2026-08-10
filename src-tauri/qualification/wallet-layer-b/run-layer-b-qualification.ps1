@@ -235,16 +235,25 @@ function Test-Transcript(
         if ($runtimeVersion -notmatch '^\d{1,5}(\.\d{1,5}){3}$') {
             return [ordered]@{ classification = 'Inconclusive'; reason = 'loaded_webview2_runtime_unproven' }
         }
+        $expectedKeyCount = if ($wrapperCase.command -in @('wallet_create', 'wallet_restore')) { 'one' } else { 'zero' }
+        $expectedShape = if ($wrapperCase.command -in @('wallet_create', 'wallet_restore')) { 'request_only' } else { 'empty_object' }
         if ([string]$destruction[0].command -ne $wrapperCase.command -or
+            [string]$destruction[0].route -ne 'custom_protocol_proven' -or
+            [string]$destruction[0].body_kind -ne 'json_object' -or
+            [string]$destruction[0].top_level_key_count -ne $expectedKeyCount -or
+            [string]$destruction[0].top_level_shape -ne $expectedShape -or
+            $destruction[0].wrapper_ran -ne $true -or
+            $destruction[0].command_body_ran -ne $true -or
+            [int]$destruction[0].native_destruction_records -ne 1 -or
             [int]$terminal[0].wrapper_entries -ne 1 -or
-            [int]$terminal[0].primary_records -ne 1 -or
-            [int]$terminal[0].post_records -ne 1 -or
+            [int]$terminal[0].primary_records -ne 0 -or
+            [int]$terminal[0].post_records -ne 0 -or
             $terminal[0].revoked -ne $true -or
             [string]$terminal[0].result -ne [string]$destruction[0].result) {
             return [ordered]@{ classification = 'Inconclusive'; reason = 'native_destruction_proof_mismatch' }
         }
         if ([string]$destruction[0].result -eq 'failed' -and $ExitCode -eq 2) {
-            return [ordered]@{ classification = 'Failed'; reason = 'native_target_destruction_failed'; terminal_result = 'failed'; wrapper_entries = 1; primary_records = 1; post_records = 1; webview2_runtime_version = $runtimeVersion }
+            return [ordered]@{ classification = 'Failed'; reason = 'native_target_destruction_failed'; terminal_result = 'failed'; wrapper_entries = 1; primary_records = 0; post_records = 0; native_destruction_records = 1; structural_post_revocation_proven = $destruction[0].structural_post_revocation_proven; webview2_runtime_version = $runtimeVersion }
         }
         if ([string]$destruction[0].result -eq 'passed' -and $ExitCode -eq 0 -and
             $destruction[0].exact_authorized_hwnd -eq $true -and
@@ -253,8 +262,8 @@ function Test-Transcript(
             $destruction[0].target_window_absent -eq $true -and
             $destruction[0].native_hwnd_absent -eq $true -and
             $destruction[0].authority_revoked -eq $true -and
-            $destruction[0].post_revocation_proven -eq $true) {
-            return [ordered]@{ classification = 'Passed'; reason = 'verified_native_target_destruction'; terminal_result = 'passed'; wrapper_entries = 1; primary_records = 1; post_records = 1; webview2_runtime_version = $runtimeVersion }
+            $destruction[0].structural_post_revocation_proven -eq $true) {
+            return [ordered]@{ classification = 'Passed'; reason = 'verified_native_target_destruction'; terminal_result = 'passed'; wrapper_entries = 1; primary_records = 0; post_records = 0; native_destruction_records = 1; structural_post_revocation_proven = $true; webview2_runtime_version = $runtimeVersion }
         }
         return [ordered]@{ classification = 'Inconclusive'; reason = 'native_destruction_exit_mismatch' }
     }
@@ -426,8 +435,8 @@ if ($SelfTest) {
 
         $destructionCase = 'wrapper-wallet_get_status-window-destruction-race--official-invoke'
         $destructionRecords = @(
-            [ordered]@{ marker = 'layer_b_native_destruction_observation'; case = $destructionCase; command = 'wallet_get_status'; result = 'passed'; exact_authorized_hwnd = $true; exact_target_window = $true; destroy_call_succeeded = $true; target_window_absent = $true; native_hwnd_absent = $true; authority_revoked = $true; post_revocation_proven = $true },
-            [ordered]@{ marker = 'layer_b_terminal_observation'; case = $destructionCase; result = 'passed'; wrapper_entries = 1; primary_records = 1; post_records = 1; revoked = $true; webview2_runtime_version = '151.0.4129.72' }
+            [ordered]@{ marker = 'layer_b_native_destruction_observation'; case = $destructionCase; command = 'wallet_get_status'; route = 'custom_protocol_proven'; body_kind = 'json_object'; top_level_key_count = 'zero'; top_level_shape = 'empty_object'; result = 'passed'; wrapper_ran = $true; command_body_ran = $true; native_destruction_records = 1; exact_authorized_hwnd = $true; exact_target_window = $true; destroy_call_succeeded = $true; target_window_absent = $true; native_hwnd_absent = $true; authority_revoked = $true; structural_post_revocation_proven = $true },
+            [ordered]@{ marker = 'layer_b_terminal_observation'; case = $destructionCase; result = 'passed'; wrapper_entries = 1; primary_records = 0; post_records = 0; revoked = $true; webview2_runtime_version = '151.0.4129.72' }
         )
         $destruction = Join-Path $temporary 'destruction.stdout.log'
         Write-Utf8NoBom $destruction @($destructionRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
@@ -438,6 +447,24 @@ if ($SelfTest) {
         Write-Utf8NoBom $badDestruction @($destructionRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
         $assessment = Test-Transcript $destructionCase $badDestruction $stderr 0 $false
         if ($assessment.classification -ne 'Inconclusive') { throw 'Incomplete native destruction evidence did not fail closed.' }
+        $destructionRecords[0].target_window_absent = $true
+        $destructionRecords[0].route = 'post_message_proven'
+        $badDestructionRoute = Join-Path $temporary 'bad-destruction-route.stdout.log'
+        Write-Utf8NoBom $badDestructionRoute @($destructionRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
+        $assessment = Test-Transcript $destructionCase $badDestructionRoute $stderr 0 $false
+        if ($assessment.classification -ne 'Inconclusive') { throw 'Mismatched native destruction transport did not fail closed.' }
+        $destructionRecords[0].route = 'custom_protocol_proven'
+        $destructionRecords[0].wrapper_ran = $false
+        $badDestructionWrapper = Join-Path $temporary 'bad-destruction-wrapper.stdout.log'
+        Write-Utf8NoBom $badDestructionWrapper @($destructionRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
+        $assessment = Test-Transcript $destructionCase $badDestructionWrapper $stderr 0 $false
+        if ($assessment.classification -ne 'Inconclusive') { throw 'Missing native destruction wrapper evidence did not fail closed.' }
+        $destructionRecords[0].wrapper_ran = $true
+        $destructionRecords[1].primary_records = 1
+        $badDestructionCounts = Join-Path $temporary 'bad-destruction-counts.stdout.log'
+        Write-Utf8NoBom $badDestructionCounts @($destructionRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
+        $assessment = Test-Transcript $destructionCase $badDestructionCounts $stderr 0 $false
+        if ($assessment.classification -ne 'Inconclusive') { throw 'Synthetic browser destruction counts did not fail closed.' }
 
         $inconclusiveCase = 'exact-wallet_get_status--official-invoke'
         $inconclusiveRecords = @(
@@ -465,7 +492,7 @@ if ($SelfTest) {
         $sourceProof = @(Get-HarnessSourceHashes $selfTestRepository)
         if ($sourceProof.Count -lt 10) { throw 'Harness source provenance is incomplete.' }
 
-        Write-Output 'Layer B runner self-tests passed: 16 (13 transcript, 3 provenance)'
+        Write-Output 'Layer B runner self-tests passed: 19 (16 transcript, 3 provenance)'
         exit 0
     } finally {
         Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue

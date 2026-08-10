@@ -6,13 +6,13 @@ Workstation: Vision Desktop ASUS Windows workstation
 
 Branch: `fix/wallet-signing-adversarial-matrix`
 
-Rejected Layer B corrective commit: `ece16d0e860ea841ebfdf99c6e5efd5a92d5ef10`
+Rejected Layer B corrective commit: `b824eba942d7ea33fedfd4f3e3710337e51fd83f`
 
-Rejected Layer B corrective tree: `0472cf91f593385914cb95c2d0622f7239aa459a`
+Rejected Layer B corrective tree: `abac671b0847a07c09385e5fd5aae5803a85d487`
 
 ## Result
 
-The two remaining findings from the fourth independent Layer B review have been addressed in the
+The two remaining findings from the fifth independent Layer B review have been addressed in the
 standalone, non-custody harness source, runner, and source-only tests. The prior guarded-metadata,
 linear-revocation, transport-proof, transcript, and genuine-concurrency corrections remain intact.
 
@@ -121,13 +121,23 @@ requires all of the following:
 - wallet-shaped qualification authority remains revoked; and
 - the destroyed target is structurally unable to issue a later successful invoke.
 
+The native destruction record preserves the native-proven transport route, bounded body kind,
+top-level key-count and shape classifications, and explicit wrapper/body execution booleans. The
+selected official-invoke destruction case requires `custom_protocol_proven`; a PostMessage or
+inconclusive route cannot pass even if destruction itself succeeds.
+
 The native controller emits one fixed destruction record and one terminal record directly to the
 bounded process transcript, then exits with the matching fixed code. It does not wait for browser
 primary, post-revocation, or terminal records from a JavaScript context that no longer exists. The
 runner has a dedicated destruction classifier that requires exactly those two native records, the
-exact command and count fields, all destruction/revocation predicates, the loaded WebView2
-identity, and the matching exit code. A clean exit, missing record, surviving HWND, failed destroy,
-or mismatched field cannot pass.
+exact command, route, body classification, execution, and count fields, all destruction/revocation
+predicates, the loaded WebView2 identity, and the matching exit code. A clean exit, missing record,
+surviving HWND, failed destroy, or mismatched field cannot pass.
+
+The terminal record accurately reports zero browser primary records and zero browser
+post-revocation records. Separate fixed fields report one native destruction record and the
+structural post-revocation proof derived from authority revocation plus both Tauri-registry and
+Win32 HWND absence. No browser evidence is synthesized after destroying its source context.
 
 Every browser-only result is sent to the native reporting protocol and written to process stdout
 using a bounded, deny-unknown-fields request and fixed allowlisted values. The selected native case
@@ -239,8 +249,8 @@ duplicates were rejected. The production duplicate-key blocker remains false.
 
 The following checks passed without starting the harness:
 
-- Layer B Rust unit tests: 19 passed;
-- runner self-tests: 16 passed (13 transcript and 3 provenance checks);
+- Layer B Rust unit tests: 20 passed;
+- runner self-tests: 19 passed (16 transcript and 3 provenance checks);
 - complete Rust baseline: 293 passed, 4 operator-only ignored;
 - Tauri authority tests: 7 passed;
 - WebView isolation tests: 2 passed;

@@ -34,6 +34,9 @@ function Get-RelativePathWithinRoot([string]$Root, [string]$Path) {
 }
 
 function Wait-QualificationProcess([System.Diagnostics.Process]$Process, [int]$TimeoutMilliseconds) {
+    # Windows PowerShell 5.1 can leave ExitCode null unless the native handle is
+    # acquired before child exit.
+    $null = $Process.Handle
     $timedOut = -not $Process.WaitForExit($TimeoutMilliseconds)
     if ($timedOut) { $Process.Kill() }
     $Process.WaitForExit()
@@ -396,6 +399,19 @@ if ($SelfTest) {
         if ((Get-Content -Raw -LiteralPath $flushStdout).Trim() -ne 'runner-flush-proof') {
             throw 'Redirected qualification output was not flushed before classification.'
         }
+        if ($flushProbe.ExitCode -ne 0) {
+            throw 'Windows PowerShell successful-process exit code was not retained.'
+        }
+
+        $exitStdout = Join-Path $temporary 'exit-code-probe.stdout.log'
+        $exitStderr = Join-Path $temporary 'exit-code-probe.stderr.log'
+        $exitProbe = Start-Process -FilePath $probeExecutable -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Milliseconds 200; exit 7') -RedirectStandardOutput $exitStdout -RedirectStandardError $exitStderr -PassThru -WindowStyle Hidden
+        if (Wait-QualificationProcess $exitProbe 10000) {
+            throw 'Windows PowerShell exit-code probe unexpectedly timed out.'
+        }
+        if ($exitProbe.ExitCode -ne 7) {
+            throw 'Windows PowerShell nonzero process exit code was not retained.'
+        }
 
         $stderr = Join-Path $temporary 'stderr.log'
         Set-Content -LiteralPath $stderr -Value '' -NoNewline
@@ -545,7 +561,7 @@ if ($SelfTest) {
         $sourceProof = @(Get-HarnessSourceHashes $selfTestRepository)
         if ($sourceProof.Count -lt 10) { throw 'Harness source provenance is incomplete.' }
 
-        Write-Output 'Layer B runner self-tests passed: 23 (16 transcript, 3 provenance, 4 Windows PowerShell compatibility)'
+        Write-Output 'Layer B runner self-tests passed: 24 (16 transcript, 3 provenance, 5 Windows PowerShell compatibility)'
         exit 0
     } finally {
         Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue

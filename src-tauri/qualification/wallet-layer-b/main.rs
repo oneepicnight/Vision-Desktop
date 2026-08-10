@@ -885,6 +885,7 @@ fn validated_browser_observation<'a>(
         return None;
     }
     if selected_case.starts_with("forced-post-message-fallback--")
+        && request.command != "matrix"
         && request.result == "passed"
         && (!request.fallback_intercepted || transport_evidence != "post_message_proven")
     {
@@ -1975,6 +1976,14 @@ mod tests {
         };
         assert!(validated_browser_observation(selected, &request).is_none());
         request.fallback_intercepted = true;
+        assert!(validated_browser_observation(selected, &request).is_some());
+
+        request.client_api = "matrix-controller".into();
+        request.command = "matrix".into();
+        request.outcome = "matrix_complete".into();
+        request.expected = "matrix_complete".into();
+        request.transport_evidence = "not_applicable".into();
+        request.fallback_intercepted = false;
         assert!(validated_browser_observation(selected, &request).is_some());
     }
 

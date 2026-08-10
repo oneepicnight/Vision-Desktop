@@ -6,23 +6,23 @@ Workstation: Vision Desktop ASUS Windows workstation
 
 Branch: `fix/wallet-signing-adversarial-matrix`
 
-Qualification execution target with incomplete first case: `9184b0c4856c307c10a2ccc8b4f9f831239fcef7`
+Correction parent and qualification implementation: `63b524c915dc919450e7f1b09f27cb8a38ad2528`
 
-Qualification execution tree: `03520c71db1990d4064fa9969b63bf8f2f9466bc`
+Qualification implementation tree: `bb0e465617cecc43c2b15fddfc112bb90039a7d7`
 
 ## Result
 
-All findings from the fifth independent Layer B review remain corrected. The subsequent authorized
-matrix attempt launched only the first isolated case. Its native generated wrapper accepted the
-exact request and proved `custom_protocol_proven`, but the browser-observation protocol rejected its
-cross-origin report. The case then reached the 60-second deadline. Windows PowerShell 5.1 rejected
-the runner's PowerShell-7-only `Kill(true)` overload, so the runner exited without a terminal
-classification or evidence manifest and left the exact harness process alive. That process was
-verified by full executable path and command line, terminated, and confirmed absent.
+All findings from the prior independent Layer B reviews remain corrected. Two newly authorized
+executions of `63b524c` were attempted after that implementation was approved. The first was
+interrupted by a workstation crash and has no terminal manifest. The second completed all 562
+isolated processes and produced a terminal manifest, but the runner correctly classified the whole
+matrix Inconclusive because it lost every clean child exit code and the forced postMessage fallback
+terminal report was rejected.
 
-This execution is Inconclusive and does not claim a Passed result. No second case ran. Production
+These executions are Inconclusive and do not claim a Passed result. Production
 `duplicate_key_rejection_proven` remains `false`, and all production wallet command, permission,
-frontend, activation, signing, and submission surfaces remain closed.
+frontend, activation, signing, and submission surfaces remain closed. This correction is limited
+to the qualification runner, native report validation, regression tests, and this handoff.
 
 ## Isolation remains unchanged
 
@@ -293,12 +293,81 @@ stdout/stderr before transcript classification. A still-live exact process fails
 Windows PowerShell self-tests launch a bounded timeout probe and a successful redirected-output
 probe, proving both termination and transcript flushing through the same helper used by the runner.
 
+## Preserved crash-interrupted `63b524c` execution
+
+Evidence directory:
+
+`C:\Vision\wallet-layer-b-evidence-63b524c-20260810`
+
+The workstation crashed while the authorized matrix was running. The directory contains 1,124
+partial transcript files: 562 stdout and 562 stderr files. It contains no terminal evidence
+manifest. No qualification process survived the reboot, the Desktop repository remained clean at
+the exact approved commit and tree, and the older `9184b0c` evidence hashes remained unchanged.
+
+This directory is permanently Inconclusive. Its individual files must not be combined with another
+run or used to claim case or matrix acceptance.
+
+## Preserved complete Inconclusive retry
+
+Evidence directory:
+
+`C:\Vision\wallet-layer-b-evidence-63b524c-20260810-retry1`
+
+Terminal manifest:
+
+`layer-b-evidence-manifest.json`
+
+Manifest SHA-256:
+
+`169C5D1EC12DB0DEB00897A31A7FA2197EB64CCF3526C8C80A91A8799418EC14`
+
+The runner completed all 562 isolated cases and classified all 562 Inconclusive:
+
+- 536 `exit_or_result_mismatch`;
+- 14 `missing_or_duplicate_primary_terminal_record`;
+- 7 `native_destruction_exit_mismatch`; and
+- 5 `case_timeout`.
+
+The manifest proves repository, product, custody, Core, binary, and runtime-inventory integrity was
+preserved. Vision Desktop remained at commit `63b524c915dc919450e7f1b09f27cb8a38ad2528`
+and tree `bb0e465617cecc43c2b15fddfc112bb90039a7d7`; the wallet-custody root remained absent.
+
+The first case transcript contains the complete native wrapper record, passing browser primary
+record, native terminal record, matrix-complete record, and loaded WebView2 version
+`151.0.4129.72`. The runner nevertheless recorded a null exit code and discarded those records as
+`exit_or_result_mismatch`. A direct Windows PowerShell 5.1 reproduction proved that
+`Start-Process -PassThru` on this workstation leaves `ExitCode` null unless the native process
+handle is acquired before the child exits.
+
+The forced postMessage fallback transcript separately proves its custom-protocol interception,
+`post_message_proven` wrapper execution, and passing primary browser observation. Its terminal
+matrix report was rejected because the native validator incorrectly required the terminal
+matrix-controller record itself to repeat the primary record's fallback-interception and transport
+fields. The process then reached the bounded deadline.
+
+This retry is permanently Inconclusive and must not be rerun or reclassified in place.
+
+## Current execution correction
+
+`Wait-QualificationProcess` now acquires the native child-process handle before waiting. The same
+helper remains responsible for bounded termination, proven exit, and redirected-output flushing.
+Its Windows PowerShell 5.1 self-tests now assert both a retained successful exit code and a retained
+nonzero exit code, in addition to timeout and output-flush behavior.
+
+The forced postMessage fallback requirement now applies only to the primary transport observation.
+The matrix-controller terminal record remains subject to the common strict terminal checks but is
+not required to claim a transport route or fallback interception that belongs to the primary
+operation. The focused Rust regression proves both rejection of an unproven primary record and
+acceptance of the correctly bounded terminal record.
+
+No packaged matrix was run after these source changes.
+
 ## Source-only validation performed
 
 The following checks passed without starting the harness:
 
 - Layer B Rust unit tests: 20 passed;
-- runner self-tests: 23 passed (16 transcript, 3 provenance, and 4 Windows PowerShell compatibility checks);
+- runner self-tests: 24 passed (16 transcript, 3 provenance, and 5 Windows PowerShell compatibility checks);
 - complete Rust baseline: 293 passed, 4 operator-only ignored;
 - Tauri authority tests: 7 passed;
 - WebView isolation tests: 2 passed;
@@ -317,9 +386,8 @@ corrective commit and tree authorizes execution.
 ## Corrective files
 
 - `docs/WALLET_TAURI_LAYER_B_IMPLEMENTATION_HANDOFF.md`
-- `src-tauri/qualification/wallet-layer-b/assets/harness.js`
+- `src-tauri/qualification/wallet-layer-b/main.rs`
 - `src-tauri/qualification/wallet-layer-b/run-layer-b-qualification.ps1`
-- `src-tauri/tests/tauri_acl.rs`
 
 No dependency or lockfile change is required.
 

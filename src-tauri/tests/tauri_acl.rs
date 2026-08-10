@@ -553,6 +553,11 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(layer_b_script.contains("matrix_inconclusive"));
     assert!(layer_b_script.contains("runConcurrentBatch"));
     assert!(layer_b_script.contains("Promise.allSettled(pending)"));
+    assert!(layer_b_source.contains("BrowserVersionString"));
+    assert!(layer_b_source.contains("loaded_webview2_version"));
+    assert!(layer_b_script.contains("appendGeneratedWrapperCases"));
+    assert!(layer_b_script.contains("sequential-repeat"));
+    assert!(layer_b_script.contains("reordered-invoke"));
     assert!(layer_b_runner.contains("Start-Process"));
     assert!(layer_b_runner.contains("--wallet-layer-b-case=$case"));
     assert!(layer_b_runner.contains("stdout_sha256"));
@@ -564,6 +569,10 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(layer_b_runner.contains("Get-FrameworkProvenance"));
     assert!(layer_b_runner.contains("Get-HarnessSourceHashes"));
     assert!(layer_b_runner.contains("Get-TreeFingerprint"));
+    assert!(layer_b_runner.contains("ProductionExecutablePath"));
+    assert!(layer_b_runner.contains("ProductionInstallationRoot"));
+    assert!(layer_b_runner.contains("ProductionDataRoot"));
+    assert!(layer_b_runner.contains("actual_loaded_webview2_runtime_proven"));
     assert!(!layer_b_script.contains("seed phrase"));
     assert!(!layer_b_script.contains("private key"));
     assert!(build_source.contains("cargo:rustc-link-arg=/MANIFESTINPUT:"));

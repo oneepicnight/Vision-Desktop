@@ -122,9 +122,9 @@
     return selectedCase === `${id}--${route}`
   }
 
-  async function postRevocationProof(caseSelector) {
+  async function postRevocationProof(caseSelector, command, payload) {
     try {
-      const value = await transport('internals-post-message', 'wallet_get_status', {})
+      const value = await transport('internals-post-message', command, payload)
       const observed = fixedOutcome(value, true)
       const passed = false
       write({
@@ -132,7 +132,7 @@
         id: `${caseSelector}-post-revocation-proof`,
         caseSelector: `${caseSelector}-post-revocation-proof`,
         route: 'internals-post-message',
-        command: 'wallet_get_status',
+        command,
         outcome: observed.outcome,
         expected: 'qualification_runtime_unavailable',
         transportEvidence: observed.transportEvidence,
@@ -147,7 +147,7 @@
         id: `${caseSelector}-post-revocation-proof`,
         caseSelector: `${caseSelector}-post-revocation-proof`,
         route: 'internals-post-message',
-        command: 'wallet_get_status',
+        command,
         outcome: observed.outcome,
         expected: 'qualification_runtime_unavailable',
         transportEvidence: observed.transportEvidence,
@@ -204,20 +204,20 @@
       })
     }
     if (primaryInconclusive || ['invalid_request', 'qualification_invalid_window', 'qualification_response_unavailable', 'qualification_runtime_unavailable'].includes(expected)) {
-      const revoked = await postRevocationProof(caseSelector)
+      const revoked = await postRevocationProof(caseSelector, command, exactPayload(command))
       return primaryInconclusive && revoked ? 'inconclusive' : (revoked && primaryPassed)
     }
     return primaryPassed
   }
 
-  async function runConcurrentBatch() {
-    const id = 'concurrent-batch'
+  async function runConcurrentBatch(command) {
+    const id = `wrapper-${command}-concurrent-batch`
     const route = 'official-invoke'
     if (!isSelected(id, route)) return null
     const caseSelector = `${id}--${route}`
     const pending = Array.from(
       { length: 8 },
-      () => transport(route, 'wallet_get_status', {})
+      () => transport(route, command, exactPayload(command))
     )
     const settled = await Promise.allSettled(pending)
     const observed = settled.map((result) => result.status === 'fulfilled'
@@ -234,7 +234,7 @@
       id,
       caseSelector,
       route,
-      command: 'wallet_get_status',
+      command,
       outcome: passed
         ? 'layer_b_accepted'
         : (inconclusive ? 'qualification_transport_inconclusive' : 'unclassified_error'),
@@ -244,7 +244,7 @@
       inconclusive
     })
     if (inconclusive) {
-      return (await postRevocationProof(caseSelector)) ? 'inconclusive' : false
+      return (await postRevocationProof(caseSelector, command, exactPayload(command))) ? 'inconclusive' : false
     }
     return passed
   }
@@ -269,6 +269,83 @@
       }
     }
     return {}
+  }
+
+  function nextCommand(command) {
+    return COMMANDS[(COMMANDS.indexOf(command) + 1) % COMMANDS.length]
+  }
+
+  async function runAcceptedSequence(command, family) {
+    const id = `wrapper-${command}-${family}`
+    const route = 'official-invoke'
+    if (!isSelected(id, route)) return null
+    const commands = family === 'sequential-repeat'
+      ? [command, command]
+      : [nextCommand(command), command]
+    const observed = []
+    for (const current of commands) {
+      try {
+        observed.push(fixedOutcome(await transport(route, current, exactPayload(current)), true))
+      } catch (error) {
+        observed.push(fixedOutcome(error, false))
+      }
+    }
+    const routes = new Set(observed.map((item) => item.transportEvidence))
+    const proven = routes.size === 1 &&
+      ['custom_protocol_proven', 'post_message_proven'].includes(observed[0]?.transportEvidence)
+    const inconclusive = observed.some((item) => item.outcome === 'qualification_transport_inconclusive')
+    const passed = observed.length === 2 && proven &&
+      observed.every((item) => item.outcome === 'layer_b_accepted')
+    const caseSelector = `${id}--${route}`
+    write({
+      sequence: ++sequence,
+      id,
+      caseSelector,
+      route,
+      command,
+      outcome: passed
+        ? 'layer_b_accepted'
+        : (inconclusive ? 'qualification_transport_inconclusive' : 'unclassified_error'),
+      expected: 'layer_b_accepted',
+      transportEvidence: passed ? observed[0].transportEvidence : 'transport_route_inconclusive',
+      passed,
+      inconclusive
+    })
+    if (inconclusive) {
+      return (await postRevocationProof(caseSelector, command, exactPayload(command))) ? 'inconclusive' : false
+    }
+    return passed
+  }
+
+  function adversarialPayload(command, family) {
+    const requestCommand = command === 'wallet_create' || command === 'wallet_restore'
+    const request = exactPayload(command).request
+    switch (family) {
+      case 'raw-empty': return ''
+      case 'raw-json-looking': return '{}'
+      case 'raw-arbitrary': return 'not-json'
+      case 'raw-bytes': return new TextEncoder().encode('{}')
+      case 'json-null': return null
+      case 'json-boolean': return true
+      case 'json-number': return 42
+      case 'json-string': return PUBLIC_CANARY
+      case 'json-array': return []
+      case 'shape-mismatch': return requestCommand ? {} : { request: exactPayload('wallet_create').request }
+      case 'missing-top-level': return requestCommand ? {} : { missing: true }
+      case 'extra-top-level': return requestCommand ? { request, extra: true } : { extra: true }
+      case 'wrong-case-top-level': return requestCommand ? { Request: request } : { Request: {} }
+      case 'secret-like-top-level': return { password: PUBLIC_CANARY }
+      case 'wrong-command-envelope': {
+        if (command === 'wallet_create') return exactPayload('wallet_restore')
+        return exactPayload('wallet_create')
+      }
+      case 'malformed-nested': return { request: false }
+      case 'oversized-nested': return { request: { ...request, label: 'x'.repeat(1025) } }
+      case 'unknown-nested': return { request: { ...request, extra: true } }
+      case 'secret-like-nested': return { request: { ...request, password: PUBLIC_CANARY } }
+      case 'post-revocation': return { extra: true }
+      default: return exactPayload(command)
+    }
   }
 
   const duplicateFamilies = [
@@ -399,7 +476,7 @@
     }
   }
 
-  async function controlScenario(id, path, expected) {
+  async function controlScenario(id, path, expected, command = 'wallet_get_status') {
     if (!isSelected(id, 'official-invoke')) return null
     if (path) {
       const url = window.__TAURI_INTERNALS__.convertFileSrc(path, 'qualification-control')
@@ -409,7 +486,7 @@
           sequence: ++sequence,
           id,
           route: 'official-invoke',
-          command: 'wallet_get_status',
+          command,
           outcome: 'case_not_observed',
           expected,
           passed: false,
@@ -427,7 +504,7 @@
           sequence: ++sequence,
           id,
           route: 'official-invoke',
-          command: 'wallet_get_status',
+          command,
           outcome: 'case_not_observed',
           expected,
           passed: false,
@@ -436,7 +513,113 @@
         return false
       }
     }
-    return runCase(id, 'official-invoke', 'wallet_get_status', {}, expected)
+    return runCase(id, 'official-invoke', command, exactPayload(command), expected)
+  }
+
+  async function appendGeneratedWrapperCases(results) {
+    const generalFamilies = [
+      'raw-empty',
+      'raw-json-looking',
+      'raw-arbitrary',
+      'raw-bytes',
+      'json-null',
+      'json-boolean',
+      'json-number',
+      'json-string',
+      'json-array',
+      'shape-mismatch',
+      'missing-top-level',
+      'extra-top-level',
+      'wrong-case-top-level',
+      'secret-like-top-level',
+      'wrong-command-envelope'
+    ]
+    const nestedFamilies = [
+      'malformed-nested',
+      'oversized-nested',
+      'unknown-nested',
+      'secret-like-nested'
+    ]
+    const windowFamilies = [
+      ['window-other-local', null, 'qualification_invalid_window'],
+      ['window-remote-origin', null, 'qualification_invalid_window'],
+      ['window-recreated-main', 'recreate', 'qualification_invalid_window'],
+      ['window-reloaded-generation', 'reload', 'qualification_invalid_window'],
+      ['window-destruction-race', 'destroy-race', 'qualification_runtime_unavailable'],
+      ['window-revocation-race', 'revocation-race', 'qualification_runtime_unavailable']
+    ]
+    for (const command of COMMANDS) {
+      results.push(await runCase(
+        `wrapper-${command}-exact`,
+        'official-invoke',
+        command,
+        exactPayload(command),
+        'layer_b_accepted'
+      ))
+      for (const family of generalFamilies) {
+        results.push(await runCase(
+          `wrapper-${command}-${family}`,
+          'official-invoke',
+          command,
+          adversarialPayload(command, family),
+          'invalid_request'
+        ))
+      }
+      if (command === 'wallet_create' || command === 'wallet_restore') {
+        for (const family of nestedFamilies) {
+          results.push(await runCase(
+            `wrapper-${command}-${family}`,
+            'official-invoke',
+            command,
+            adversarialPayload(command, family),
+            'invalid_request'
+          ))
+        }
+      }
+      results.push(await runCase(
+        `wrapper-${command}-wrong-invoked-command`,
+        'official-invoke',
+        'wallet_unknown',
+        {},
+        'framework_error_redacted'
+      ))
+      for (const [family, path, expected] of windowFamilies) {
+        results.push(await controlScenario(
+          `wrapper-${command}-${family}`,
+          path,
+          expected,
+          command
+        ))
+      }
+      for (const panicPoint of ['metadata', 'body', 'response', 'observation']) {
+        results.push(await runCase(
+          `wrapper-${command}-panic-${panicPoint}`,
+          'internals-post-message',
+          command,
+          exactPayload(command),
+          'qualification_runtime_unavailable',
+          panicPoint
+        ))
+      }
+      results.push(await runCase(
+        `wrapper-${command}-panic-fixed-error`,
+        'internals-post-message',
+        command,
+        { extra: true },
+        'qualification_runtime_unavailable',
+        'fixed-error'
+      ))
+      results.push(await runAcceptedSequence(command, 'sequential-repeat'))
+      results.push(await runConcurrentBatch(command))
+      results.push(await runAcceptedSequence(command, 'reordered-invoke'))
+      results.push(await runCase(
+        `wrapper-${command}-post-revocation`,
+        'official-invoke',
+        command,
+        adversarialPayload(command, 'post-revocation'),
+        'invalid_request'
+      ))
+    }
   }
 
   async function runMatrix() {
@@ -445,6 +628,8 @@
     output.textContent = ''
     sequence = 0
     const results = []
+
+    await appendGeneratedWrapperCases(results)
 
     results.push(await controlScenario('window-other-local', null, 'qualification_invalid_window'))
     results.push(await controlScenario('window-remote-origin', null, 'qualification_invalid_window'))
@@ -520,8 +705,6 @@
         results.push(await runCase(`nested-duplicate-${family}-object-normalized`, route, 'wallet_create', normalized, expected))
       }
     }
-
-    results.push(await runConcurrentBatch())
 
     results.push(await directFetchProbe('direct-fetch-text', duplicateFamilies[0][1], 'application/json'))
     results.push(await directFetchProbe('direct-fetch-bytes', new TextEncoder().encode(duplicateFamilies[0][1]), 'application/octet-stream'))

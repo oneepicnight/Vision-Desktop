@@ -7,6 +7,12 @@ param(
     [string]$WalletCustodyRoot,
     [Parameter(Mandatory = $true, ParameterSetName = 'Run')]
     [string]$VisionCoreRoot,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Run')]
+    [string]$ProductionExecutablePath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Run')]
+    [string]$ProductionInstallationRoot,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Run')]
+    [string]$ProductionDataRoot,
     [Parameter(ParameterSetName = 'Run')]
     [int]$CaseTimeoutSeconds = 60,
     [Parameter(Mandatory = $true, ParameterSetName = 'SelfTest')]
@@ -137,14 +143,17 @@ function Get-WebView2Provenance {
     ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
     $executables = @($roots | ForEach-Object {
         Get-ChildItem -LiteralPath $_ -Filter msedgewebview2.exe -File -Recurse -ErrorAction SilentlyContinue
-    })
+    } | Sort-Object FullName -Unique)
     if ($executables.Count -eq 0) { throw 'WebView2 runtime identity could not be resolved.' }
-    $selected = $executables | Sort-Object { [version]$_.VersionInfo.ProductVersion } -Descending | Select-Object -First 1
-    return [ordered]@{
-        product_version = $selected.VersionInfo.ProductVersion
-        file_version = $selected.VersionInfo.FileVersion
-        executable_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $selected.FullName).Hash
+    $result = [System.Collections.Generic.List[object]]::new()
+    foreach ($executable in $executables) {
+        $result.Add([ordered]@{
+            product_version = $executable.VersionInfo.ProductVersion
+            file_version = $executable.VersionInfo.FileVersion
+            executable_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $executable.FullName).Hash
+        })
     }
+    return $result
 }
 
 function Get-HarnessSourceHashes([string]$Repository) {
@@ -170,6 +179,18 @@ function Get-HarnessSourceHashes([string]$Repository) {
         $result.Add([ordered]@{ relative_path = $relative; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash })
     }
     return $result
+}
+
+function Get-WrapperCaseInfo([string]$Case) {
+    $commands = @('wallet_get_status', 'wallet_select_recovery_destination', 'wallet_create', 'wallet_select_recovery_source', 'wallet_restore', 'wallet_unlock', 'wallet_lock')
+    foreach ($command in $commands) {
+        $prefix = "wrapper-$command-"
+        if ($Case.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+            $family = ($Case.Substring($prefix.Length) -split '--', 2)[0]
+            return [ordered]@{ command = $command; family = $family; command_index = [array]::IndexOf($commands, $command); commands = $commands }
+        }
+    }
+    return $null
 }
 
 function Test-Transcript(
@@ -219,8 +240,13 @@ function Test-Transcript(
         (-not $postRequired -and $post.Count -ne 0)) {
         return [ordered]@{ classification = 'Inconclusive'; reason = 'post_revocation_evidence_mismatch' }
     }
-    $expectedWrappers = if ($Case.StartsWith('direct-') -or $Case.StartsWith('unknown-command--')) {
+    $wrapperCase = Get-WrapperCaseInfo $Case
+    $expectedWrappers = if ($Case.StartsWith('direct-') -or $Case.StartsWith('unknown-command--') -or $wrapperCase.family -eq 'wrong-invoked-command') {
         0
+    } elseif ($wrapperCase.family -eq 'concurrent-batch') {
+        8 + [int]$postRequired
+    } elseif ($wrapperCase.family -in @('sequential-repeat', 'reordered-invoke')) {
+        2
     } elseif ($Case.StartsWith('concurrent-batch--')) {
         8 + [int]$postRequired
     } elseif ($postRequired) {
@@ -235,15 +261,34 @@ function Test-Transcript(
         ($postRequired -and $terminalNative[0].revoked -ne $true)) {
         return [ordered]@{ classification = 'Inconclusive'; reason = 'native_terminal_evidence_mismatch' }
     }
+    $runtimeVersion = [string]$terminalNative[0].webview2_runtime_version
+    if ($runtimeVersion -notmatch '^\d{1,5}(\.\d{1,5}){3}$') {
+        return [ordered]@{ classification = 'Inconclusive'; reason = 'loaded_webview2_runtime_unproven' }
+    }
+    $nativeCommands = @($records | Where-Object { $_.marker -eq 'layer_b_observation' } | ForEach-Object { [string]$_.command })
+    if ($wrapperCase.family -eq 'sequential-repeat' -and
+        ($nativeCommands.Count -ne 2 -or $nativeCommands[0] -ne $wrapperCase.command -or $nativeCommands[1] -ne $wrapperCase.command)) {
+        return [ordered]@{ classification = 'Inconclusive'; reason = 'sequential_repeat_native_order_unproven' }
+    }
+    if ($wrapperCase.family -eq 'reordered-invoke') {
+        $next = $wrapperCase.commands[($wrapperCase.command_index + 1) % $wrapperCase.commands.Count]
+        if ($nativeCommands.Count -ne 2 -or $nativeCommands[0] -ne $next -or $nativeCommands[1] -ne $wrapperCase.command) {
+            return [ordered]@{ classification = 'Inconclusive'; reason = 'reordered_native_sequence_unproven' }
+        }
+    }
+    if ($wrapperCase.family -eq 'concurrent-batch' -and
+        ($nativeCommands.Count -ne 8 -or @($nativeCommands | Where-Object { $_ -ne $wrapperCase.command }).Count -ne 0)) {
+        return [ordered]@{ classification = 'Inconclusive'; reason = 'concurrent_native_entries_unproven' }
+    }
     $result = [string]$terminalBrowser[0].result
     if ($result -eq 'passed' -and $primary[0].result -eq 'passed' -and $ExitCode -eq 0) {
-        return [ordered]@{ classification = 'Passed'; reason = 'complete_matching_terminal_evidence'; terminal_result = $result; wrapper_entries = $expectedWrappers; primary_records = 1; post_records = $post.Count }
+        return [ordered]@{ classification = 'Passed'; reason = 'complete_matching_terminal_evidence'; terminal_result = $result; wrapper_entries = $expectedWrappers; primary_records = 1; post_records = $post.Count; webview2_runtime_version = $runtimeVersion }
     }
     if ($result -eq 'failed' -and $primary[0].result -eq 'failed' -and $ExitCode -eq 2) {
-        return [ordered]@{ classification = 'Failed'; reason = 'complete_failed_terminal_evidence'; terminal_result = $result; wrapper_entries = $expectedWrappers; primary_records = 1; post_records = $post.Count }
+        return [ordered]@{ classification = 'Failed'; reason = 'complete_failed_terminal_evidence'; terminal_result = $result; wrapper_entries = $expectedWrappers; primary_records = 1; post_records = $post.Count; webview2_runtime_version = $runtimeVersion }
     }
     if ($result -eq 'inconclusive' -and $primary[0].result -eq 'inconclusive' -and $ExitCode -eq 3) {
-        return [ordered]@{ classification = 'Inconclusive'; reason = 'complete_inconclusive_terminal_evidence'; terminal_result = $result; wrapper_entries = $expectedWrappers; primary_records = 1; post_records = $post.Count }
+        return [ordered]@{ classification = 'Inconclusive'; reason = 'complete_inconclusive_terminal_evidence'; terminal_result = $result; wrapper_entries = $expectedWrappers; primary_records = 1; post_records = $post.Count; webview2_runtime_version = $runtimeVersion }
     }
     return [ordered]@{ classification = 'Inconclusive'; reason = 'exit_or_result_mismatch' }
 }
@@ -264,7 +309,7 @@ if ($SelfTest) {
         $passRecords = @(
             [ordered]@{ marker = 'layer_b_observation'; result = 'accepted' },
             [ordered]@{ marker = 'layer_b_browser_observation'; case = $passCase; command = 'wallet_get_status'; outcome = 'layer_b_accepted'; expected = 'layer_b_accepted'; result = 'passed' },
-            [ordered]@{ marker = 'layer_b_terminal_observation'; case = $passCase; result = 'passed'; wrapper_entries = 1; primary_records = 1; post_records = 0; revoked = $false },
+            [ordered]@{ marker = 'layer_b_terminal_observation'; case = $passCase; result = 'passed'; wrapper_entries = 1; primary_records = 1; post_records = 0; revoked = $false; webview2_runtime_version = '151.0.4129.72' },
             [ordered]@{ marker = 'layer_b_browser_observation'; case = $passCase; command = 'matrix'; outcome = 'matrix_complete'; expected = 'matrix_complete'; result = 'passed' }
         )
         $pass = Join-Path $temporary 'pass.stdout.log'
@@ -272,10 +317,25 @@ if ($SelfTest) {
         $assessment = Test-Transcript $passCase $pass $stderr 0 $false
         if ($assessment.classification -ne 'Passed') { throw 'Complete matching evidence was not accepted.' }
 
-        $concurrentCase = 'concurrent-batch--official-invoke'
+        $passRecords[2].webview2_runtime_version = $null
+        $missingRuntime = Join-Path $temporary 'missing-runtime.stdout.log'
+        Write-Utf8NoBom $missingRuntime @($passRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
+        $assessment = Test-Transcript $passCase $missingRuntime $stderr 0 $false
+        if ($assessment.classification -ne 'Inconclusive') { throw 'Missing loaded WebView2 identity did not fail closed.' }
+        $passRecords[2].webview2_runtime_version = '151.0.4129.72'
+
+        $concurrentCase = 'wrapper-wallet_get_status-concurrent-batch--official-invoke'
         $concurrentRecords = @(
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_get_status'; result = 'accepted' },
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_get_status'; result = 'accepted' },
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_get_status'; result = 'accepted' },
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_get_status'; result = 'accepted' },
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_get_status'; result = 'accepted' },
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_get_status'; result = 'accepted' },
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_get_status'; result = 'accepted' },
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_get_status'; result = 'accepted' },
             [ordered]@{ marker = 'layer_b_browser_observation'; case = $concurrentCase; command = 'wallet_get_status'; outcome = 'layer_b_accepted'; expected = 'layer_b_accepted'; result = 'passed' },
-            [ordered]@{ marker = 'layer_b_terminal_observation'; case = $concurrentCase; result = 'passed'; wrapper_entries = 8; primary_records = 1; post_records = 0; revoked = $false },
+            [ordered]@{ marker = 'layer_b_terminal_observation'; case = $concurrentCase; result = 'passed'; wrapper_entries = 8; primary_records = 1; post_records = 0; revoked = $false; webview2_runtime_version = '151.0.4129.72' },
             [ordered]@{ marker = 'layer_b_browser_observation'; case = $concurrentCase; command = 'matrix'; outcome = 'matrix_complete'; expected = 'matrix_complete'; result = 'passed' }
         )
         $concurrent = Join-Path $temporary 'concurrent.stdout.log'
@@ -283,18 +343,36 @@ if ($SelfTest) {
         $assessment = Test-Transcript $concurrentCase $concurrent $stderr 0 $false
         if ($assessment.classification -ne 'Passed') { throw 'Eight-entry concurrency evidence was not accepted.' }
 
-        $concurrentRecords[1].wrapper_entries = 1
+        $concurrentRecords[9].wrapper_entries = 1
         $badConcurrent = Join-Path $temporary 'bad-concurrent.stdout.log'
         Write-Utf8NoBom $badConcurrent @($concurrentRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
         $assessment = Test-Transcript $concurrentCase $badConcurrent $stderr 0 $false
         if ($assessment.classification -ne 'Inconclusive') { throw 'Incomplete concurrency evidence did not fail closed.' }
+
+        $sequenceCase = 'wrapper-wallet_get_status-reordered-invoke--official-invoke'
+        $sequenceRecords = @(
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_select_recovery_destination'; result = 'accepted' },
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_get_status'; result = 'accepted' },
+            [ordered]@{ marker = 'layer_b_browser_observation'; case = $sequenceCase; command = 'wallet_get_status'; outcome = 'layer_b_accepted'; expected = 'layer_b_accepted'; result = 'passed' },
+            [ordered]@{ marker = 'layer_b_terminal_observation'; case = $sequenceCase; result = 'passed'; wrapper_entries = 2; primary_records = 1; post_records = 0; revoked = $false; webview2_runtime_version = '151.0.4129.72' },
+            [ordered]@{ marker = 'layer_b_browser_observation'; case = $sequenceCase; command = 'matrix'; outcome = 'matrix_complete'; expected = 'matrix_complete'; result = 'passed' }
+        )
+        $sequence = Join-Path $temporary 'sequence.stdout.log'
+        Write-Utf8NoBom $sequence @($sequenceRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
+        $assessment = Test-Transcript $sequenceCase $sequence $stderr 0 $false
+        if ($assessment.classification -ne 'Passed') { throw 'Reordered wrapper sequence was not accepted.' }
+        $sequenceRecords[0].command = 'wallet_get_status'
+        $badSequence = Join-Path $temporary 'bad-sequence.stdout.log'
+        Write-Utf8NoBom $badSequence @($sequenceRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
+        $assessment = Test-Transcript $sequenceCase $badSequence $stderr 0 $false
+        if ($assessment.classification -ne 'Inconclusive') { throw 'Incorrect wrapper order did not fail closed.' }
 
         $inconclusiveCase = 'exact-wallet_get_status--official-invoke'
         $inconclusiveRecords = @(
             [ordered]@{ marker = 'layer_b_observation'; result = 'qualification_transport_inconclusive' },
             [ordered]@{ marker = 'layer_b_browser_observation'; case = $inconclusiveCase; command = 'wallet_get_status'; outcome = 'qualification_transport_inconclusive'; expected = 'layer_b_accepted'; result = 'inconclusive' },
             [ordered]@{ marker = 'layer_b_browser_observation'; case = "$inconclusiveCase-post-revocation-proof"; command = 'wallet_get_status'; outcome = 'qualification_runtime_unavailable'; expected = 'qualification_runtime_unavailable'; result = 'passed' },
-            [ordered]@{ marker = 'layer_b_terminal_observation'; case = $inconclusiveCase; result = 'inconclusive'; wrapper_entries = 2; primary_records = 1; post_records = 1; revoked = $true },
+            [ordered]@{ marker = 'layer_b_terminal_observation'; case = $inconclusiveCase; result = 'inconclusive'; wrapper_entries = 2; primary_records = 1; post_records = 1; revoked = $true; webview2_runtime_version = '151.0.4129.72' },
             [ordered]@{ marker = 'layer_b_browser_observation'; case = $inconclusiveCase; command = 'matrix'; outcome = 'matrix_inconclusive'; expected = 'matrix_complete'; result = 'inconclusive' }
         )
         $inconclusive = Join-Path $temporary 'inconclusive.stdout.log'
@@ -310,12 +388,12 @@ if ($SelfTest) {
         $selfTestRepository = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
         $frameworkProof = @(Get-FrameworkProvenance $selfTestRepository)
         if ($frameworkProof.Count -ne 6) { throw 'Framework provenance did not resolve the six required packages.' }
-        $webViewProof = Get-WebView2Provenance
-        if ([string]::IsNullOrWhiteSpace($webViewProof.product_version)) { throw 'WebView2 provenance is incomplete.' }
+        $webViewProof = @(Get-WebView2Provenance)
+        if ($webViewProof.Count -eq 0 -or [string]::IsNullOrWhiteSpace($webViewProof[0].product_version)) { throw 'WebView2 provenance is incomplete.' }
         $sourceProof = @(Get-HarnessSourceHashes $selfTestRepository)
         if ($sourceProof.Count -lt 10) { throw 'Harness source provenance is incomplete.' }
 
-        Write-Output 'Layer B runner self-tests passed: 9 (6 transcript, 3 provenance)'
+        Write-Output 'Layer B runner self-tests passed: 12 (9 transcript, 3 provenance)'
         exit 0
     } finally {
         Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
@@ -326,17 +404,26 @@ $binary = (Resolve-Path -LiteralPath $BinaryPath).Path
 $evidence = [System.IO.Path]::GetFullPath($EvidenceDirectory)
 $walletRoot = [System.IO.Path]::GetFullPath($WalletCustodyRoot)
 $coreRoot = (Resolve-Path -LiteralPath $VisionCoreRoot).Path
+$productionExecutable = (Resolve-Path -LiteralPath $ProductionExecutablePath).Path
+$productionInstallationRoot = (Resolve-Path -LiteralPath $ProductionInstallationRoot).Path
+$productionDataRoot = [System.IO.Path]::GetFullPath($ProductionDataRoot)
 $repository = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 if ($CaseTimeoutSeconds -lt 10 -or $CaseTimeoutSeconds -gt 300) { throw 'Case timeout must be between 10 and 300 seconds.' }
 $repositoryPrefix = $repository.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 if ($evidence.StartsWith($repositoryPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Evidence must be written outside the reviewed repository.' }
 if (Test-Path -LiteralPath $evidence) { throw 'Evidence directory already exists; qualification never overwrites evidence.' }
-$protectedRoots = @($walletRoot, $coreRoot)
+$productionInstallationPrefix = $productionInstallationRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+if (-not $productionExecutable.StartsWith($productionInstallationPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Production executable must be inside the supplied production installation root.'
+}
+$protectedRoots = @($walletRoot, $coreRoot, $productionInstallationRoot, $productionDataRoot)
 foreach ($protectedRoot in $protectedRoots) {
     $protectedPrefix = $protectedRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+    $evidencePrefix = $evidence.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
     if ($evidence.Equals($protectedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
-        $evidence.StartsWith($protectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Evidence must be outside wallet custody and Vision-Core roots.'
+        $evidence.StartsWith($protectedPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $protectedRoot.StartsWith($evidencePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Evidence must be outside wallet custody, Vision-Core, and production application roots.'
     }
 }
 
@@ -344,6 +431,9 @@ $preRepository = Get-GitProof $repository
 if (-not $preRepository.clean) { throw 'Qualification requires the exact clean reviewed worktree.' }
 $preCore = Get-GitProof $coreRoot
 $preWallet = Get-TreeFingerprint $walletRoot
+$preProductionInstallation = Get-TreeFingerprint $productionInstallationRoot
+$preProductionData = Get-TreeFingerprint $productionDataRoot
+$productionExecutablePreHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $productionExecutable).Hash
 $binaryPreHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash
 $commit = $preRepository.commit
 $tree = $preRepository.tree
@@ -358,11 +448,37 @@ $routes = @('official-invoke', 'internals-invoke', 'internals-ipc')
 $duplicateFamilies = @('identical', 'conflicting', 'valid-then-malformed', 'malformed-then-valid', 'public-then-secret-like', 'exact-and-wrong-case', 'three-repeated', 'escaped-equivalent', 'bounded-whitespace')
 $representations = @('string', 'bytes', 'object-normalized')
 $cases = [System.Collections.Generic.List[string]]::new()
-foreach ($scenario in @('window-other-local', 'window-remote-origin', 'window-recreated-main', 'window-reloaded-generation', 'window-destruction-race', 'window-revocation-race')) { $cases.Add("$scenario--official-invoke") }
-foreach ($command in $commands) { $cases.Add("exact-$command--official-invoke") }
+foreach ($command in $commands) {
+    $cases.Add("wrapper-$command-exact--official-invoke")
+    foreach ($family in @(
+        'raw-empty', 'raw-json-looking', 'raw-arbitrary', 'raw-bytes',
+        'json-null', 'json-boolean', 'json-number', 'json-string', 'json-array',
+        'shape-mismatch', 'missing-top-level', 'extra-top-level', 'wrong-case-top-level',
+        'secret-like-top-level', 'wrong-command-envelope'
+    )) {
+        $cases.Add("wrapper-$command-$family--official-invoke")
+    }
+    if ($command -in @('wallet_create', 'wallet_restore')) {
+        foreach ($family in @('malformed-nested', 'oversized-nested', 'unknown-nested', 'secret-like-nested')) {
+            $cases.Add("wrapper-$command-$family--official-invoke")
+        }
+    }
+    $cases.Add("wrapper-$command-wrong-invoked-command--official-invoke")
+    foreach ($family in @(
+        'window-other-local', 'window-remote-origin', 'window-recreated-main',
+        'window-reloaded-generation', 'window-destruction-race', 'window-revocation-race'
+    )) {
+        $cases.Add("wrapper-$command-$family--official-invoke")
+    }
+    foreach ($point in @('metadata', 'body', 'response', 'observation', 'fixed-error')) {
+        $cases.Add("wrapper-$command-panic-$point--internals-post-message")
+    }
+    $cases.Add("wrapper-$command-sequential-repeat--official-invoke")
+    $cases.Add("wrapper-$command-concurrent-batch--official-invoke")
+    $cases.Add("wrapper-$command-reordered-invoke--official-invoke")
+    $cases.Add("wrapper-$command-post-revocation--official-invoke")
+}
 foreach ($route in @('internals-invoke', 'internals-ipc')) { $cases.Add("exact-status-$route--$route") }
-foreach ($id in @('raw-empty', 'raw-json-looking', 'raw-arbitrary', 'raw-bytes', 'json-null', 'json-boolean', 'json-number', 'json-string', 'json-array', 'extra-top-level', 'wrong-case-top-level', 'secret-like-top-level', 'key-name-canary-top-level', 'oversized-key-top-level', 'excessive-key-count-top-level')) { $cases.Add("$id--official-invoke") }
-foreach ($id in @('create-empty', 'create-request-empty', 'create-request-wrong-type', 'create-unknown-field', 'create-secret-like-field', 'create-invalid-handle', 'restore-wrong-handle-name', 'unknown-command')) { $cases.Add("$id--official-invoke") }
 foreach ($family in $duplicateFamilies) {
     foreach ($representation in $representations) {
         foreach ($route in $routes) {
@@ -371,13 +487,10 @@ foreach ($family in $duplicateFamilies) {
         }
     }
 }
-$cases.Add('concurrent-batch--official-invoke')
 $cases.Add('direct-fetch-text-missing-invoke-key--direct-fetch-text')
 $cases.Add('direct-fetch-bytes-missing-invoke-key--direct-fetch-bytes')
 $cases.Add('direct-xhr-missing-invoke-key--direct-xhr')
 $cases.Add('forced-post-message-fallback--internals-post-message')
-foreach ($point in @('metadata', 'body', 'response', 'observation')) { $cases.Add("contained-$point-panic--internals-post-message") }
-$cases.Add('contained-fixed-error-panic--internals-post-message')
 
 $records = [System.Collections.Generic.List[object]]::new()
 $overall = 'Passed'
@@ -409,6 +522,7 @@ foreach ($case in $cases) {
         wrapper_entries = $assessment.wrapper_entries
         primary_records = $assessment.primary_records
         post_records = $assessment.post_records
+        webview2_runtime_version = $assessment.webview2_runtime_version
         stdout_bytes = (Get-Item -LiteralPath $stdoutPath).Length
         stderr_bytes = (Get-Item -LiteralPath $stderrPath).Length
         stdout_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $stdoutPath).Hash
@@ -419,8 +533,19 @@ foreach ($case in $cases) {
 $postRepository = Get-GitProof $repository
 $postCore = Get-GitProof $coreRoot
 $postWallet = Get-TreeFingerprint $walletRoot
+$postProductionInstallation = Get-TreeFingerprint $productionInstallationRoot
+$postProductionData = Get-TreeFingerprint $productionDataRoot
+$productionExecutablePostHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $productionExecutable).Hash
 $postWebview2 = Get-WebView2Provenance
 $binaryPostHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash
+$webview2InventoryBeforeHash = Get-StringSha256 (($webview2 | ConvertTo-Json -Depth 5 -Compress) -join '')
+$webview2InventoryAfterHash = Get-StringSha256 (($postWebview2 | ConvertTo-Json -Depth 5 -Compress) -join '')
+$actualWebView2Versions = @($records | ForEach-Object { $_.webview2_runtime_version } | Where-Object { $_ } | Sort-Object -Unique)
+$installedWebView2Versions = @($webview2 | ForEach-Object { ([string]$_.product_version -split ' ')[0] } | Sort-Object -Unique)
+$actualWebView2Proven = $actualWebView2Versions.Count -eq 1 -and
+    @($records | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.webview2_runtime_version) }).Count -eq 0 -and
+    $installedWebView2Versions -contains $actualWebView2Versions[0]
+if (-not $actualWebView2Proven -and $overall -eq 'Passed') { $overall = 'Inconclusive' }
 $integrityPreserved = $preRepository.commit -eq $postRepository.commit -and
     $preRepository.tree -eq $postRepository.tree -and $postRepository.clean -and
     $preRepository.status_sha256 -eq $postRepository.status_sha256 -and
@@ -428,9 +553,16 @@ $integrityPreserved = $preRepository.commit -eq $postRepository.commit -and
     $preCore.status_sha256 -eq $postCore.status_sha256 -and
     $preWallet.exists -eq $postWallet.exists -and $preWallet.file_count -eq $postWallet.file_count -and
     $preWallet.total_bytes -eq $postWallet.total_bytes -and $preWallet.sha256 -eq $postWallet.sha256 -and
-    $webview2.product_version -eq $postWebview2.product_version -and
-    $webview2.file_version -eq $postWebview2.file_version -and
-    $webview2.executable_sha256 -eq $postWebview2.executable_sha256 -and
+    $preProductionInstallation.exists -eq $postProductionInstallation.exists -and
+    $preProductionInstallation.file_count -eq $postProductionInstallation.file_count -and
+    $preProductionInstallation.total_bytes -eq $postProductionInstallation.total_bytes -and
+    $preProductionInstallation.sha256 -eq $postProductionInstallation.sha256 -and
+    $preProductionData.exists -eq $postProductionData.exists -and
+    $preProductionData.file_count -eq $postProductionData.file_count -and
+    $preProductionData.total_bytes -eq $postProductionData.total_bytes -and
+    $preProductionData.sha256 -eq $postProductionData.sha256 -and
+    $productionExecutablePreHash -eq $productionExecutablePostHash -and
+    $webview2InventoryBeforeHash -eq $webview2InventoryAfterHash -and
     $binaryPreHash -eq $binaryPostHash
 if (-not $integrityPreserved) { $overall = 'Failed' }
 
@@ -447,6 +579,8 @@ $manifest = [ordered]@{
     architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
     webview2_before = $webview2
     webview2_after = $postWebview2
+    actual_loaded_webview2_runtime_version = if ($actualWebView2Versions.Count -eq 1) { $actualWebView2Versions[0] } else { $null }
+    actual_loaded_webview2_runtime_proven = $actualWebView2Proven
     framework_dependencies = $framework
     harness_source_hashes = $harnessSources
     cargo_lock_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $repository 'src-tauri\Cargo.lock')).Hash
@@ -456,6 +590,12 @@ $manifest = [ordered]@{
     vision_core_after = $postCore
     wallet_custody_before = $preWallet
     wallet_custody_after = $postWallet
+    production_executable_sha256_before = $productionExecutablePreHash
+    production_executable_sha256_after = $productionExecutablePostHash
+    production_installation_before = $preProductionInstallation
+    production_installation_after = $postProductionInstallation
+    production_data_before = $preProductionData
+    production_data_after = $postProductionData
     integrity_preserved = $integrityPreserved
     screenshots = @()
     screenshots_note = 'No screenshots are required; complete bounded stdout and stderr transcripts are the primary evidence.'

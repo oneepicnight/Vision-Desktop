@@ -1,20 +1,20 @@
 # Wallet Tauri Layer B Corrective Implementation Handoff
 
-Date: 2026-08-09
+Date: 2026-08-10
 
 Workstation: Vision Desktop ASUS Windows workstation
 
 Branch: `fix/wallet-signing-adversarial-matrix`
 
-Rejected Layer B corrective commit: `2e5017d4a7967f2797e644ccd7c0d21484d702c9`
+Rejected Layer B corrective commit: `3602698c413cda747f1b33956dadbf336cdf9888`
 
-Rejected Layer B corrective tree: `ebf44d779731ccb511ade5b3aa0051bda7c4647e`
+Rejected Layer B corrective tree: `c155dc6d37afbe1e4251f33f0c6da7270d2c9ce2`
 
 ## Result
 
-The four remaining findings from the second independent Layer B review have been addressed in the
-standalone, non-custody harness source, runner, and source-only tests. The prior guarded-metadata
-and linear-revocation corrections remain intact.
+The two remaining findings from the third independent Layer B review have been addressed in the
+standalone, non-custody harness source, runner, and source-only tests. The prior guarded-metadata,
+linear-revocation, transport-proof, transcript, and genuine-concurrency corrections remain intact.
 
 The harness and packaged qualification matrix were not launched. This corrective implementation
 does not claim a Passed result. Production `duplicate_key_rejection_proven` remains `false`, and
@@ -69,8 +69,8 @@ with separate stdout, stderr, exit code, start/end times, time limit, classifica
 records. A timeout is Inconclusive, never Passed. Existing evidence directories are never
 overwritten.
 
-The runner was added for later independently authorized qualification only. It was not executed in
-this tranche.
+The runner remains reserved for later independently authorized qualification. Only its
+non-launching self-test mode was executed in this tranche.
 
 ## M-03 correction: inconclusive transport remains inconclusive
 
@@ -132,26 +132,57 @@ accepts only eight exact accepted results with one consistent native-proven tran
 record independently requires eight generated-wrapper entries, or nine when an inconclusive route
 also requires the post-revocation probe.
 
-## M-04c correction: mandatory provenance and integrity evidence
+## M-04c correction: actual runtime and complete product identity
 
 The mandatory runner now captures before execution:
 
 - the exact repository commit, tree, parent, and clean-worktree proof;
 - the Layer B binary hash;
-- installed WebView2 product/file version and executable hash;
+- the complete installed WebView2 executable inventory, rather than selecting the highest version;
 - locked resolved versions for Tauri, Tauri macros, Tauri Wry runtime, Wry, Serde, and Serde JSON;
 - Cargo.lock checksums, package-manifest hashes, and the reviewed source-file hashes for those
   dependencies; and
 - hashes for the harness, runner, configuration, permission, generated-wrapper, build, lockfile,
   test, and handoff sources.
 
-The sanctioned runner requires the authoritative wallet-custody root and Vision-Core Git root as
-explicit inputs. It records aggregate custody-data identity and Vision-Core Git identity before and
-after the matrix without publishing custody filenames. After execution it also rechecks the
-Vision Desktop Git state and Layer B binary. Any product, custody, Core, Git, or binary identity
-change forces Failed. Every case retains its process ID, exact bounded launch arguments, bounded
-full stdout/stderr, timestamps, exit code, native record counts, classification reason, transcript
+The native harness now obtains `BrowserVersionString` from the exact WebView2 environment backing
+the selected test window. That fixed, bounded version is included in the native terminal record for
+every process. A case with no valid loaded-runtime identity is Inconclusive. Final evidence requires
+one consistent loaded version across all cases and corroboration against the installed runtime
+inventory; an inferred "highest installed" runtime can no longer qualify.
+
+The sanctioned runner now requires the authoritative wallet-custody root, Vision-Core Git root,
+production executable, production installation root, and production data root as explicit inputs.
+It requires the production executable to reside within the supplied installation. It records
+aggregate custody, installed-product, product-data, and Vision-Core identity before and after the
+matrix without publishing protected filenames. Evidence output must be disjoint from every
+protected root. After execution the runner rechecks the Vision Desktop Git state, installed
+WebView2 inventory, Layer B binary, production executable, installation tree, and product data.
+Any product, custody, Core, Git, runtime-inventory, or binary identity change forces Failed. Every
+case retains its process ID, exact bounded launch arguments, loaded runtime version, bounded full
+stdout/stderr, timestamps, exit code, native record counts, classification reason, transcript
 sizes, and transcript hashes in the new evidence directory.
+
+## M-05 correction: complete generated-wrapper adversarial matrix
+
+Every one of the seven generated wrappers now receives its own isolated process cases for:
+
+- its exact accepted envelope;
+- raw empty, JSON-looking, arbitrary, and byte payloads;
+- JSON null, Boolean, number, string, and array payloads;
+- missing, extra, wrong-case, secret-like, shape-mismatched, and wrong-command envelopes;
+- wrong invoked-command handling;
+- all six window, origin, generation, destruction, and revocation scenarios;
+- metadata, body, response, observation, and fixed-error panic points;
+- sequential repeat, a genuine eight-invoke concurrent batch, reordered invocation, and an
+  explicit post-revocation probe.
+
+Create and restore additionally receive malformed, oversized, unknown, and secret-like nested
+request cases because those are the only wrappers with nested public request data. Reordered cases
+invoke the next generated wrapper followed by the selected wrapper, and the runner independently
+requires that exact native order. Concurrent cases issue all eight promises before awaiting and
+require eight native entries for the selected wrapper. The runner treats missing or incorrect
+sequence/concurrency evidence as Inconclusive.
 
 ## Generated-wrapper and payload coverage
 
@@ -165,10 +196,8 @@ The harness still declares exactly seven feature-gated generated Tauri wrappers:
 - `wallet_unlock`; and
 - `wallet_lock`.
 
-The isolated process list covers their exact shapes, raw values, JSON primitives and collections,
-missing/extra/wrong-case/secret-like fields, bounded and oversized metadata, malformed nested
-requests, unknown commands, an eight-invoke concurrency batch, direct fetch/XHR, forced postMessage fallback, panic
-points, top-level duplicate families, and nested duplicate families.
+The isolated process list covers every wrapper as described above, plus direct fetch/XHR, forced
+postMessage fallback, comprehensive top-level duplicate families, and nested duplicate families.
 
 Duplicate textual payloads are still attempted as strings, UTF-8 bytes, and normalized JavaScript
 objects. Normalized object acceptance is recorded as unsafe evidence, not proof that textual
@@ -178,8 +207,8 @@ duplicates were rejected. The production duplicate-key blocker remains false.
 
 The following checks passed without starting the harness:
 
-- Layer B Rust unit tests: 15 passed;
-- runner self-tests: 9 passed (6 transcript and 3 provenance checks);
+- Layer B Rust unit tests: 17 passed;
+- runner self-tests: 12 passed (9 transcript and 3 provenance checks);
 - complete Rust baseline: 293 passed, 4 operator-only ignored;
 - Tauri authority tests: 7 passed;
 - WebView isolation tests: 2 passed;
@@ -199,8 +228,6 @@ corrective commit and tree authorizes execution.
 
 - `docs/WALLET_TAURI_LAYER_B_IMPLEMENTATION_HANDOFF.md`
 - `src-tauri/qualification/wallet-layer-b/main.rs`
-- `src-tauri/qualification/wallet-layer-b/tauri.conf.json`
-- `src-tauri/qualification/wallet-layer-b/assets/index.html`
 - `src-tauri/qualification/wallet-layer-b/assets/harness.js`
 - `src-tauri/qualification/wallet-layer-b/run-layer-b-qualification.ps1`
 - `src-tauri/tests/tauri_acl.rs`

@@ -6,6 +6,7 @@ compile_error!("the Wallet Layer B transport harness is Windows-only");
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
+    ffi::c_void,
     io::{self, Write},
     net::{TcpListener, TcpStream},
     panic::{catch_unwind, AssertUnwindSafe},
@@ -37,6 +38,16 @@ const SELECT_RECOVERY_SOURCE: &str = "wallet_select_recovery_source";
 const RESTORE: &str = "wallet_restore";
 const UNLOCK: &str = "wallet_unlock";
 const LOCK: &str = "wallet_lock";
+
+const ALL_COMMANDS: &[&str] = &[
+    GET_STATUS,
+    SELECT_RECOVERY_DESTINATION,
+    CREATE,
+    SELECT_RECOVERY_SOURCE,
+    RESTORE,
+    UNLOCK,
+    LOCK,
+];
 
 const NO_INPUT_COMMANDS: &[&str] = &[
     GET_STATUS,
@@ -73,6 +84,7 @@ impl<'a, R: Runtime> CommandArg<'a, R> for QualificationInvokeRequest<'a> {
 struct QualificationState {
     selected_case: Box<str>,
     invoke_key: OnceLock<Box<str>>,
+    loaded_webview2_version: OnceLock<Box<str>>,
     authorized_hwnd: AtomicIsize,
     page_generation: AtomicUsize,
     authorized_generation: AtomicUsize,
@@ -98,6 +110,7 @@ impl QualificationState {
         Self {
             selected_case,
             invoke_key: OnceLock::new(),
+            loaded_webview2_version: OnceLock::new(),
             authorized_hwnd: AtomicIsize::new(0),
             page_generation: AtomicUsize::new(0),
             authorized_generation: AtomicUsize::new(0),
@@ -129,6 +142,16 @@ impl QualificationState {
         self.invoke_key.get().map(AsRef::as_ref)
     }
 
+    fn set_loaded_webview2_version(&self, version: String) -> Result<(), ()> {
+        self.loaded_webview2_version
+            .set(version.into_boxed_str())
+            .map_err(|_| ())
+    }
+
+    fn loaded_webview2_version(&self) -> Option<&str> {
+        self.loaded_webview2_version.get().map(AsRef::as_ref)
+    }
+
     fn set_authorized_hwnd(&self, hwnd: isize) -> Result<(), ()> {
         self.authorized_hwnd
             .compare_exchange(0, hwnd, Ordering::AcqRel, Ordering::Acquire)
@@ -154,7 +177,7 @@ impl QualificationState {
     }
 
     fn expected_report_window(&self) -> &str {
-        if self.selected_case.starts_with("window-other-local--") {
+        if self.selected_case.contains("window-other-local--") {
             QUALIFICATION_OTHER_WINDOW
         } else {
             QUALIFICATION_WINDOW
@@ -415,6 +438,64 @@ fn timestamp_ms() -> u128 {
         .map_or(0, |elapsed| elapsed.as_millis())
 }
 
+#[link(name = "ole32")]
+extern "system" {
+    fn CoTaskMemFree(memory: *const c_void);
+}
+
+fn parse_webview2_runtime_version(raw: *const u16) -> Option<String> {
+    if raw.is_null() {
+        return None;
+    }
+    let mut length = 0_usize;
+    while length <= 64 {
+        if unsafe { *raw.add(length) } == 0 {
+            break;
+        }
+        length += 1;
+    }
+    if length == 0 || length > 64 {
+        return None;
+    }
+    let value = String::from_utf16(unsafe { std::slice::from_raw_parts(raw, length) }).ok()?;
+    let mut segments = value.split('.');
+    if (0..4).all(|_| {
+        segments
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.len() <= 5 && part.parse::<u32>().is_ok())
+    }) && segments.next().is_none()
+    {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn capture_loaded_webview2_runtime<R: Runtime>(
+    window: &WebviewWindow<R>,
+    app_handle: tauri::AppHandle<R>,
+) -> tauri::Result<()> {
+    window.with_webview(move |webview| {
+        let mut raw_version = Default::default();
+        let environment = webview.environment();
+        let result = unsafe { environment.BrowserVersionString(&mut raw_version) };
+        let raw = raw_version.as_ptr();
+        let version = result
+            .ok()
+            .and_then(|()| parse_webview2_runtime_version(raw));
+        if !raw.is_null() {
+            unsafe { CoTaskMemFree(raw.cast()) };
+        }
+        let state = app_handle.state::<QualificationState>();
+        if version
+            .and_then(|version| state.set_loaded_webview2_version(version).ok())
+            .is_none()
+        {
+            state.invalidate();
+        }
+    })
+}
+
 fn emit_observation(observation: &impl Serialize) -> Result<(), ()> {
     let line = serde_json::to_string(observation).map_err(|_| ())?;
     let mut stdout = io::stdout().lock();
@@ -484,6 +565,7 @@ struct TerminalObservation<'a> {
     primary_records: usize,
     post_records: usize,
     revoked: bool,
+    webview2_runtime_version: &'a str,
 }
 
 fn fixed_member<'a>(value: &'a str, allowed: &[&str]) -> Option<&'a str> {
@@ -540,6 +622,9 @@ fn valid_case_name(value: &str) -> bool {
     if fixed.contains(&value) {
         return true;
     }
+    if wrapper_case_parts(value).is_some() {
+        return true;
+    }
     if let Some(command) = value.strip_prefix("exact-") {
         return [
             GET_STATUS,
@@ -577,6 +662,55 @@ fn valid_case_name(value: &str) -> bool {
     })
 }
 
+fn wrapper_case_parts(value: &str) -> Option<(&'static str, &str)> {
+    let value = value.strip_prefix("wrapper-")?;
+    let families = [
+        "exact",
+        "raw-empty",
+        "raw-json-looking",
+        "raw-arbitrary",
+        "raw-bytes",
+        "json-null",
+        "json-boolean",
+        "json-number",
+        "json-string",
+        "json-array",
+        "shape-mismatch",
+        "missing-top-level",
+        "extra-top-level",
+        "wrong-case-top-level",
+        "secret-like-top-level",
+        "wrong-command-envelope",
+        "wrong-invoked-command",
+        "malformed-nested",
+        "oversized-nested",
+        "unknown-nested",
+        "secret-like-nested",
+        "window-other-local",
+        "window-remote-origin",
+        "window-recreated-main",
+        "window-reloaded-generation",
+        "window-destruction-race",
+        "window-revocation-race",
+        "panic-metadata",
+        "panic-body",
+        "panic-response",
+        "panic-observation",
+        "panic-fixed-error",
+        "sequential-repeat",
+        "concurrent-batch",
+        "reordered-invoke",
+        "post-revocation",
+    ];
+    ALL_COMMANDS.iter().find_map(|command| {
+        value
+            .strip_prefix(command)
+            .and_then(|suffix| suffix.strip_prefix('-'))
+            .filter(|family| families.contains(family))
+            .map(|family| (*command, family))
+    })
+}
+
 fn valid_case_selector(value: &str) -> bool {
     let Some((case, route)) = value.rsplit_once("--") else {
         return false;
@@ -603,6 +737,21 @@ fn validated_browser_observation<'a>(
             && request.case != format!("{selected_case}-post-revocation-proof"))
     {
         return None;
+    }
+    if request.command != "matrix" {
+        if let Some((expected_command, family)) = selected_case
+            .rsplit_once("--")
+            .and_then(|(case, _)| wrapper_case_parts(case))
+        {
+            let expected_reported_command = if family == "wrong-invoked-command" {
+                "wallet_unknown"
+            } else {
+                expected_command
+            };
+            if request.command != expected_reported_command {
+                return None;
+            }
+        }
     }
     let client_api = fixed_member(
         &request.client_api,
@@ -711,9 +860,23 @@ fn post_revocation_required(expected: &str, outcome: &str) -> bool {
 }
 
 fn expected_wrapper_entries(selected_case: &str, post_required: bool) -> usize {
-    if selected_case.starts_with("direct-") || selected_case.starts_with("unknown-command--") {
+    let wrapper_family = selected_case
+        .rsplit_once("--")
+        .and_then(|(case, _)| wrapper_case_parts(case))
+        .map(|(_, family)| family);
+    if selected_case.starts_with("direct-")
+        || selected_case.starts_with("unknown-command--")
+        || wrapper_family == Some("wrong-invoked-command")
+    {
         0
-    } else if selected_case.starts_with("concurrent-batch--") {
+    } else if matches!(
+        wrapper_family,
+        Some("sequential-repeat" | "reordered-invoke")
+    ) {
+        2
+    } else if wrapper_family == Some("concurrent-batch")
+        || selected_case.starts_with("concurrent-batch--")
+    {
         8 + usize::from(post_required)
     } else if post_required {
         2
@@ -741,6 +904,7 @@ fn report_protocol<R: Runtime>(
         let is_terminal = request.command == "matrix";
         let is_post = request.case.ends_with("-post-revocation-proof");
         if is_terminal {
+            let webview2_runtime_version = state.loaded_webview2_version().ok_or(())?;
             let wrapper_entries = state.wrapper_entries.load(Ordering::Acquire);
             let expected_wrapper_entries = expected_wrapper_entries(
                 &state.selected_case,
@@ -769,6 +933,7 @@ fn report_protocol<R: Runtime>(
                 primary_records: state.browser_primary_records.load(Ordering::Acquire),
                 post_records: state.browser_post_records.load(Ordering::Acquire),
                 revoked: state.revoked.load(Ordering::Acquire),
+                webview2_runtime_version,
             })?;
         } else if is_post {
             if state.browser_post_records.fetch_add(1, Ordering::AcqRel) != 0
@@ -942,7 +1107,7 @@ fn control_protocol<R: Runtime>(
         return control_response(http::StatusCode::BAD_REQUEST, "rejected");
     }
     match (request.uri().path(), state.selected_case.as_ref()) {
-        ("/recreate", case) if case.starts_with("window-recreated-main--") => {
+        ("/recreate", case) if case.contains("window-recreated-main--") => {
             if state.scenario_triggered.swap(true, Ordering::AcqRel) {
                 control_response(http::StatusCode::OK, "ready")
             } else {
@@ -950,7 +1115,7 @@ fn control_protocol<R: Runtime>(
                 control_response(http::StatusCode::OK, "reloading")
             }
         }
-        ("/reload", case) if case.starts_with("window-reloaded-generation--") => {
+        ("/reload", case) if case.contains("window-reloaded-generation--") => {
             if state.scenario_triggered.swap(true, Ordering::AcqRel) {
                 control_response(http::StatusCode::OK, "ready")
             } else {
@@ -958,11 +1123,11 @@ fn control_protocol<R: Runtime>(
                 control_response(http::StatusCode::OK, "reloading")
             }
         }
-        ("/destroy-race", case) if case.starts_with("window-destruction-race--") => {
+        ("/destroy-race", case) if case.contains("window-destruction-race--") => {
             state.destroy_on_invoke.store(true, Ordering::Release);
             control_response(http::StatusCode::OK, "ready")
         }
-        ("/revocation-race", case) if case.starts_with("window-revocation-race--") => {
+        ("/revocation-race", case) if case.contains("window-revocation-race--") => {
             state.revoke_on_invoke.store(true, Ordering::Release);
             control_response(http::StatusCode::OK, "ready")
         }
@@ -1198,27 +1363,31 @@ fn main() {
                         .0 as isize,
                 )
                 .map_err(|_| "Layer B native identity was already initialized")?;
-            if state.selected_case.starts_with("window-other-local--") {
+            if state.selected_case.contains("window-other-local--") {
                 main.destroy()
                     .map_err(|_| "Layer B could not replace the main window")?;
-                tauri::WebviewWindowBuilder::new(
+                let other = tauri::WebviewWindowBuilder::new(
                     app,
                     QUALIFICATION_OTHER_WINDOW,
                     tauri::WebviewUrl::App("index.html".into()),
                 )
                 .title("Vision Wallet Transport Qualification - Other Window")
                 .build()?;
-            } else if state.selected_case.starts_with("window-remote-origin--") {
+                capture_loaded_webview2_runtime(&other, app.handle().clone())?;
+            } else if state.selected_case.contains("window-remote-origin--") {
                 let remote_url = start_remote_origin_server(&state.selected_case)?;
                 main.destroy()
                     .map_err(|_| "Layer B could not replace the main window")?;
-                tauri::WebviewWindowBuilder::new(
+                let remote = tauri::WebviewWindowBuilder::new(
                     app,
                     QUALIFICATION_WINDOW,
                     tauri::WebviewUrl::External(remote_url),
                 )
                 .title("Vision Wallet Transport Qualification - Remote Origin")
                 .build()?;
+                capture_loaded_webview2_runtime(&remote, app.handle().clone())?;
+            } else {
+                capture_loaded_webview2_runtime(&main, app.handle().clone())?;
             }
             Ok(())
         })
@@ -1404,6 +1573,20 @@ mod tests {
         let mut canary = valid;
         canary.case = "PASSWORD_CANARY".into();
         assert!(validated_browser_observation(selected, &canary).is_none());
+
+        let wrapper_selected = "wrapper-wallet_lock-exact--official-invoke";
+        let wrong_wrapper = BrowserObservationRequest {
+            marker: "layer_b_browser_observation".into(),
+            case: wrapper_selected.into(),
+            client_api: "official-invoke".into(),
+            command: GET_STATUS.into(),
+            outcome: "layer_b_accepted".into(),
+            expected: "layer_b_accepted".into(),
+            result: "passed".into(),
+            transport_evidence: "custom_protocol_proven".into(),
+            fallback_intercepted: false,
+        };
+        assert!(validated_browser_observation(wrapper_selected, &wrong_wrapper).is_none());
     }
 
     #[test]
@@ -1450,11 +1633,90 @@ mod tests {
 
     #[test]
     fn concurrency_batch_requires_all_eight_wrapper_entries() {
-        let selected = "concurrent-batch--official-invoke";
+        let selected = "wrapper-wallet_get_status-concurrent-batch--official-invoke";
         assert!(valid_case_selector(selected));
         assert_eq!(expected_wrapper_entries(selected, false), 8);
         assert_eq!(expected_wrapper_entries(selected, true), 9);
         assert!(!valid_case_selector("concurrent-0--official-invoke"));
+    }
+
+    #[test]
+    fn every_wrapper_accepts_the_complete_applicable_case_matrix() {
+        let common = [
+            "exact",
+            "raw-empty",
+            "raw-json-looking",
+            "raw-arbitrary",
+            "raw-bytes",
+            "json-null",
+            "json-boolean",
+            "json-number",
+            "json-string",
+            "json-array",
+            "shape-mismatch",
+            "missing-top-level",
+            "extra-top-level",
+            "wrong-case-top-level",
+            "secret-like-top-level",
+            "wrong-command-envelope",
+            "wrong-invoked-command",
+            "window-other-local",
+            "window-remote-origin",
+            "window-recreated-main",
+            "window-reloaded-generation",
+            "window-destruction-race",
+            "window-revocation-race",
+            "panic-metadata",
+            "panic-body",
+            "panic-response",
+            "panic-observation",
+            "panic-fixed-error",
+            "sequential-repeat",
+            "concurrent-batch",
+            "reordered-invoke",
+            "post-revocation",
+        ];
+        for command in ALL_COMMANDS {
+            for family in common {
+                let selected = format!("wrapper-{command}-{family}--official-invoke");
+                assert!(valid_case_selector(&selected), "missing {selected}");
+            }
+        }
+        for command in [CREATE, RESTORE] {
+            for family in [
+                "malformed-nested",
+                "oversized-nested",
+                "unknown-nested",
+                "secret-like-nested",
+            ] {
+                assert!(valid_case_selector(&format!(
+                    "wrapper-{command}-{family}--official-invoke"
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn loaded_webview2_versions_are_strict_and_bounded() {
+        fn wide(value: &str) -> Vec<u16> {
+            value.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+        let valid = wide("151.0.4129.72");
+        assert_eq!(
+            parse_webview2_runtime_version(valid.as_ptr()).as_deref(),
+            Some("151.0.4129.72")
+        );
+        for invalid in [
+            "151.0.4129",
+            "151.0.4129.72.1",
+            "151.0.beta.72",
+            "151..4129.72",
+            "123456.0.0.0",
+        ] {
+            let invalid = wide(invalid);
+            assert!(parse_webview2_runtime_version(invalid.as_ptr()).is_none());
+        }
+        assert!(parse_webview2_runtime_version(std::ptr::null()).is_none());
     }
 
     #[test]

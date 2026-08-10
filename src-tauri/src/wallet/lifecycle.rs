@@ -1,8 +1,8 @@
 #![cfg_attr(
     not(test),
-    expect(
+    allow(
         dead_code,
-        reason = "wallet lifecycle adapters remain private until the command boundary passes review"
+        reason = "wallet lifecycle adapters remain private and unregistered"
     )
 )]
 #![cfg_attr(

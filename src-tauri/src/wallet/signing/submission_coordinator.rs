@@ -17,9 +17,10 @@ const MAX_SIGNED_BODY_BYTES: usize = 64 * 1024;
 const BODY_DIGEST_CONTEXT: &str = "com.vision.desktop.wallet-signed-envelope-digest.v1";
 
 pub(in crate::wallet) enum PrivateSubmissionResult {
-    Accepted,
-    Rejected,
-    OutcomeUnknown,
+    Accepted { transaction_id: String },
+    AcceptedRecordingPending { transaction_id: String },
+    Rejected { transaction_id: String },
+    OutcomeUnknown { transaction_id: String },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,9 +86,8 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
         permit
             .resolve_not_attempted(prepared, &store)
             .map_err(map_runtime_error)?;
-        return permit
-            .complete(PrivateSubmissionResult::OutcomeUnknown)
-            .map_err(map_runtime_error);
+        permit.complete(()).map_err(map_runtime_error)?;
+        return Err(PrivateSubmissionError::RuntimeRevoked);
     }
     let may_have = permit
         .publish_may_have_been_submitted(prepared, &store)
@@ -101,7 +101,9 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
             permit,
             &artifact,
             source,
-            PrivateSubmissionResult::OutcomeUnknown,
+            PrivateSubmissionResult::OutcomeUnknown {
+                transaction_id: artifact.transaction_id.clone(),
+            },
         );
     }
 
@@ -113,7 +115,9 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
                 permit,
                 &artifact,
                 source,
-                PrivateSubmissionResult::OutcomeUnknown,
+                PrivateSubmissionResult::OutcomeUnknown {
+                    transaction_id: artifact.transaction_id.clone(),
+                },
             );
         }
     };
@@ -130,7 +134,9 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
             permit,
             &artifact,
             source,
-            PrivateSubmissionResult::OutcomeUnknown,
+            PrivateSubmissionResult::OutcomeUnknown {
+                transaction_id: artifact.transaction_id.clone(),
+            },
         );
     }
 
@@ -148,21 +154,36 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
                     crate::wallet::submission::compatibility_contract_digest(rejection_policy),
                 )
                 .map_err(map_runtime_error)?;
-            let evidence = accepted
-                .evidence()
-                .map_err(|_| PrivateSubmissionError::ReconciliationUnavailable)?;
+            let evidence = match accepted.evidence() {
+                Ok(evidence) => evidence,
+                Err(_) => {
+                    return permit
+                        .complete(PrivateSubmissionResult::AcceptedRecordingPending {
+                            transaction_id: artifact.transaction_id.clone(),
+                        })
+                        .map_err(map_runtime_error)
+                }
+            };
+            if permit.record_accepted_evidence(custody, &evidence).is_err() {
+                return permit
+                    .complete(PrivateSubmissionResult::AcceptedRecordingPending {
+                        transaction_id: artifact.transaction_id.clone(),
+                    })
+                    .map_err(map_runtime_error);
+            }
+            if permit.resolve_recorded(accepted, &store).is_err() {
+                return permit
+                    .complete(PrivateSubmissionResult::AcceptedRecordingPending {
+                        transaction_id: artifact.transaction_id.clone(),
+                    })
+                    .map_err(map_runtime_error);
+            }
+            validate_authority(&permit, &artifact, source)?;
             permit
-                .record_accepted_evidence(custody, &evidence)
-                .map_err(map_runtime_error)?;
-            permit
-                .resolve_recorded(accepted, &store)
-                .map_err(map_runtime_error)?;
-            complete_with_core_validation(
-                permit,
-                &artifact,
-                source,
-                PrivateSubmissionResult::Accepted,
-            )
+                .complete(PrivateSubmissionResult::Accepted {
+                    transaction_id: artifact.transaction_id.clone(),
+                })
+                .map_err(map_runtime_error)
         }
         PrivateSubmissionResponseDisposition::DefinitiveRejected {
             http_status,
@@ -178,12 +199,12 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
                     allowlist_digest_hex,
                 )
                 .map_err(map_runtime_error)?;
-            complete_with_core_validation(
-                permit,
-                &artifact,
-                source,
-                PrivateSubmissionResult::Rejected,
-            )
+            validate_authority(&permit, &artifact, source)?;
+            permit
+                .complete(PrivateSubmissionResult::Rejected {
+                    transaction_id: artifact.transaction_id.clone(),
+                })
+                .map_err(map_runtime_error)
         }
         PrivateSubmissionResponseDisposition::OutcomeUnknown => {
             drop(may_have);
@@ -191,7 +212,9 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
                 permit,
                 &artifact,
                 source,
-                PrivateSubmissionResult::OutcomeUnknown,
+                PrivateSubmissionResult::OutcomeUnknown {
+                    transaction_id: artifact.transaction_id.clone(),
+                },
             )
         }
     }
@@ -206,7 +229,9 @@ fn complete_with_core_validation(
     let result = if validate_authority(&permit, artifact, source).is_ok() {
         desired
     } else {
-        PrivateSubmissionResult::OutcomeUnknown
+        PrivateSubmissionResult::OutcomeUnknown {
+            transaction_id: artifact.transaction_id.clone(),
+        }
     };
     permit.complete(result).map_err(map_runtime_error)
 }
@@ -595,11 +620,46 @@ mod tests {
             &SubmissionRejectionPolicy::production(),
         )
         .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
-        assert!(matches!(result, PrivateSubmissionResult::Accepted));
+        assert!(matches!(result, PrivateSubmissionResult::Accepted { .. }));
         assert_eq!(writes.load(Ordering::SeqCst), 1);
         assert!(journal_path.exists());
         let record = fs_read_record(&directory);
         assert_eq!(record["phase"]["kind"], "resolved_recorded");
+    }
+
+    #[test]
+    fn proven_acceptance_with_journal_failure_remains_recording_pending() {
+        let (runtime, sender) = unlocked_runtime();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let pending = pending(
+            &runtime,
+            &sender,
+            &"b".repeat(64),
+            writes.clone(),
+            Arc::new(Mutex::new(None)),
+            ResponseMode::Accepted,
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let custody = custody(&directory);
+        std::fs::create_dir(custody.journal_path()).unwrap();
+        let result = super::super::sign_and_submit_after_native_approval(
+            pending,
+            NativeConfirmationApproval::issue_for_test(),
+            &custody,
+            1_700_000_000_123,
+            &SubmissionRejectionPolicy::production(),
+        )
+        .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
+        assert!(matches!(
+            result,
+            PrivateSubmissionResult::AcceptedRecordingPending { .. }
+        ));
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fs_read_record(&directory)["phase"]["kind"],
+            "accepted_recording_pending"
+        );
+        assert!(!runtime.lifecycle_status(true).unwrap().locked);
     }
 
     #[test]
@@ -632,7 +692,10 @@ mod tests {
                 &SubmissionRejectionPolicy::production(),
             )
             .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
-            assert!(matches!(result, PrivateSubmissionResult::OutcomeUnknown));
+            assert!(matches!(
+                result,
+                PrivateSubmissionResult::OutcomeUnknown { .. }
+            ));
             assert_eq!(writes.load(Ordering::SeqCst), 1);
             assert!(!journal_path.exists());
             let record = fs_read_record(&directory);
@@ -688,7 +751,10 @@ mod tests {
             &SubmissionRejectionPolicy::production(),
         )
         .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
-        assert!(matches!(result, PrivateSubmissionResult::OutcomeUnknown));
+        assert!(matches!(
+            result,
+            PrivateSubmissionResult::OutcomeUnknown { .. }
+        ));
 
         let reconciliation = runtime.begin_reconciliation_discovery(MAIN).unwrap();
         let restart = reconciliation.discover(&custody).unwrap().unwrap();
@@ -761,7 +827,7 @@ mod tests {
             &policy,
         )
         .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
-        assert!(matches!(result, PrivateSubmissionResult::Rejected));
+        assert!(matches!(result, PrivateSubmissionResult::Rejected { .. }));
         assert_eq!(writes.load(Ordering::SeqCst), 1);
         assert_eq!(
             fs_read_record(&directory)["phase"]["kind"],
@@ -794,7 +860,10 @@ mod tests {
             &SubmissionRejectionPolicy::production(),
         )
         .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
-        assert!(matches!(result, PrivateSubmissionResult::OutcomeUnknown));
+        assert!(matches!(
+            result,
+            PrivateSubmissionResult::OutcomeUnknown { .. }
+        ));
         let record = fs_read_record(&directory);
         let transaction_id = record["transaction_id"].as_str().unwrap();
         *lookup_body.lock().unwrap() = Some(
@@ -927,7 +996,10 @@ mod tests {
                 &SubmissionRejectionPolicy::production(),
             )
             .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
-            assert!(matches!(result, PrivateSubmissionResult::OutcomeUnknown));
+            assert!(matches!(
+                result,
+                PrivateSubmissionResult::OutcomeUnknown { .. }
+            ));
             assert_eq!(writes.load(Ordering::SeqCst), expected_writes);
             assert_eq!(
                 fs_read_record(&directory)["phase"]["kind"],
@@ -998,7 +1070,10 @@ mod tests {
             &SubmissionRejectionPolicy::production(),
         )
         .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
-        assert!(matches!(result, PrivateSubmissionResult::OutcomeUnknown));
+        assert!(matches!(
+            result,
+            PrivateSubmissionResult::OutcomeUnknown { .. }
+        ));
 
         let reconciliation = runtime.begin_reconciliation_discovery(MAIN).unwrap();
         let restart = reconciliation.discover(&custody).unwrap().unwrap();

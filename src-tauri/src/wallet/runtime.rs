@@ -11,7 +11,10 @@ use super::{
     activation::{WalletActivationPolicy, WalletActivationScope},
     contract::{WalletAccountSummary, WalletLifecycleStatus, WalletPublicMetadata},
     core_client::WalletCoreSubmissionSource,
-    journal::{append_accepted_evidence, WalletJournalAuthenticator},
+    journal::{
+        append_accepted_evidence, load_activity_journal, WalletActivityJournal,
+        WalletJournalAuthenticator,
+    },
     lifecycle::WalletCustodyPathAuthority,
     preview::BoundTransferPreview,
     receipt::prove_exact_reconciliation_lookup,
@@ -1544,6 +1547,35 @@ impl Drop for WalletSubmissionPermit<'_> {
 }
 
 impl WalletReconciliationPermit<'_> {
+    pub(in crate::wallet) fn load_activity(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+    ) -> Result<WalletActivityJournal, WalletRuntimeError> {
+        self.run_fail_closed(|| self.load_activity_inner(custody))
+    }
+
+    fn load_activity_inner(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+    ) -> Result<WalletActivityJournal, WalletRuntimeError> {
+        self.ensure_current()?;
+        let mut inner = self.permit.state.lock_inner()?;
+        let result = inner.session.with_seed(|wallet_id, seed| {
+            if wallet_id != self.wallet_id {
+                return Err(());
+            }
+            let authenticator = WalletJournalAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+            load_activity_journal(custody.journal_path(), &authenticator).map_err(|_| ())
+        });
+        let journal = match result {
+            Ok(Ok(journal)) => journal,
+            Ok(Err(_)) | Err(_) => return Err(WalletRuntimeError::ReconciliationUnavailable),
+        };
+        drop(inner);
+        self.ensure_current()?;
+        Ok(journal)
+    }
+
     pub(in crate::wallet) fn discover(
         &self,
         custody: &WalletCustodyPathAuthority,

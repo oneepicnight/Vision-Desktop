@@ -668,7 +668,29 @@ pub(super) fn publish_accepted_for_test(
     Ok(())
 }
 
+#[cfg(test)]
+pub(super) fn publish_may_have_been_submitted_for_test(
+    store: &ReconciliationStore,
+    authenticator: &ReconciliationAuthenticator,
+    record: ReconciliationRecord,
+) -> Result<(), ReconciliationError> {
+    SubmissionActivationGrant::new_unchecked()
+        .split()
+        .0
+        .publish_prepared(store, authenticator, record)?
+        .publish_may_have_been_submitted(store, authenticator)?;
+    Ok(())
+}
+
 impl RestartReconciliationPermit {
+    pub(super) fn phase_tag(&self) -> ReconciliationPhaseTag {
+        self.record.phase_tag()
+    }
+
+    pub(super) fn transaction_id(&self) -> &str {
+        self.record.transaction_id.as_str()
+    }
+
     pub(super) fn resolve_prepared(
         self,
         store: &ReconciliationStore,

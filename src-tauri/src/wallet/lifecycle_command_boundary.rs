@@ -30,6 +30,8 @@ use tauri::{
     Runtime, Url, WebviewWindow,
 };
 
+mod transaction;
+
 const MAIN_WINDOW_LABEL: &str = "main";
 const BUNDLED_WINDOWS_ORIGIN: &str = "http://tauri.localhost";
 

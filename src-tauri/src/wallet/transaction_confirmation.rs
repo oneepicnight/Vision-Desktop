@@ -16,12 +16,17 @@
 use super::{
     amount::format_vision_amount,
     core_client::WalletCoreReadSource,
+    lifecycle::WalletCustodyPathAuthority,
     preview::{
         PendingTransferConfirmation, TransferConfirmationFields, WalletPreviewError,
         WalletTransactionPreviewEngine,
     },
     runtime::WalletRuntimeState,
-    signing::{sign_after_native_approval, WalletPrivateSigningError},
+    signing::{
+        sign_after_native_approval, sign_and_submit_after_native_approval, PrivateSubmissionResult,
+        WalletPrivateSigningError,
+    },
+    submission::SubmissionRejectionPolicy,
 };
 use crate::supervisor::SupervisorState;
 use std::{
@@ -156,7 +161,7 @@ impl WalletConfirmationError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NativeConfirmationError {
+pub(in crate::wallet) enum NativeConfirmationError {
     Cancelled,
     AuthorityRevoked,
     NativeUiUnavailable,
@@ -175,7 +180,7 @@ pub(in crate::wallet) struct NativeTransactionConfirmationCeremony {
 }
 
 impl NativeTransactionConfirmationCeremony {
-    fn new(owner_window: isize) -> Result<Self, NativeConfirmationError> {
+    pub(in crate::wallet) fn new(owner_window: isize) -> Result<Self, NativeConfirmationError> {
         if owner_window == 0 || unsafe { IsWindow(owner_window as HWND) } == 0 {
             return Err(NativeConfirmationError::NativeUiUnavailable);
         }
@@ -220,6 +225,33 @@ impl<'a> WalletTransactionConfirmationEngine<'a> {
         })
     }
 
+    pub(in crate::wallet) fn confirm_and_submit(
+        &self,
+        supervisor: &'a SupervisorState,
+        owner_window: &str,
+        handle: &str,
+        custody: &WalletCustodyPathAuthority,
+        created_at_unix_ms: u64,
+    ) -> Result<PrivateSubmissionResult, WalletConfirmationError> {
+        self.run_fail_closed(|| {
+            let pending = WalletTransactionPreviewEngine::new(self.runtime)
+                .consume(supervisor, owner_window, handle)
+                .map_err(map_preview_error)?;
+            let fields = pending.fields();
+            self.ceremony
+                .present(fields, &|| pending.authority_is_current())
+                .map_err(map_native_error)?;
+            sign_and_submit_after_native_approval(
+                pending,
+                issue_native_confirmation_approval(),
+                custody,
+                created_at_unix_ms,
+                &SubmissionRejectionPolicy::production(),
+            )
+            .map_err(map_signing_error)
+        })
+    }
+
     fn confirm_pending<S: WalletCoreReadSource>(
         &self,
         pending: PendingTransferConfirmation<'_, S>,
@@ -235,7 +267,7 @@ impl<'a> WalletTransactionConfirmationEngine<'a> {
         self.ceremony
             .present(fields, &|| pending.authority_is_current())
             .map_err(map_native_error)?;
-        sign_after_native_approval(pending, NativeConfirmationApproval::issue())
+        sign_after_native_approval(pending, issue_native_confirmation_approval())
             .map_err(map_signing_error)
     }
 
@@ -251,6 +283,10 @@ impl<'a> WalletTransactionConfirmationEngine<'a> {
             }
         }
     }
+}
+
+fn issue_native_confirmation_approval() -> NativeConfirmationApproval {
+    NativeConfirmationApproval::issue()
 }
 
 const fn map_signing_error(error: WalletPrivateSigningError) -> WalletConfirmationError {

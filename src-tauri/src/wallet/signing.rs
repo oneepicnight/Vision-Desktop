@@ -1,8 +1,8 @@
 #![cfg_attr(
     not(test),
-    expect(
+    allow(
         dead_code,
-        reason = "private signing and submission remain unregistered pending exact review"
+        reason = "private signing and submission remain unregistered"
     )
 )]
 
@@ -22,6 +22,7 @@ use super::{
 };
 
 mod submission_coordinator;
+pub(in crate::wallet) use submission_coordinator::PrivateSubmissionResult;
 
 /// Fixed, non-emitting failure categories for the private confirmation-to-signing bridge.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,7 +100,7 @@ pub(in crate::wallet) fn sign_and_submit_after_native_approval<S: WalletCoreSubm
     custody: &WalletCustodyPathAuthority,
     created_at_unix_ms: u64,
     rejection_policy: &crate::wallet::submission::SubmissionRejectionPolicy,
-) -> Result<submission_coordinator::PrivateSubmissionResult, WalletPrivateSigningError> {
+) -> Result<PrivateSubmissionResult, WalletPrivateSigningError> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         sign_and_submit_after_native_approval_inner(
             pending,

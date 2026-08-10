@@ -117,6 +117,16 @@ impl WalletActivityJournal {
     pub(in crate::wallet) fn records(&self) -> &[WalletActivityRecord] {
         &self.records
     }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn from_records_for_test(records: Vec<WalletActivityRecord>) -> Self {
+        Self {
+            wallet_id: "test-wallet".to_string(),
+            event_count: records.len(),
+            records,
+            last_authentication_tag: [0; AUTHENTICATION_TAG_BYTES],
+        }
+    }
 }
 
 /// Seed-owned authority for authenticating one wallet's local activity journal.

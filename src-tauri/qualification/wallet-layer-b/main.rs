@@ -3,21 +3,32 @@
 #[cfg(not(target_os = "windows"))]
 compile_error!("the Wallet Layer B transport harness is Windows-only");
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
+    io::{self, Write},
+    net::{TcpListener, TcpStream},
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
+        OnceLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{
+    http,
     ipc::{CommandArg, CommandItem, InvokeBody, InvokeError, Response},
-    Runtime, State, WebviewWindow,
+    Manager, Runtime, State, WebviewWindow,
 };
 
 const QUALIFICATION_ARGUMENT: &str = "--wallet-layer-b-qualification";
+const QUALIFICATION_CASE_ARGUMENT: &str = "--wallet-layer-b-case=";
 const QUALIFICATION_WINDOW: &str = "wallet-transport-qualification";
+const QUALIFICATION_OTHER_WINDOW: &str = "wallet-transport-qualification-other";
 const QUALIFICATION_HOST: &str = "tauri.localhost";
+const REPORT_PROTOCOL: &str = "qualification-report";
+const CONTROL_PROTOCOL: &str = "qualification-control";
+const MAX_REPORT_BYTES: usize = 2_048;
 
 const GET_STATUS: &str = "wallet_get_status";
 const SELECT_RECOVERY_DESTINATION: &str = "wallet_select_recovery_destination";
@@ -35,47 +46,45 @@ const NO_INPUT_COMMANDS: &[&str] = &[
     LOCK,
 ];
 
-const ALLOWED_ROUTES: &[&str] = &[
-    "official-invoke",
-    "internals-invoke",
-    "internals-ipc",
-    "internals-post-message",
-];
+const TAURI_CALLBACK_HEADER: &str = "tauri-callback";
+const TAURI_ERROR_HEADER: &str = "tauri-error";
+const TAURI_INVOKE_KEY_HEADER: &str = "tauri-invoke-key";
+const ORIGIN_HEADER: &str = "origin";
+const MAX_OBSERVED_TOP_LEVEL_KEYS: usize = 8;
 
 struct QualificationInvokeRequest<'a> {
     declared_command: &'static str,
     invoked_command: &'a str,
     body: &'a InvokeBody,
-    route: &'static str,
-    panic_requested: bool,
+    headers: &'a http::HeaderMap,
 }
 
 impl<'a, R: Runtime> CommandArg<'a, R> for QualificationInvokeRequest<'a> {
     fn from_command(command: CommandItem<'a, R>) -> Result<Self, InvokeError> {
-        let route = command
-            .message
-            .headers()
-            .get("x-vision-qualification-route")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| ALLOWED_ROUTES.iter().copied().find(|route| route == &value))
-            .unwrap_or("unclassified");
-        let panic_requested = command
-            .message
-            .headers()
-            .get("x-vision-qualification-panic")
-            .is_some_and(|value| value == "body");
         Ok(Self {
             declared_command: command.name,
             invoked_command: command.message.command(),
             body: command.message.payload(),
-            route,
-            panic_requested,
+            headers: command.message.headers(),
         })
     }
 }
 
-#[derive(Default)]
 struct QualificationState {
+    selected_case: Box<str>,
+    invoke_key: OnceLock<Box<str>>,
+    authorized_hwnd: AtomicIsize,
+    page_generation: AtomicUsize,
+    authorized_generation: AtomicUsize,
+    scenario_triggered: AtomicBool,
+    destroy_on_invoke: AtomicBool,
+    revoke_on_invoke: AtomicBool,
+    browser_primary_records: AtomicUsize,
+    browser_post_records: AtomicUsize,
+    browser_primary_passed: AtomicBool,
+    browser_post_required: AtomicBool,
+    browser_post_passed: AtomicBool,
+    browser_terminal_seen: AtomicBool,
     wrapper_entries: AtomicUsize,
     accepted: AtomicUsize,
     rejected: AtomicUsize,
@@ -84,6 +93,72 @@ struct QualificationState {
 }
 
 impl QualificationState {
+    fn new(selected_case: Box<str>) -> Self {
+        Self {
+            selected_case,
+            invoke_key: OnceLock::new(),
+            authorized_hwnd: AtomicIsize::new(0),
+            page_generation: AtomicUsize::new(0),
+            authorized_generation: AtomicUsize::new(0),
+            scenario_triggered: AtomicBool::new(false),
+            destroy_on_invoke: AtomicBool::new(false),
+            revoke_on_invoke: AtomicBool::new(false),
+            browser_primary_records: AtomicUsize::new(0),
+            browser_post_records: AtomicUsize::new(0),
+            browser_primary_passed: AtomicBool::new(false),
+            browser_post_required: AtomicBool::new(false),
+            browser_post_passed: AtomicBool::new(false),
+            browser_terminal_seen: AtomicBool::new(false),
+            wrapper_entries: AtomicUsize::new(0),
+            accepted: AtomicUsize::new(0),
+            rejected: AtomicUsize::new(0),
+            invalidations: AtomicUsize::new(0),
+            revoked: AtomicBool::new(false),
+        }
+    }
+
+    fn initialize_invoke_key(&self, invoke_key: &str) -> Result<(), ()> {
+        self.invoke_key
+            .set(invoke_key.to_owned().into_boxed_str())
+            .map_err(|_| ())
+    }
+
+    fn invoke_key(&self) -> Option<&str> {
+        self.invoke_key.get().map(AsRef::as_ref)
+    }
+
+    fn set_authorized_hwnd(&self, hwnd: isize) -> Result<(), ()> {
+        self.authorized_hwnd
+            .compare_exchange(0, hwnd, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| ())
+    }
+
+    fn note_page_load(&self) {
+        let generation = self.page_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = self.authorized_generation.compare_exchange(
+            0,
+            generation,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn window_authority_matches(&self, hwnd: isize) -> bool {
+        self.authorized_hwnd.load(Ordering::Acquire) == hwnd
+            && self.authorized_generation.load(Ordering::Acquire) != 0
+            && self.page_generation.load(Ordering::Acquire)
+                == self.authorized_generation.load(Ordering::Acquire)
+    }
+
+    fn expected_report_window(&self) -> &str {
+        if self.selected_case.starts_with("window-other-local--") {
+            QUALIFICATION_OTHER_WINDOW
+        } else {
+            QUALIFICATION_WINDOW
+        }
+    }
+
     fn invalidate(&self) {
         if !self.revoked.swap(true, Ordering::AcqRel) {
             self.invalidations.fetch_add(1, Ordering::AcqRel);
@@ -120,8 +195,8 @@ struct QualificationResponse {
     command: &'static str,
     route: &'static str,
     body_kind: &'static str,
-    top_level_key_count: usize,
-    top_level_keys: Vec<String>,
+    top_level_key_count: &'static str,
+    top_level_shape: &'static str,
     wrapper_ran: bool,
     command_body_ran: bool,
 }
@@ -133,8 +208,8 @@ struct QualificationObservation<'a> {
     command: &'a str,
     route: &'a str,
     body_kind: &'static str,
-    top_level_key_count: usize,
-    top_level_keys: &'a [String],
+    top_level_key_count: &'static str,
+    top_level_shape: &'static str,
     result: &'static str,
     wrapper_ran: bool,
     command_body_ran: bool,
@@ -142,24 +217,117 @@ struct QualificationObservation<'a> {
 
 struct BodyMetadata {
     kind: &'static str,
-    keys: Vec<String>,
+    key_count: &'static str,
+    shape: &'static str,
 }
 
 fn body_metadata(body: &InvokeBody) -> BodyMetadata {
     match body {
         InvokeBody::Raw(_) => BodyMetadata {
             kind: "raw",
-            keys: Vec::new(),
+            key_count: "not_applicable",
+            shape: "raw_body",
         },
         InvokeBody::Json(Value::Object(object)) => {
-            let mut keys = object.keys().cloned().collect::<Vec<_>>();
-            keys.sort();
-            BodyMetadata { kind: "json", keys }
+            let key_count = match object.len() {
+                0 => "zero",
+                1 => "one",
+                2..=MAX_OBSERVED_TOP_LEVEL_KEYS => "two_to_eight",
+                _ => "over_limit",
+            };
+            let oversized = object.keys().any(|key| key.len() > 64);
+            let shape = if object.len() > MAX_OBSERVED_TOP_LEVEL_KEYS {
+                "excessive_key_count"
+            } else if oversized {
+                "oversized_key"
+            } else if object.is_empty() {
+                "empty_object"
+            } else if object.len() == 1 && object.contains_key("request") {
+                "request_only"
+            } else {
+                "unknown_or_mixed_keys"
+            };
+            BodyMetadata {
+                kind: "json_object",
+                key_count,
+                shape,
+            }
         }
         InvokeBody::Json(_) => BodyMetadata {
-            kind: "json",
-            keys: Vec::new(),
+            kind: "json_non_object",
+            key_count: "not_applicable",
+            shape: "non_object",
         },
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FrameworkRoute {
+    CustomProtocol,
+    PostMessage,
+    Inconclusive,
+}
+
+impl FrameworkRoute {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CustomProtocol => "custom_protocol_proven",
+            Self::PostMessage => "post_message_proven",
+            Self::Inconclusive => "transport_route_inconclusive",
+        }
+    }
+}
+
+fn framework_route(headers: &http::HeaderMap, expected_invoke_key: Option<&str>) -> FrameworkRoute {
+    let custom_protocol_headers = [
+        TAURI_CALLBACK_HEADER,
+        TAURI_ERROR_HEADER,
+        TAURI_INVOKE_KEY_HEADER,
+        ORIGIN_HEADER,
+    ];
+    let matching_key = expected_invoke_key.is_some_and(|expected| {
+        headers
+            .get(TAURI_INVOKE_KEY_HEADER)
+            .and_then(|value| value.to_str().ok())
+            == Some(expected)
+    });
+    if matching_key
+        && custom_protocol_headers
+            .iter()
+            .all(|header| headers.contains_key(*header))
+    {
+        return FrameworkRoute::CustomProtocol;
+    }
+    if custom_protocol_headers
+        .iter()
+        .all(|header| !headers.contains_key(*header))
+    {
+        return FrameworkRoute::PostMessage;
+    }
+    FrameworkRoute::Inconclusive
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PanicPoint {
+    None,
+    Metadata,
+    Body,
+    Response,
+    FixedError,
+    Observation,
+}
+
+fn requested_panic(headers: &http::HeaderMap) -> PanicPoint {
+    match headers
+        .get("x-vision-qualification-panic")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some("metadata") => PanicPoint::Metadata,
+        Some("body") => PanicPoint::Body,
+        Some("response") => PanicPoint::Response,
+        Some("fixed-error") => PanicPoint::FixedError,
+        Some("observation") => PanicPoint::Observation,
+        _ => PanicPoint::None,
     }
 }
 
@@ -245,11 +413,515 @@ fn timestamp_ms() -> u128 {
         .map_or(0, |elapsed| elapsed.as_millis())
 }
 
-fn emit_observation(observation: &QualificationObservation<'_>) {
-    if let Ok(line) = serde_json::to_string(observation) {
-        println!("{line}");
+fn emit_observation(observation: &impl Serialize) -> Result<(), ()> {
+    let line = serde_json::to_string(observation).map_err(|_| ())?;
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(line.as_bytes()).map_err(|_| ())?;
+    stdout.write_all(b"\n").map_err(|_| ())?;
+    stdout.flush().map_err(|_| ())
+}
+
+fn guarded_rejection(
+    state: &QualificationState,
+    command: &'static str,
+    route: FrameworkRoute,
+    metadata: &BodyMetadata,
+    code: &'static str,
+) -> Result<InvokeError, InvokeError> {
+    state.invalidate();
+    let error = fixed_error(code);
+    emit_observation(&QualificationObservation {
+        marker: "layer_b_observation",
+        timestamp_ms: timestamp_ms(),
+        command,
+        route: route.label(),
+        body_kind: metadata.kind,
+        top_level_key_count: metadata.key_count,
+        top_level_shape: metadata.shape,
+        result: code,
+        wrapper_ran: true,
+        command_body_ran: false,
+    })
+    .map_err(|_| fixed_error("qualification_runtime_unavailable"))?;
+    Ok(error)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserObservationRequest {
+    marker: String,
+    case: String,
+    client_api: String,
+    command: String,
+    outcome: String,
+    expected: String,
+    result: String,
+    transport_evidence: String,
+    fallback_intercepted: bool,
+}
+
+#[derive(Serialize)]
+struct BrowserObservation<'a> {
+    marker: &'static str,
+    case: &'a str,
+    client_api: &'a str,
+    command: &'a str,
+    outcome: &'a str,
+    expected: &'a str,
+    result: &'a str,
+    transport_evidence: &'a str,
+    fallback_intercepted: bool,
+}
+
+fn fixed_member<'a>(value: &'a str, allowed: &[&str]) -> Option<&'a str> {
+    allowed
+        .iter()
+        .any(|candidate| candidate == &value)
+        .then_some(value)
+}
+
+fn valid_case_name(value: &str) -> bool {
+    let fixed = [
+        "window-other-local",
+        "window-remote-origin",
+        "window-recreated-main",
+        "window-reloaded-generation",
+        "window-destruction-race",
+        "window-revocation-race",
+        "exact-status-internals-invoke",
+        "exact-status-internals-ipc",
+        "raw-empty",
+        "raw-json-looking",
+        "raw-arbitrary",
+        "raw-bytes",
+        "json-null",
+        "json-boolean",
+        "json-number",
+        "json-string",
+        "json-array",
+        "extra-top-level",
+        "wrong-case-top-level",
+        "secret-like-top-level",
+        "key-name-canary-top-level",
+        "oversized-key-top-level",
+        "excessive-key-count-top-level",
+        "create-empty",
+        "create-request-empty",
+        "create-request-wrong-type",
+        "create-unknown-field",
+        "create-secret-like-field",
+        "create-invalid-handle",
+        "restore-wrong-handle-name",
+        "unknown-command",
+        "direct-fetch-text-missing-invoke-key",
+        "direct-fetch-bytes-missing-invoke-key",
+        "direct-xhr-missing-invoke-key",
+        "forced-post-message-fallback",
+        "contained-metadata-panic",
+        "contained-body-panic",
+        "contained-response-panic",
+        "contained-observation-panic",
+        "contained-fixed-error-panic",
+    ];
+    if fixed.contains(&value) {
+        return true;
+    }
+    if let Some(command) = value.strip_prefix("exact-") {
+        return [
+            GET_STATUS,
+            SELECT_RECOVERY_DESTINATION,
+            CREATE,
+            SELECT_RECOVERY_SOURCE,
+            RESTORE,
+            UNLOCK,
+            LOCK,
+        ]
+        .contains(&command);
+    }
+    if let Some(index) = value.strip_prefix("concurrent-") {
+        return index
+            .parse::<usize>()
+            .is_ok_and(|index| (0..=7).contains(&index));
+    }
+    let duplicate = value
+        .strip_prefix("duplicate-")
+        .or_else(|| value.strip_prefix("nested-duplicate-"));
+    let Some(duplicate) = duplicate else {
+        return false;
+    };
+    let representations = ["string", "bytes", "object-normalized"];
+    let families = [
+        "identical",
+        "conflicting",
+        "valid-then-malformed",
+        "malformed-then-valid",
+        "public-then-secret-like",
+        "exact-and-wrong-case",
+        "three-repeated",
+        "escaped-equivalent",
+        "bounded-whitespace",
+    ];
+    representations.iter().any(|representation| {
+        duplicate
+            .strip_suffix(&format!("-{representation}"))
+            .is_some_and(|family| families.contains(&family))
+    })
+}
+
+fn valid_case_selector(value: &str) -> bool {
+    let Some((case, route)) = value.rsplit_once("--") else {
+        return false;
+    };
+    valid_case_name(case)
+        && matches!(
+            route,
+            "official-invoke"
+                | "internals-invoke"
+                | "internals-ipc"
+                | "internals-post-message"
+                | "direct-fetch-text"
+                | "direct-fetch-bytes"
+                | "direct-xhr"
+        )
+}
+
+fn validated_browser_observation<'a>(
+    selected_case: &str,
+    request: &'a BrowserObservationRequest,
+) -> Option<BrowserObservation<'a>> {
+    if request.marker != "layer_b_browser_observation"
+        || (request.case != selected_case
+            && request.case != format!("{selected_case}-post-revocation-proof"))
+    {
+        return None;
+    }
+    let client_api = fixed_member(
+        &request.client_api,
+        &[
+            "official-invoke",
+            "internals-invoke",
+            "internals-ipc",
+            "internals-post-message",
+            "direct-fetch-text",
+            "direct-fetch-bytes",
+            "direct-xhr",
+            "matrix-controller",
+        ],
+    )?;
+    let command = fixed_member(
+        &request.command,
+        &[
+            GET_STATUS,
+            SELECT_RECOVERY_DESTINATION,
+            CREATE,
+            SELECT_RECOVERY_SOURCE,
+            RESTORE,
+            UNLOCK,
+            LOCK,
+            "wallet_unknown",
+            "matrix",
+        ],
+    )?;
+    let outcomes = [
+        "layer_b_accepted",
+        "invalid_request",
+        "qualification_invalid_window",
+        "qualification_response_unavailable",
+        "qualification_runtime_unavailable",
+        "framework_error_redacted",
+        "framework_rejection",
+        "transport_rejection",
+        "unexpected_success",
+        "unexpected_success_shape",
+        "unclassified_error",
+        "case_not_observed",
+        "matrix_complete",
+        "matrix_inconclusive",
+    ];
+    let outcome = fixed_member(&request.outcome, &outcomes)?;
+    let expected = fixed_member(&request.expected, &outcomes)?;
+    let result = fixed_member(&request.result, &["passed", "failed", "inconclusive"])?;
+    let transport_evidence = fixed_member(
+        &request.transport_evidence,
+        &[
+            "custom_protocol_proven",
+            "post_message_proven",
+            "transport_route_inconclusive",
+            "framework_rejected_before_wrapper",
+            "not_applicable",
+        ],
+    )?;
+    if request.result == "passed" && request.outcome != request.expected {
+        return None;
+    }
+    if request.outcome == "layer_b_accepted"
+        && !matches!(
+            transport_evidence,
+            "custom_protocol_proven" | "post_message_proven"
+        )
+    {
+        return None;
+    }
+    if selected_case.starts_with("forced-post-message-fallback--")
+        && request.result == "passed"
+        && (!request.fallback_intercepted || transport_evidence != "post_message_proven")
+    {
+        return None;
+    }
+    Some(BrowserObservation {
+        marker: "layer_b_browser_observation",
+        case: &request.case,
+        client_api,
+        command,
+        outcome,
+        expected,
+        result,
+        transport_evidence,
+        fallback_intercepted: request.fallback_intercepted,
+    })
+}
+
+fn report_protocol<R: Runtime>(
+    context: tauri::UriSchemeContext<'_, R>,
+    request: http::Request<Vec<u8>>,
+) -> http::Response<Vec<u8>> {
+    let state = context.app_handle().state::<QualificationState>();
+    let mut guard = FailClosedGuard::arm(&state);
+    let processed = catch_unwind(AssertUnwindSafe(|| {
+        if context.webview_label() != state.expected_report_window()
+            || request.method() != http::Method::POST
+            || request.body().len() > MAX_REPORT_BYTES
+        {
+            return Err(());
+        }
+        let request =
+            serde_json::from_slice::<BrowserObservationRequest>(request.body()).map_err(|_| ())?;
+        let observation = validated_browser_observation(&state.selected_case, &request).ok_or(())?;
+        let is_terminal = request.command == "matrix";
+        let is_post = request.case.ends_with("-post-revocation-proof");
+        if is_terminal {
+            let wrapper_entries = state.wrapper_entries.load(Ordering::Acquire);
+            let expected_wrapper_entries = if state.selected_case.starts_with("direct-")
+                || state.selected_case.starts_with("unknown-command--")
+            {
+                0
+            } else if state.browser_post_required.load(Ordering::Acquire) {
+                2
+            } else {
+                1
+            };
+            if state.browser_terminal_seen.swap(true, Ordering::AcqRel)
+                || state.browser_primary_records.load(Ordering::Acquire) != 1
+                || wrapper_entries != expected_wrapper_entries
+                || state.browser_primary_passed.load(Ordering::Acquire)
+                    != (request.result == "passed")
+                || (state.browser_post_required.load(Ordering::Acquire)
+                    && (state.browser_post_records.load(Ordering::Acquire) != 1
+                        || !state.browser_post_passed.load(Ordering::Acquire)))
+                || (!state.browser_post_required.load(Ordering::Acquire)
+                    && state.browser_post_records.load(Ordering::Acquire) != 0)
+            {
+                return Err(());
+            }
+        } else if is_post {
+            if state.browser_post_records.fetch_add(1, Ordering::AcqRel) != 0
+                || !state.revoked.load(Ordering::Acquire)
+            {
+                return Err(());
+            }
+            state
+                .browser_post_passed
+                .store(request.result == "passed", Ordering::Release);
+        } else {
+            if state.browser_primary_records.fetch_add(1, Ordering::AcqRel) != 0 {
+                return Err(());
+            }
+            state
+                .browser_primary_passed
+                .store(request.result == "passed", Ordering::Release);
+            state.browser_post_required.store(
+                matches!(
+                    request.expected.as_str(),
+                    "invalid_request"
+                        | "qualification_invalid_window"
+                        | "qualification_response_unavailable"
+                        | "qualification_runtime_unavailable"
+                ),
+                Ordering::Release,
+            );
+        }
+        emit_observation(&observation)?;
+        Ok::<Option<i32>, ()>(is_terminal.then_some(if request.result == "passed" { 0 } else { 2 }))
+    }));
+    let (accepted, exit_code) = match processed {
+        Ok(Ok(exit_code)) => (true, exit_code),
+        _ => (false, None),
+    };
+    if !accepted {
+        state.invalidate();
+        let _ = io::stderr().write_all(b"layer_b_browser_observation_rejected\n");
     } else {
-        println!("{{\"marker\":\"layer_b_observation_unavailable\"}}");
+        guard.commit();
+    }
+    if let Some(exit_code) = exit_code {
+        let app_handle = context.app_handle().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            app_handle.exit(exit_code);
+        });
+    }
+    http::Response::builder()
+        .status(if accepted {
+            http::StatusCode::NO_CONTENT
+        } else {
+            http::StatusCode::BAD_REQUEST
+        })
+        .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(Vec::new())
+        .unwrap_or_else(|_| http::Response::new(Vec::new()))
+}
+
+fn control_response(status: http::StatusCode, phase: &'static str) -> http::Response<Vec<u8>> {
+    let body = format!("{{\"phase\":\"{phase}\"}}").into_bytes();
+    http::Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(body)
+        .unwrap_or_else(|_| http::Response::new(Vec::new()))
+}
+
+fn schedule_window_replacement<R: Runtime>(app_handle: tauri::AppHandle<R>, reload_only: bool) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let app_for_main = app_handle.clone();
+        let _ = app_handle.run_on_main_thread(move || {
+            if let Some(window) = app_for_main.get_webview_window(QUALIFICATION_WINDOW) {
+                if reload_only {
+                    let _ = window.reload();
+                } else {
+                    let _ = window.destroy();
+                    let _ = tauri::WebviewWindowBuilder::new(
+                        &app_for_main,
+                        QUALIFICATION_WINDOW,
+                        tauri::WebviewUrl::App("index.html".into()),
+                    )
+                    .title("Vision Wallet Transport Qualification - Recreated")
+                    .build();
+                }
+            }
+        });
+    });
+}
+
+fn write_remote_response(
+    mut stream: TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+fn start_remote_origin_server(selected_case: &str) -> Result<tauri::Url, &'static str> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|_| "Layer B remote-origin listener could not bind")?;
+    let address = listener
+        .local_addr()
+        .map_err(|_| "Layer B remote-origin address is unavailable")?;
+    let selected_case = serde_json::to_string(selected_case)
+        .map_err(|_| "Layer B remote-origin case could not be encoded")?;
+    let index = include_str!("assets/index.html").replace(
+        "<script src=\"harness.js\"></script>",
+        &format!(
+            "<script>Object.defineProperty(window,'__VISION_LAYER_B_CASE__',{{value:{selected_case},writable:false,configurable:false}});</script><script src=\"harness.js\"></script>"
+        ),
+    );
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = [0_u8; 2_048];
+            let Ok(read) = std::io::Read::read(&mut stream, &mut request) else {
+                continue;
+            };
+            let path = std::str::from_utf8(&request[..read])
+                .ok()
+                .and_then(|request| request.lines().next())
+                .and_then(|line| line.split_ascii_whitespace().nth(1))
+                .unwrap_or("/invalid");
+            let _ = match path {
+                "/" | "/index.html" => write_remote_response(
+                    stream,
+                    "200 OK",
+                    "text/html; charset=utf-8",
+                    index.as_bytes(),
+                ),
+                "/harness.js" => write_remote_response(
+                    stream,
+                    "200 OK",
+                    "text/javascript; charset=utf-8",
+                    include_bytes!("assets/harness.js"),
+                ),
+                "/harness.css" => write_remote_response(
+                    stream,
+                    "200 OK",
+                    "text/css; charset=utf-8",
+                    include_bytes!("assets/harness.css"),
+                ),
+                _ => write_remote_response(stream, "404 Not Found", "text/plain", b"not found"),
+            };
+        }
+    });
+    tauri::Url::parse(&format!("http://{address}/"))
+        .map_err(|_| "Layer B remote-origin URL is invalid")
+}
+
+fn control_protocol<R: Runtime>(
+    context: tauri::UriSchemeContext<'_, R>,
+    request: http::Request<Vec<u8>>,
+) -> http::Response<Vec<u8>> {
+    let state = context.app_handle().state::<QualificationState>();
+    if context.webview_label() != state.expected_report_window()
+        || request.method() != http::Method::POST
+    {
+        state.invalidate();
+        return control_response(http::StatusCode::BAD_REQUEST, "rejected");
+    }
+    match (request.uri().path(), state.selected_case.as_ref()) {
+        ("/recreate", case) if case.starts_with("window-recreated-main--") => {
+            if state.scenario_triggered.swap(true, Ordering::AcqRel) {
+                control_response(http::StatusCode::OK, "ready")
+            } else {
+                schedule_window_replacement(context.app_handle().clone(), false);
+                control_response(http::StatusCode::OK, "reloading")
+            }
+        }
+        ("/reload", case) if case.starts_with("window-reloaded-generation--") => {
+            if state.scenario_triggered.swap(true, Ordering::AcqRel) {
+                control_response(http::StatusCode::OK, "ready")
+            } else {
+                schedule_window_replacement(context.app_handle().clone(), true);
+                control_response(http::StatusCode::OK, "reloading")
+            }
+        }
+        ("/destroy-race", case) if case.starts_with("window-destruction-race--") => {
+            state.destroy_on_invoke.store(true, Ordering::Release);
+            control_response(http::StatusCode::OK, "ready")
+        }
+        ("/revocation-race", case) if case.starts_with("window-revocation-race--") => {
+            state.revoke_on_invoke.store(true, Ordering::Release);
+            control_response(http::StatusCode::OK, "ready")
+        }
+        _ => {
+            state.invalidate();
+            control_response(http::StatusCode::BAD_REQUEST, "rejected")
+        }
     }
 }
 
@@ -259,76 +931,134 @@ fn qualify(
     window: WebviewWindow,
     state: State<'_, QualificationState>,
 ) -> Result<Response, InvokeError> {
-    state.wrapper_entries.fetch_add(1, Ordering::AcqRel);
-    let metadata = body_metadata(request.body);
     let mut guard = FailClosedGuard::arm(&state);
     let attempt = catch_unwind(AssertUnwindSafe(|| {
-        if state.revoked.load(Ordering::Acquire) {
-            return Err("qualification_runtime_unavailable");
+        state.wrapper_entries.fetch_add(1, Ordering::AcqRel);
+        let panic_point = requested_panic(request.headers);
+        if panic_point == PanicPoint::Metadata {
+            panic!("injected Layer B metadata panic");
         }
-        if request.panic_requested {
+        let metadata = body_metadata(request.body);
+        let route = framework_route(request.headers, state.invoke_key());
+        if state.revoked.load(Ordering::Acquire) {
+            return Err(guarded_rejection(
+                &state,
+                expected_command,
+                route,
+                &metadata,
+                "qualification_runtime_unavailable",
+            )?);
+        }
+        if panic_point == PanicPoint::Body {
             panic!("injected Layer B qualification panic");
         }
-        let url = window.url().map_err(|_| "qualification_invalid_window")?;
-        if window.label() != QUALIFICATION_WINDOW || !is_qualification_origin(&url) {
-            return Err("qualification_invalid_window");
+        let url = window
+            .url()
+            .map_err(|_| fixed_error("qualification_invalid_window"))?;
+        let hwnd = window
+            .hwnd()
+            .map_err(|_| fixed_error("qualification_invalid_window"))?
+            .0 as isize;
+        if state.revoke_on_invoke.swap(false, Ordering::AcqRel) {
+            state.invalidate();
+        }
+        if state.destroy_on_invoke.swap(false, Ordering::AcqRel) {
+            state.invalidate();
+            let _ = window.destroy();
+        }
+        if state.revoked.load(Ordering::Acquire) {
+            return Err(guarded_rejection(
+                &state,
+                expected_command,
+                route,
+                &metadata,
+                "qualification_runtime_unavailable",
+            )?);
+        }
+        if window.label() != QUALIFICATION_WINDOW
+            || !is_qualification_origin(&url)
+            || !state.window_authority_matches(hwnd)
+        {
+            return Err(guarded_rejection(
+                &state,
+                expected_command,
+                route,
+                &metadata,
+                "qualification_invalid_window",
+            )?);
         }
         if request.declared_command != expected_command
             || request.invoked_command != expected_command
-            || request.route == "unclassified"
+            || route == FrameworkRoute::Inconclusive
             || !valid_envelope(expected_command, request.body)
         {
-            return Err("invalid_request");
+            state.invalidate();
+            if panic_point == PanicPoint::FixedError {
+                panic!("injected Layer B fixed-error panic");
+            }
+            if panic_point == PanicPoint::Observation {
+                panic!("injected Layer B observation panic");
+            }
+            return Err(guarded_rejection(
+                &state,
+                expected_command,
+                route,
+                &metadata,
+                "invalid_request",
+            )?);
+        }
+        if panic_point == PanicPoint::Response {
+            panic!("injected Layer B response panic");
         }
         let response = QualificationResponse {
             marker: "layer_b_accepted",
             command: expected_command,
-            route: request.route,
+            route: route.label(),
             body_kind: metadata.kind,
-            top_level_key_count: metadata.keys.len(),
-            top_level_keys: metadata.keys.clone(),
+            top_level_key_count: metadata.key_count,
+            top_level_shape: metadata.shape,
             wrapper_ran: true,
             command_body_ran: true,
         };
-        serialize_response(&response).map_err(|_| "qualification_response_unavailable")
+        let response = serialize_response(&response)?;
+        let observation = QualificationObservation {
+            marker: "layer_b_observation",
+            timestamp_ms: timestamp_ms(),
+            command: expected_command,
+            route: route.label(),
+            body_kind: metadata.kind,
+            top_level_key_count: metadata.key_count,
+            top_level_shape: metadata.shape,
+            result: "accepted",
+            wrapper_ran: true,
+            command_body_ran: true,
+        };
+        if panic_point == PanicPoint::Observation {
+            panic!("injected Layer B observation panic");
+        }
+        emit_observation(&observation)
+            .map_err(|_| fixed_error("qualification_runtime_unavailable"))?;
+        Ok(response)
     }));
 
     match attempt {
         Ok(Ok(response)) => {
             state.accepted.fetch_add(1, Ordering::AcqRel);
-            emit_observation(&QualificationObservation {
-                marker: "layer_b_observation",
-                timestamp_ms: timestamp_ms(),
-                command: expected_command,
-                route: request.route,
-                body_kind: metadata.kind,
-                top_level_key_count: metadata.keys.len(),
-                top_level_keys: &metadata.keys,
-                result: "accepted",
-                wrapper_ran: true,
-                command_body_ran: true,
-            });
             guard.commit();
             Ok(response)
         }
-        Ok(Err(code)) => {
+        Ok(Err(error)) => {
             state.rejected.fetch_add(1, Ordering::AcqRel);
-            guard.commit();
-            emit_observation(&QualificationObservation {
-                marker: "layer_b_observation",
-                timestamp_ms: timestamp_ms(),
-                command: expected_command,
-                route: request.route,
-                body_kind: metadata.kind,
-                top_level_key_count: metadata.keys.len(),
-                top_level_keys: &metadata.keys,
-                result: code,
-                wrapper_ran: true,
-                command_body_ran: false,
-            });
-            Err(fixed_error(code))
+            state.invalidate();
+            Err(error)
         }
-        Err(_) => Err(fixed_error("qualification_runtime_unavailable")),
+        Err(_) => {
+            state.invalidate();
+            Err(catch_unwind(AssertUnwindSafe(|| {
+                fixed_error("qualification_runtime_unavailable")
+            }))
+            .unwrap_or(InvokeError(Value::Null)))
+        }
     }
 }
 
@@ -360,16 +1090,82 @@ fn qualification_mode_requested() -> bool {
     std::env::args().any(|argument| argument == QUALIFICATION_ARGUMENT)
 }
 
+fn selected_case() -> Option<Box<str>> {
+    std::env::args()
+        .find_map(|argument| {
+            argument
+                .strip_prefix(QUALIFICATION_CASE_ARGUMENT)
+                .map(str::to_owned)
+        })
+        .filter(|case| valid_case_selector(case))
+        .map(String::into_boxed_str)
+}
+
 fn main() {
     if !qualification_mode_requested() {
         eprintln!("Layer B qualification mode was not explicitly requested");
         std::process::exit(64);
     }
+    let Some(selected_case) = selected_case() else {
+        eprintln!("One valid Layer B qualification case is required");
+        std::process::exit(64);
+    };
+    let initialization_script = format!(
+        "Object.defineProperty(window,'__VISION_LAYER_B_CASE__',{{value:{},writable:false,configurable:false}});",
+        serde_json::to_string(selected_case.as_ref()).unwrap_or_else(|_| "null".to_owned())
+    );
     std::panic::set_hook(Box::new(|_| {
         eprintln!("Layer B qualification panic was contained");
     }));
     tauri::Builder::default()
-        .manage(QualificationState::default())
+        .append_invoke_initialization_script(initialization_script)
+        .register_uri_scheme_protocol(REPORT_PROTOCOL, report_protocol)
+        .register_uri_scheme_protocol(CONTROL_PROTOCOL, control_protocol)
+        .manage(QualificationState::new(selected_case))
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                webview.state::<QualificationState>().note_page_load();
+            }
+        })
+        .setup(|app| {
+            let state = app.state::<QualificationState>();
+            state
+                .initialize_invoke_key(app.handle().invoke_key())
+                .map_err(|_| "Layer B invoke-key state was already initialized")?;
+            let main = app
+                .get_webview_window(QUALIFICATION_WINDOW)
+                .ok_or("Layer B main qualification window was not created")?;
+            state
+                .set_authorized_hwnd(
+                    main.hwnd()
+                        .map_err(|_| "Layer B main window has no native identity")?
+                        .0 as isize,
+                )
+                .map_err(|_| "Layer B native identity was already initialized")?;
+            if state.selected_case.starts_with("window-other-local--") {
+                main.destroy()
+                    .map_err(|_| "Layer B could not replace the main window")?;
+                tauri::WebviewWindowBuilder::new(
+                    app,
+                    QUALIFICATION_OTHER_WINDOW,
+                    tauri::WebviewUrl::App("index.html".into()),
+                )
+                .title("Vision Wallet Transport Qualification - Other Window")
+                .build()?;
+            } else if state.selected_case.starts_with("window-remote-origin--") {
+                let remote_url = start_remote_origin_server(&state.selected_case)?;
+                main.destroy()
+                    .map_err(|_| "Layer B could not replace the main window")?;
+                tauri::WebviewWindowBuilder::new(
+                    app,
+                    QUALIFICATION_WINDOW,
+                    tauri::WebviewUrl::External(remote_url),
+                )
+                .title("Vision Wallet Transport Qualification - Remote Origin")
+                .build()?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             wallet_get_status,
             wallet_select_recovery_destination,
@@ -433,14 +1229,174 @@ mod tests {
     }
 
     #[test]
-    fn metadata_records_names_but_never_values() {
+    fn metadata_uses_only_fixed_allowlisted_classifications() {
         let metadata = body_metadata(&json(serde_json::json!({
-            "request": { "password": "PUBLIC_CANARY_MUST_NOT_ESCAPE" },
-            "extra": "PUBLIC_CANARY_MUST_NOT_ESCAPE"
+            "PUBLIC_SECRET_KEY_NAME_CANARY": "PUBLIC_VALUE_CANARY",
+            "request": { "password": "PUBLIC_VALUE_CANARY" }
         })));
-        assert_eq!(metadata.kind, "json");
-        assert_eq!(metadata.keys, ["extra", "request"]);
-        assert!(!format!("{:?}", metadata.keys).contains("PUBLIC_CANARY"));
+        assert_eq!(metadata.kind, "json_object");
+        assert_eq!(metadata.key_count, "two_to_eight");
+        assert_eq!(metadata.shape, "unknown_or_mixed_keys");
+        let serialized = serde_json::to_string(&QualificationObservation {
+            marker: "layer_b_observation",
+            timestamp_ms: 0,
+            command: CREATE,
+            route: "custom_protocol_proven",
+            body_kind: metadata.kind,
+            top_level_key_count: metadata.key_count,
+            top_level_shape: metadata.shape,
+            result: "invalid_request",
+            wrapper_ran: true,
+            command_body_ran: false,
+        })
+        .unwrap();
+        assert!(!serialized.contains("PUBLIC_SECRET_KEY_NAME_CANARY"));
+        assert!(!serialized.contains("PUBLIC_VALUE_CANARY"));
+    }
+
+    #[test]
+    fn metadata_bounds_excessive_counts_and_oversized_keys() {
+        let mut excessive = Map::new();
+        for index in 0..=MAX_OBSERVED_TOP_LEVEL_KEYS {
+            excessive.insert(format!("field_{index}"), Value::Null);
+        }
+        let metadata = body_metadata(&json(Value::Object(excessive)));
+        assert_eq!(metadata.key_count, "over_limit");
+        assert_eq!(metadata.shape, "excessive_key_count");
+
+        let oversized = "x".repeat(65);
+        let mut object = Map::new();
+        object.insert(oversized, Value::Null);
+        let metadata = body_metadata(&json(Value::Object(object)));
+        assert_eq!(metadata.key_count, "one");
+        assert_eq!(metadata.shape, "oversized_key");
+    }
+
+    #[test]
+    fn route_is_derived_from_framework_evidence_not_caller_labels() {
+        let invoke_key = "private-framework-key";
+        let mut custom = http::HeaderMap::new();
+        custom.insert(TAURI_CALLBACK_HEADER, "1".parse().unwrap());
+        custom.insert(TAURI_ERROR_HEADER, "2".parse().unwrap());
+        custom.insert(TAURI_INVOKE_KEY_HEADER, invoke_key.parse().unwrap());
+        custom.insert(ORIGIN_HEADER, "http://tauri.localhost".parse().unwrap());
+        custom.insert(
+            "x-vision-qualification-route",
+            "caller-asserted-and-ignored".parse().unwrap(),
+        );
+        assert!(matches!(
+            framework_route(&custom, Some(invoke_key)),
+            FrameworkRoute::CustomProtocol
+        ));
+        assert!(matches!(
+            framework_route(&custom, Some("wrong-key")),
+            FrameworkRoute::Inconclusive
+        ));
+
+        let mut post_message = http::HeaderMap::new();
+        post_message.insert(
+            "x-vision-qualification-route",
+            "caller-asserted-and-ignored".parse().unwrap(),
+        );
+        assert!(matches!(
+            framework_route(&post_message, Some(invoke_key)),
+            FrameworkRoute::PostMessage
+        ));
+    }
+
+    #[test]
+    fn panic_points_are_classified_without_formatting_header_values() {
+        for (name, expected) in [
+            ("metadata", PanicPoint::Metadata),
+            ("body", PanicPoint::Body),
+            ("response", PanicPoint::Response),
+            ("fixed-error", PanicPoint::FixedError),
+            ("observation", PanicPoint::Observation),
+        ] {
+            let mut headers = http::HeaderMap::new();
+            headers.insert("x-vision-qualification-panic", name.parse().unwrap());
+            assert!(requested_panic(&headers) == expected);
+        }
+    }
+
+    #[test]
+    fn fail_closed_guard_revokes_when_rejection_is_not_committed() {
+        let state = QualificationState::new("case--official-invoke".into());
+        {
+            let _guard = FailClosedGuard::arm(&state);
+        }
+        assert!(state.revoked.load(Ordering::Acquire));
+        assert_eq!(state.invalidations.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn report_validation_rejects_canaries_and_accepts_only_the_selected_case() {
+        let selected = "exact-wallet_get_status--official-invoke";
+        let valid = BrowserObservationRequest {
+            marker: "layer_b_browser_observation".into(),
+            case: selected.into(),
+            client_api: "official-invoke".into(),
+            command: GET_STATUS.into(),
+            outcome: "layer_b_accepted".into(),
+            expected: "layer_b_accepted".into(),
+            result: "passed".into(),
+            transport_evidence: "custom_protocol_proven".into(),
+            fallback_intercepted: false,
+        };
+        assert!(validated_browser_observation(selected, &valid).is_some());
+
+        let mut canary = valid;
+        canary.case = "PASSWORD_CANARY".into();
+        assert!(validated_browser_observation(selected, &canary).is_none());
+    }
+
+    #[test]
+    fn browser_pass_requires_matching_outcome_and_proven_transport() {
+        let selected = "exact-wallet_get_status--official-invoke";
+        let mut request = BrowserObservationRequest {
+            marker: "layer_b_browser_observation".into(),
+            case: selected.into(),
+            client_api: "official-invoke".into(),
+            command: GET_STATUS.into(),
+            outcome: "invalid_request".into(),
+            expected: "layer_b_accepted".into(),
+            result: "passed".into(),
+            transport_evidence: "custom_protocol_proven".into(),
+            fallback_intercepted: false,
+        };
+        assert!(validated_browser_observation(selected, &request).is_none());
+        request.outcome = "layer_b_accepted".into();
+        request.transport_evidence = "transport_route_inconclusive".into();
+        assert!(validated_browser_observation(selected, &request).is_none());
+    }
+
+    #[test]
+    fn forced_fallback_requires_both_interception_and_native_post_message_proof() {
+        let selected = "forced-post-message-fallback--internals-post-message";
+        let mut request = BrowserObservationRequest {
+            marker: "layer_b_browser_observation".into(),
+            case: selected.into(),
+            client_api: "internals-post-message".into(),
+            command: GET_STATUS.into(),
+            outcome: "layer_b_accepted".into(),
+            expected: "layer_b_accepted".into(),
+            result: "passed".into(),
+            transport_evidence: "post_message_proven".into(),
+            fallback_intercepted: false,
+        };
+        assert!(validated_browser_observation(selected, &request).is_none());
+        request.fallback_intercepted = true;
+        assert!(validated_browser_observation(selected, &request).is_some());
+    }
+
+    #[test]
+    fn case_selection_is_bounded_and_requires_an_explicit_transport() {
+        assert!(valid_case_selector(
+            "exact-wallet_get_status--official-invoke"
+        ));
+        assert!(!valid_case_selector("exact-wallet_get_status"));
+        assert!(!valid_case_selector("secret=canary--official-invoke"));
+        assert!(!valid_case_selector("password-canary--official-invoke"));
     }
 
     #[test]

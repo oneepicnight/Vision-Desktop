@@ -12,26 +12,59 @@
   ]
   const HANDLE = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
   const PUBLIC_CANARY = 'PUBLIC_LAYER_B_CANARY'
+  const selectedCase = window.__VISION_LAYER_B_CASE__
+  const nativeFetch = window.fetch.bind(window)
   const output = document.getElementById('output')
   const status = document.getElementById('status')
   const runButton = document.getElementById('run')
   let sequence = 0
+  let transcriptChain = Promise.resolve()
 
   function write(record) {
     const line = JSON.stringify(record)
     console.log(`LAYER_B_CASE ${line}`)
     output.textContent += `${line}\n`
     output.scrollTop = output.scrollHeight
+    const caseSelector = record.caseSelector || `${record.id}--${record.route}`
+    const body = {
+      marker: 'layer_b_browser_observation',
+      case: caseSelector,
+      client_api: record.route || 'matrix-controller',
+      command: record.command || 'matrix',
+      outcome: record.outcome,
+      expected: record.expected,
+      result: record.inconclusive ? 'inconclusive' : (record.passed ? 'passed' : 'failed'),
+      transport_evidence: record.transportEvidence || 'not_applicable',
+      fallback_intercepted: record.fallbackIntercepted === true
+    }
+    transcriptChain = transcriptChain.then(async () => {
+      const url = window.__TAURI_INTERNALS__?.convertFileSrc
+        ? window.__TAURI_INTERNALS__.convertFileSrc('observation', 'qualification-report')
+        : 'http://qualification-report.localhost/observation'
+      const response = await nativeFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+      if (!response.ok) throw new Error('qualification transcript rejected')
+    })
   }
 
-  function routeHeaders(route, panic = false) {
-    const headers = { 'x-vision-qualification-route': route }
-    if (panic) headers['x-vision-qualification-panic'] = 'body'
+  function routeHeaders(_route, panic = false) {
+    const headers = {}
+    if (typeof panic === 'string') headers['x-vision-qualification-panic'] = panic
+    else if (panic) headers['x-vision-qualification-panic'] = 'body'
     return headers
   }
 
   function fixedOutcome(value, accepted) {
-    if (accepted && value && value.marker === 'layer_b_accepted') return 'layer_b_accepted'
+    if (accepted && value && value.marker === 'layer_b_accepted') {
+      const allowedRoutes = new Set(['custom_protocol_proven', 'post_message_proven'])
+      return {
+        outcome: 'layer_b_accepted',
+        transportEvidence: allowedRoutes.has(value.route) ? value.route : 'transport_route_inconclusive'
+      }
+    }
     if (!accepted && value && typeof value === 'object' && typeof value.code === 'string') {
       const allowed = new Set([
         'invalid_request',
@@ -39,9 +72,15 @@
         'qualification_response_unavailable',
         'qualification_runtime_unavailable'
       ])
-      return allowed.has(value.code) ? value.code : 'unclassified_error'
+      return {
+        outcome: allowed.has(value.code) ? value.code : 'unclassified_error',
+        transportEvidence: 'not_applicable'
+      }
     }
-    return accepted ? 'unexpected_success_shape' : 'framework_error_redacted'
+    return {
+      outcome: accepted ? 'unexpected_success_shape' : 'framework_error_redacted',
+      transportEvidence: 'not_applicable'
+    }
   }
 
   function lowLevel(route, method, command, payload, panic = false) {
@@ -78,20 +117,90 @@
     }
   }
 
-  async function runCase(id, route, command, payload, expected, panic = false) {
-    sequence += 1
+  function isSelected(id, route) {
+    return selectedCase === `${id}--${route}`
+  }
+
+  async function postRevocationProof(caseSelector) {
     try {
-      const value = await transport(route, command, payload, panic)
-      const outcome = fixedOutcome(value, true)
-      const passed = outcome === expected
-      write({ sequence, id, route, command, outcome, expected, passed })
+      const value = await transport('internals-post-message', 'wallet_get_status', {})
+      const observed = fixedOutcome(value, true)
+      const passed = false
+      write({
+        sequence: ++sequence,
+        id: `${caseSelector}-post-revocation-proof`,
+        caseSelector: `${caseSelector}-post-revocation-proof`,
+        route: 'internals-post-message',
+        command: 'wallet_get_status',
+        outcome: observed.outcome,
+        expected: 'qualification_runtime_unavailable',
+        transportEvidence: observed.transportEvidence,
+        passed
+      })
       return passed
     } catch (error) {
-      const outcome = fixedOutcome(error, false)
-      const passed = outcome === expected
-      write({ sequence, id, route, command, outcome, expected, passed })
+      const observed = fixedOutcome(error, false)
+      const passed = observed.outcome === 'qualification_runtime_unavailable'
+      write({
+        sequence: ++sequence,
+        id: `${caseSelector}-post-revocation-proof`,
+        caseSelector: `${caseSelector}-post-revocation-proof`,
+        route: 'internals-post-message',
+        command: 'wallet_get_status',
+        outcome: observed.outcome,
+        expected: 'qualification_runtime_unavailable',
+        transportEvidence: observed.transportEvidence,
+        passed
+      })
       return passed
     }
+  }
+
+  async function runCase(id, route, command, payload, expected, panic = false, evidence = {}) {
+    if (!isSelected(id, route)) return null
+    sequence += 1
+    const caseSelector = `${id}--${route}`
+    let primaryPassed
+    try {
+      const value = await transport(route, command, payload, panic)
+      const observed = fixedOutcome(value, true)
+      primaryPassed = observed.outcome === expected
+      if (evidence.requirePostMessage === true) {
+        primaryPassed = primaryPassed && observed.transportEvidence === 'post_message_proven'
+      }
+      if (evidence.requireFallbackInterception === true) {
+        primaryPassed = primaryPassed && evidence.fallbackIntercepted() === true
+      }
+      write({
+        sequence,
+        id,
+        route,
+        command,
+        outcome: observed.outcome,
+        expected,
+        transportEvidence: observed.transportEvidence,
+        fallbackIntercepted: evidence.fallbackIntercepted?.() === true,
+        passed: primaryPassed
+      })
+    } catch (error) {
+      const observed = fixedOutcome(error, false)
+      primaryPassed = observed.outcome === expected
+      write({
+        sequence,
+        id,
+        route,
+        command,
+        outcome: observed.outcome,
+        expected,
+        transportEvidence: observed.transportEvidence,
+        fallbackIntercepted: evidence.fallbackIntercepted?.() === true,
+        passed: primaryPassed
+      })
+    }
+    if (['invalid_request', 'qualification_invalid_window', 'qualification_response_unavailable', 'qualification_runtime_unavailable'].includes(expected)) {
+      return (await postRevocationProof(caseSelector)) && primaryPassed
+    }
+    return primaryPassed
   }
 
   function exactPayload(command) {
@@ -141,13 +250,13 @@
   ]
 
   async function directFetchProbe(kind, body, contentType) {
+    if (!isSelected(`${kind}-missing-invoke-key`, kind)) return null
     const command = 'wallet_create'
     const url = window.__TAURI_INTERNALS__.convertFileSrc(command, 'ipc')
     const headers = {
       'Content-Type': contentType,
       'Tauri-Callback': '1000001',
-      'Tauri-Error': '1000002',
-      'x-vision-qualification-route': kind
+      'Tauri-Error': '1000002'
     }
     try {
       const response = await fetch(url, { method: 'POST', headers, body })
@@ -176,6 +285,7 @@
   }
 
   function directXhrProbe(body) {
+    if (!isSelected('direct-xhr-missing-invoke-key', 'direct-xhr')) return Promise.resolve(null)
     return new Promise((resolve) => {
       const command = 'wallet_create'
       const xhr = new XMLHttpRequest()
@@ -183,7 +293,6 @@
       xhr.setRequestHeader('Content-Type', 'application/json')
       xhr.setRequestHeader('Tauri-Callback', '1000003')
       xhr.setRequestHeader('Tauri-Error', '1000004')
-      xhr.setRequestHeader('x-vision-qualification-route', 'direct-xhr')
       xhr.onloadend = () => {
         const passed = xhr.status < 200 || xhr.status >= 300
         write({
@@ -214,6 +323,7 @@
   }
 
   async function forcePostMessageFallback() {
+    if (!isSelected('forced-post-message-fallback', 'internals-post-message')) return null
     const originalFetch = window.fetch
     let intercepted = false
     window.fetch = (...args) => {
@@ -230,11 +340,57 @@
         'internals-post-message',
         'wallet_get_status',
         {},
-        'layer_b_accepted'
+        'layer_b_accepted',
+        false,
+        {
+          requirePostMessage: true,
+          requireFallbackInterception: true,
+          fallbackIntercepted: () => intercepted
+        }
       )
     } finally {
       window.fetch = originalFetch
     }
+  }
+
+  async function controlScenario(id, path, expected) {
+    if (!isSelected(id, 'official-invoke')) return null
+    if (path) {
+      const url = window.__TAURI_INTERNALS__.convertFileSrc(path, 'qualification-control')
+      const response = await nativeFetch(url, { method: 'POST' })
+      if (!response.ok) {
+        write({
+          sequence: ++sequence,
+          id,
+          route: 'official-invoke',
+          command: 'wallet_get_status',
+          outcome: 'case_not_observed',
+          expected,
+          passed: false,
+          inconclusive: true
+        })
+        return false
+      }
+      const control = await response.json()
+      if (control.phase === 'reloading') {
+        status.textContent = 'Waiting for the replacement window generation'
+        return new Promise(() => {})
+      }
+      if (control.phase !== 'ready') {
+        write({
+          sequence: ++sequence,
+          id,
+          route: 'official-invoke',
+          command: 'wallet_get_status',
+          outcome: 'case_not_observed',
+          expected,
+          passed: false,
+          inconclusive: true
+        })
+        return false
+      }
+    }
+    return runCase(id, 'official-invoke', 'wallet_get_status', {}, expected)
   }
 
   async function runMatrix() {
@@ -243,6 +399,13 @@
     output.textContent = ''
     sequence = 0
     const results = []
+
+    results.push(await controlScenario('window-other-local', null, 'qualification_invalid_window'))
+    results.push(await controlScenario('window-remote-origin', null, 'qualification_invalid_window'))
+    results.push(await controlScenario('window-recreated-main', 'recreate', 'qualification_invalid_window'))
+    results.push(await controlScenario('window-reloaded-generation', 'reload', 'qualification_invalid_window'))
+    results.push(await controlScenario('window-destruction-race', 'destroy-race', 'qualification_runtime_unavailable'))
+    results.push(await controlScenario('window-revocation-race', 'revocation-race', 'qualification_runtime_unavailable'))
 
     for (const command of COMMANDS) {
       results.push(await runCase(`exact-${command}`, 'official-invoke', command, exactPayload(command), 'layer_b_accepted'))
@@ -269,7 +432,10 @@
       ['json-array', []],
       ['extra-top-level', { extra: true }],
       ['wrong-case-top-level', { Request: {} }],
-      ['secret-like-top-level', { password: PUBLIC_CANARY }]
+      ['secret-like-top-level', { password: PUBLIC_CANARY }],
+      ['key-name-canary-top-level', { PUBLIC_SECRET_KEY_NAME_CANARY: PUBLIC_CANARY }],
+      ['oversized-key-top-level', { ['k'.repeat(65)]: PUBLIC_CANARY }],
+      ['excessive-key-count-top-level', Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`field_${index}`, null]))]
     ]) {
       results.push(await runCase(id, 'official-invoke', 'wallet_get_status', payload, 'invalid_request'))
     }
@@ -325,26 +491,43 @@
     results.push(await directXhrProbe(duplicateFamilies[0][1]))
     results.push(await forcePostMessageFallback())
 
+    for (const panicPoint of ['metadata', 'body', 'response', 'observation']) {
+      results.push(await runCase(
+        `contained-${panicPoint}-panic`,
+        'internals-post-message',
+        'wallet_get_status',
+        {},
+        'qualification_runtime_unavailable',
+        panicPoint
+      ))
+    }
     results.push(await runCase(
-      'contained-panic',
+      'contained-fixed-error-panic',
       'internals-post-message',
       'wallet_get_status',
-      {},
+      { extra: true },
       'qualification_runtime_unavailable',
-      true
+      'fixed-error'
     ))
-    results.push(await runCase(
-      'post-revocation',
-      'internals-post-message',
-      'wallet_get_status',
-      {},
-      'qualification_runtime_unavailable'
-    ))
-
-    const passed = results.filter(Boolean).length
-    const failed = results.length - passed
-    write({ marker: 'layer_b_matrix_complete', total: results.length, passed, failed })
-    status.textContent = failed === 0 ? `Harness matrix complete: ${passed} passed` : `Harness matrix failed: ${failed} cases`
+    const executed = results.filter((result) => result !== null)
+    const passed = executed.filter(Boolean).length
+    const failed = executed.length - passed
+    const inconclusive = executed.length !== 1
+    write({
+      marker: 'layer_b_matrix_complete',
+      caseSelector: selectedCase,
+      id: selectedCase,
+      route: 'matrix-controller',
+      command: 'matrix',
+      outcome: inconclusive ? 'matrix_inconclusive' : 'matrix_complete',
+      expected: 'matrix_complete',
+      passed: !inconclusive && failed === 0,
+      inconclusive
+    })
+    await transcriptChain
+    status.textContent = inconclusive
+      ? 'Harness case inconclusive: selected case was not observed exactly once'
+      : (failed === 0 ? 'Harness case passed' : 'Harness case failed')
     runButton.disabled = false
   }
 
@@ -367,4 +550,26 @@
       runButton.disabled = false
     })
   })
+
+  if (typeof selectedCase !== 'string' || selectedCase.length === 0) {
+    status.textContent = 'No sanctioned case selected'
+    runButton.disabled = true
+  } else {
+    setTimeout(() => {
+      runMatrix().catch(() => {
+        write({
+          marker: 'layer_b_matrix_aborted',
+          caseSelector: selectedCase,
+          id: selectedCase,
+          route: 'matrix-controller',
+          command: 'matrix',
+          outcome: 'case_not_observed',
+          expected: 'matrix_complete',
+          passed: false,
+          inconclusive: true
+        })
+        status.textContent = 'Harness case aborted and is inconclusive'
+      })
+    }, 0)
+  }
 })()

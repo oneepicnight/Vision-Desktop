@@ -22,9 +22,15 @@
         {
           "identifier": "wallet-layer-b-qualification",
           "description": "Test-only access to seven non-custody transport classifiers.",
-          "windows": ["wallet-transport-qualification"],
+          "windows": [
+            "wallet-transport-qualification",
+            "wallet-transport-qualification-other"
+          ],
           "platforms": ["windows"],
           "local": true,
+          "remote": {
+            "urls": ["http://127.0.0.1:*/*"]
+          },
           "permissions": [
             "allow-wallet-get-status",
             "allow-wallet-select-recovery-destination",
@@ -36,7 +42,7 @@
           ]
         }
       ],
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'none'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://qualification-report.localhost http://qualification-control.localhost; img-src 'none'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {

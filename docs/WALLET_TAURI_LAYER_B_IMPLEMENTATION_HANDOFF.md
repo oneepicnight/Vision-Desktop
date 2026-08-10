@@ -1,68 +1,123 @@
-# Wallet Tauri Layer B Implementation Handoff
+# Wallet Tauri Layer B Corrective Implementation Handoff
 
 Date: 2026-08-09
+
 Workstation: Vision Desktop ASUS Windows workstation
+
 Branch: `fix/wallet-signing-adversarial-matrix`
-Approved Layer A parent: `9a4af4d1f30374a2743082e350fbcc2fb26b6f50`
-Approved Layer A tree: `107aaf7a4c896874bdef8f855c36778b7e06b379`
-Approved Layer A handoff SHA-256: `EC017A3BD1ACF63D42F37AA584249DBC148752FCB416C4071071E665DC0613E9`
+
+Rejected Layer B commit: `7e5791e43c7f836e8e47b12aef71c6adc7c99036`
+
+Rejected Layer B tree: `a73d856794b04f5f5209da7d1ff8e75fa324bbf3`
 
 ## Result
 
-The standalone Layer B Windows Tauri/Wry/WebView2 transport harness is implemented and ready for
-independent source review.
+The four findings from the independent Layer B review have been addressed in the standalone,
+non-custody harness source and source-only tests.
 
-The complete packaged qualification matrix has not been run. This implementation does not claim a
-Passed result. Production `duplicate_key_rejection_proven` remains `false`, and all wallet command,
-permission, frontend, activation, signing, and submission surfaces remain closed.
+The harness and packaged qualification matrix were not launched. This corrective implementation
+does not claim a Passed result. Production `duplicate_key_rejection_proven` remains `false`, and
+all production wallet command, permission, frontend, activation, signing, and submission surfaces
+remain closed.
 
-## Isolation model
+## Isolation remains unchanged
 
-The harness is an opt-in Cargo binary:
+The harness remains an opt-in Cargo binary named:
 
 `vision-wallet-transport-qualification`
 
-It compiles only with:
+It compiles only with `wallet-layer-b-qualification`, requires the explicit
+`--wallet-layer-b-qualification` launch argument, and now additionally requires exactly one
+bounded `--wallet-layer-b-case=<case>--<transport>` selector.
 
-`wallet-layer-b-qualification`
+It has a distinct application identifier, data directory, configuration, capability, executable,
+window labels, CSP, embedded assets, and disabled bundle. It does not import the Vision Desktop
+library or contain custody, vault, recovery, Core, seed, signing, submission, or product
+`AppManifest` authority.
 
-It also refuses startup unless the operator supplies:
+## M-01 correction: guarded and redacted metadata
 
-`--wallet-layer-b-qualification`
+The fail-closed guard is armed before any request metadata classification or allocation performed
+by the classifier.
 
-The harness has its own:
+Attacker-controlled key names are no longer cloned, sorted, returned, or printed. Metadata is
+reduced to fixed allowlisted values only:
 
-- application identifier: `com.vision.desktop.wallet-transport-qualification`;
-- executable name: `vision-wallet-transport-qualification`;
-- window label: `wallet-transport-qualification`;
-- inline test-only capability: `wallet-layer-b-qualification`;
-- embedded static assets;
-- CSP; and
-- Tauri configuration with bundling disabled.
+- raw, JSON object, or non-object JSON;
+- zero, one, two-to-eight, over-limit, or not-applicable key-count bucket; and
+- empty object, exact `request` key, unknown/mixed keys, oversized key, excessive key count, raw
+  body, or non-object shape.
 
-The product `tauri.conf.json`, product capabilities, production invoke table, React application,
-and package scripts do not select this binary or configuration.
+Response creation, fixed-error creation, observation serialization, and stdout emission execute
+inside fail-closed panic containment. Output failures revoke authority. Source-only regressions
+cover a key-name canary, value canary, excessive key count, oversized keys, and fixed
+classification. The isolated browser matrix includes metadata, response, observation, body, and
+fixed-error panic cases.
 
-## No-custody boundary
+## M-02 correction: linear per-process authority
 
-The binary does not import or link the Vision Desktop library and contains no:
+Ordinary classifier rejection no longer commits the guard. The runtime is explicitly invalidated
+before a fixed rejection is serialized, observed, or returned. Guard drop provides an additional
+idempotent invalidation path.
 
-- `WalletRuntimeState`;
-- lifecycle adapters;
-- wallet vault or recovery implementation;
-- recovery or journal filesystem path;
-- Core client;
-- secret input or seed type;
-- signing or signed artifact;
-- transaction submission path; or
-- product AppManifest authority.
+Every malformed or fail-closed case performs a same-process post-revocation probe. A later exact
+invoke must return `qualification_runtime_unavailable`; stale success fails the case.
 
-Its state contains only atomic counters and a revoked marker. Payload values are never written to
-stdout or returned as observations. The static page uses deterministic public canaries only.
+The checked-in runner launches every selected case in a new independently identified process,
+with separate stdout, stderr, exit code, start/end times, time limit, classification, and SHA-256
+records. A timeout is Inconclusive, never Passed. Existing evidence directories are never
+overwritten.
 
-## Generated wrappers
+The runner was added for later independently authorized qualification only. It was not executed in
+this tranche.
 
-The binary declares exactly seven harness-only generated wrappers:
+## M-03 correction: framework-derived transport evidence
+
+Caller-supplied route labels are no longer authoritative in Rust.
+
+The classifier retains Tauri's private invoke key in non-formatting harness state and derives
+transport evidence from the actual framework request:
+
+- a custom-protocol request requires the exact private invoke-key header plus the framework
+  callback, error, and origin headers;
+- a postMessage request requires absence of the custom-protocol framework header set; and
+- any mixed, spoofed, missing-key, or otherwise unprovable shape is
+  `transport_route_inconclusive` and cannot be accepted.
+
+The browser transcript describes the JavaScript API exercised as a client-side case attribute; it
+is not reused as native transport proof. The forced-fallback case must independently establish both
+that the custom-protocol fetch was intercepted and that Rust observed `post_message_proven`.
+
+## M-04 correction: executable scenarios and primary transcript
+
+The harness now implements deterministic cases for:
+
+- the authorized local main window;
+- another local window label;
+- a separately served literal-loopback remote origin;
+- destruction and recreation of the main window with a new native identity;
+- reload/navigation generation change;
+- an invoke racing window destruction; and
+- an invoke racing lifecycle-style authority revocation.
+
+Native authority binds the original HWND and first page generation. Recreated windows and later
+page generations cannot silently inherit it. Qualification-only control and reporting protocols
+are separate from the seven generated wallet-shaped wrappers and contain no custody action.
+
+Every browser-only result is sent to the native reporting protocol and written to process stdout
+using a bounded, deny-unknown-fields request and fixed allowlisted values. The selected native case
+must match the reported case. Arbitrary values, field names, case identifiers, commands, outcomes,
+or transport labels are not emitted.
+
+The per-process runner preserves complete stdout and stderr transcripts, exit codes, timestamps,
+case classifications, and transcript hashes. Missing, aborted, timed-out, rejected, or multiply
+observed cases are Failed or Inconclusive, never Passed. A destruction scenario whose response
+cannot be observed after the target WebView is destroyed therefore fails closed as Inconclusive
+rather than being counted as success.
+
+## Generated-wrapper and payload coverage
+
+The harness still declares exactly seven feature-gated generated Tauri wrappers:
 
 - `wallet_get_status`;
 - `wallet_select_recovery_destination`;
@@ -72,167 +127,56 @@ The binary declares exactly seven harness-only generated wrappers:
 - `wallet_unlock`; and
 - `wallet_lock`.
 
-Each accepts a harness-local whole-message `CommandArg`, the actual invoking Tauri window, and the
-non-custody qualification state. The argument borrows the invoked command and complete
-`InvokeBody`. Parsing, fixed response creation, and panic containment occur inside the guarded
-classifier.
+The isolated process list covers their exact shapes, raw values, JSON primitives and collections,
+missing/extra/wrong-case/secret-like fields, bounded and oversized metadata, malformed nested
+requests, unknown commands, concurrency, direct fetch/XHR, forced postMessage fallback, panic
+points, top-level duplicate families, and nested duplicate families.
 
-The classifier enforces exact empty objects for the five no-input shapes and the reviewed bounded
-public request structure for create and restore. It never invokes the private wallet lifecycle
-boundary.
+Duplicate textual payloads are still attempted as strings, UTF-8 bytes, and normalized JavaScript
+objects. Normalized object acceptance is recorded as unsafe evidence, not proof that textual
+duplicates were rejected. The production duplicate-key blocker remains false.
 
-## Real WebView routes implemented
+## Source-only validation performed
 
-The embedded page exercises:
+The following checks passed without starting the harness:
 
-1. the official global Tauri `core.invoke` API;
-2. `window.__TAURI_INTERNALS__.invoke`;
-3. `window.__TAURI_INTERNALS__.ipc`;
-4. `window.__TAURI_INTERNALS__.postMessage`;
-5. a forced custom-protocol failure followed by Tauri's WebView2 `window.ipc.postMessage` fallback;
-6. direct custom-protocol `fetch` without the private invoke key; and
-7. direct custom-protocol XHR without the private invoke key.
-
-The official and internal routes use the exact pinned Tauri initialization code embedded by the
-real Windows runtime. Direct fetch/XHR probes deliberately lack the closure-held invoke key and must
-be rejected before the classifier runs.
-
-## Payload matrix implemented
-
-The browser matrix includes:
-
-- exact accepted envelopes for all seven wrappers;
-- raw empty, JSON-looking, arbitrary string, and UTF-8 byte bodies;
-- JSON null, boolean, number, string, array, and object bodies;
-- missing, extra, wrong-case, and secret-like top-level fields;
-- missing, malformed, unknown, oversized, wrong-case, and secret-like nested public fields;
-- invalid recovery-selection handles;
-- an unknown command;
-- concurrent invokes;
-- injected guarded panic and post-revocation invocation; and
-- duplicate textual-key families at the top-level envelope and inside the nested public request.
-
-The duplicate families include:
-
-- identical values;
-- conflicting values;
-- valid then malformed;
-- malformed then valid;
-- public then secret-like;
-- exact-case plus wrong-case;
-- three repeated keys;
-- escaped equivalent spellings; and
-- large bounded separating whitespace.
-
-Each family is attempted as a JavaScript string, UTF-8 bytes, and an explicitly normalized
-JavaScript object where supported. The first two must remain raw and be rejected. The normalized
-object outcome is recorded rather than treated as proof of textual duplicate rejection.
-
-The complete window/origin/generation operator matrix remains part of the packaged evidence run and
-must be confirmed during independent harness review before execution.
-
-## Instrumentation boundary
-
-Rust stdout observations contain only:
-
-- a fixed marker;
-- a millisecond timestamp;
-- command name;
-- allowlisted transport route;
-- JSON-versus-raw classification;
-- sorted top-level key names and key count;
-- a fixed acceptance or rejection code; and
-- whether the generated wrapper and guarded body ran.
-
-The browser transcript contains only case identifiers, routes, command names, fixed outcomes,
-expectations, and pass/fail booleans. Arbitrary framework errors are reduced to
-`framework_error_redacted`; request values are never formatted.
-
-## Build and execution boundary
-
-Source-review compile command:
-
-```powershell
-cargo check --manifest-path src-tauri/Cargo.toml --features wallet-layer-b-qualification --bin vision-wallet-transport-qualification
-```
-
-The sanctioned harness must later be built from the exact independently approved commit and run
-with the explicit argument. Running it before that review is outside this tranche.
-
-Normal `cargo build`, the production Tauri build, and installer packaging do not enable the marker
-feature. The harness config also sets `bundle.active` to `false`.
-
-`build.rs` reads the seven explicit harness permissions from the isolated qualification directory
-only while the Layer B feature is enabled. The normal AppManifest remains the original nineteen
-production node-manager commands, and a Layer B compile does not generate wallet permissions in the
-product permission tree. The existing Common Controls test manifest remains Layer A-only; Layer B
-uses solely the resource generated from its own Tauri configuration.
-
-## Static release closure
-
-The Tauri authority test verifies:
-
-- the feature-gated binary declaration;
-- the exact seven generated wrapper invocations;
-- explicit startup-mode enforcement;
-- real whole-body and generated-handler use;
-- absence of wallet, Core, signing, and submission authority types;
-- distinct harness identifier, window, capability, and disabled bundle;
-- absence of Layer B selectors from the product Tauri configuration;
-- inclusion of official, internal, fallback, direct-fetch/XHR, and duplicate test routes; and
-- continued production duplicate-key blocking.
-
-Optimized production build and marker-scan evidence must be regenerated after this implementation
-and preserved with the later qualification evidence.
-
-## Validation
-
-Passed without launching the harness or running the physical qualification matrix:
-
-- Layer B pure classifier tests: 5 passed, 0 failed;
-- complete Rust suite: 293 passed, 0 failed, 4 operator-only ignored;
-- Tauri authority tests: 7 passed, 0 failed;
-- WebView isolation tests: 2 passed, 0 failed;
-- strict Clippy for the opt-in Layer B binary;
-- ordinary strict Clippy for all production targets;
-- Rust formatting check;
-- Layer B JavaScript syntax check;
-- frontend TypeScript typecheck;
-- frontend state tests;
-- optimized frontend build;
-- locked Layer B binary build;
+- Layer B Rust unit tests: 13 passed;
+- complete Rust baseline: 293 passed, 4 operator-only ignored;
+- Tauri authority tests: 7 passed;
+- WebView isolation tests: 2 passed;
+- strict production and Layer B Clippy;
+- Rust formatting;
+- JavaScript and PowerShell syntax validation;
+- frontend typecheck, state tests, and optimized build;
+- locked optimized Layer B linkage build;
 - locked optimized production Rust build;
-- production executable Layer B marker scan: no matches;
-- Git whitespace check; and
-- no `Cargo.lock` change.
+- production executable Layer B marker scan; and
+- Git whitespace validation.
 
-The harness executable was built for source and linkage verification only. It was not started.
+The packaged harness and physical matrix remain prohibited until independent review of the exact
+corrective commit and tree authorizes execution.
 
-## Files in this tranche
+## Corrective files
 
 - `docs/WALLET_TAURI_LAYER_B_IMPLEMENTATION_HANDOFF.md`
-- `src-tauri/Cargo.toml`
-- `src-tauri/build.rs`
 - `src-tauri/qualification/wallet-layer-b/main.rs`
 - `src-tauri/qualification/wallet-layer-b/tauri.conf.json`
 - `src-tauri/qualification/wallet-layer-b/assets/index.html`
-- `src-tauri/qualification/wallet-layer-b/assets/harness.css`
 - `src-tauri/qualification/wallet-layer-b/assets/harness.js`
-- `src-tauri/qualification/wallet-layer-b/permissions/wallet-layer-b.toml`
+- `src-tauri/qualification/wallet-layer-b/run-layer-b-qualification.ps1`
 - `src-tauri/tests/tauri_acl.rs`
 
-`Cargo.lock` and application dependencies are unchanged.
+No dependency or lockfile change is required.
 
 ## Prohibited and unchanged
 
-This implementation does not authorize or add:
+This correction does not authorize or add:
 
 - a transport Passed verdict;
 - product wallet command registration;
-- product AppManifest, permission, or capability changes;
-- React invokes, forms, or custody state;
-- a production constructor that can set duplicate-key proof to true;
-- approval-flag changes;
+- product permissions, capabilities, or invoke entries;
+- React wallet invokes, forms, or custody state;
+- production activation or any approval-flag change;
 - signing or submission exposure;
 - recovery export;
 - Core-manifest relaxation; or
@@ -240,6 +184,7 @@ This implementation does not authorize or add:
 
 ## Required next action
 
-Validate the source-only harness and static release closure, commit the implementation separately,
-and submit the exact commit and tree for independent Layer B implementation review. Do not run or
-claim the complete packaged qualification matrix until that exact implementation is approved.
+Complete the source-only validation gate, inspect the exact diff, commit and push the isolated
+correction, and submit that exact commit and tree for independent Layer B implementation review.
+Do not launch the harness or run the qualification runner unless that exact implementation is
+approved for execution.

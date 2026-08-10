@@ -301,6 +301,7 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let layer_b_permissions = read("qualification/wallet-layer-b/permissions/wallet-layer-b.toml");
     let layer_b_page = read("qualification/wallet-layer-b/assets/index.html");
     let layer_b_script = read("qualification/wallet-layer-b/assets/harness.js");
+    let layer_b_runner = read("qualification/wallet-layer-b/run-layer-b-qualification.ps1");
     let product_config = read("tauri.conf.json");
     let cargo_manifest = read("Cargo.toml");
     let build_source = read("build.rs");
@@ -481,6 +482,20 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(layer_b_source.contains("QUALIFICATION_HOST"));
     assert!(layer_b_source.contains("InvokeBody::Raw"));
     assert!(layer_b_source.contains("FailClosedGuard"));
+    assert!(layer_b_source.contains("framework_route(request.headers, state.invoke_key())"));
+    assert!(layer_b_source.contains("custom_protocol_proven"));
+    assert!(layer_b_source.contains("post_message_proven"));
+    assert!(layer_b_source.contains("transport_route_inconclusive"));
+    assert!(layer_b_source.contains("REPORT_PROTOCOL"));
+    assert!(layer_b_source.contains("CONTROL_PROTOCOL"));
+    assert!(layer_b_source.contains("window_authority_matches"));
+    assert!(layer_b_source.contains("window-recreated-main--"));
+    assert!(layer_b_source.contains("window-reloaded-generation--"));
+    assert!(layer_b_source.contains("window-destruction-race--"));
+    assert!(layer_b_source.contains("window-revocation-race--"));
+    assert!(!layer_b_source.contains("top_level_keys"));
+    assert!(!layer_b_source.contains("keys: Vec<String>"));
+    assert_eq!(layer_b_source.match_indices("guard.commit()").count(), 2);
     for forbidden in [
         "vision_desktop_lib",
         "WalletRuntimeState",
@@ -528,6 +543,17 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(layer_b_script.contains("duplicateFamilies"));
     assert!(layer_b_script.contains("nestedDuplicateFamilies"));
     assert!(layer_b_script.contains("PUBLIC_LAYER_B_CANARY"));
+    assert!(layer_b_script.contains("PUBLIC_SECRET_KEY_NAME_CANARY"));
+    assert!(layer_b_script.contains("postRevocationProof"));
+    assert!(layer_b_script.contains("qualification-report"));
+    assert!(layer_b_script.contains("qualification-control"));
+    assert!(layer_b_script.contains("fallbackIntercepted"));
+    assert!(layer_b_script.contains("matrix_inconclusive"));
+    assert!(layer_b_runner.contains("Start-Process"));
+    assert!(layer_b_runner.contains("--wallet-layer-b-case=$case"));
+    assert!(layer_b_runner.contains("stdout_sha256"));
+    assert!(layer_b_runner.contains("stderr_sha256"));
+    assert!(layer_b_runner.contains("'Inconclusive'"));
     assert!(!layer_b_script.contains("seed phrase"));
     assert!(!layer_b_script.contains("private key"));
     assert!(build_source.contains("cargo:rustc-link-arg=/MANIFESTINPUT:"));

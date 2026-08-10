@@ -70,7 +70,8 @@
         'invalid_request',
         'qualification_invalid_window',
         'qualification_response_unavailable',
-        'qualification_runtime_unavailable'
+        'qualification_runtime_unavailable',
+        'qualification_transport_inconclusive'
       ])
       return {
         outcome: allowed.has(value.code) ? value.code : 'unclassified_error',
@@ -161,9 +162,11 @@
     sequence += 1
     const caseSelector = `${id}--${route}`
     let primaryPassed
+    let primaryInconclusive
     try {
       const value = await transport(route, command, payload, panic)
       const observed = fixedOutcome(value, true)
+      primaryInconclusive = observed.outcome === 'qualification_transport_inconclusive'
       primaryPassed = observed.outcome === expected
       if (evidence.requirePostMessage === true) {
         primaryPassed = primaryPassed && observed.transportEvidence === 'post_message_proven'
@@ -180,10 +183,12 @@
         expected,
         transportEvidence: observed.transportEvidence,
         fallbackIntercepted: evidence.fallbackIntercepted?.() === true,
-        passed: primaryPassed
+        passed: primaryPassed,
+        inconclusive: primaryInconclusive
       })
     } catch (error) {
       const observed = fixedOutcome(error, false)
+      primaryInconclusive = observed.outcome === 'qualification_transport_inconclusive'
       primaryPassed = observed.outcome === expected
       write({
         sequence,
@@ -194,13 +199,54 @@
         expected,
         transportEvidence: observed.transportEvidence,
         fallbackIntercepted: evidence.fallbackIntercepted?.() === true,
-        passed: primaryPassed
+        passed: primaryPassed,
+        inconclusive: primaryInconclusive
       })
     }
-    if (['invalid_request', 'qualification_invalid_window', 'qualification_response_unavailable', 'qualification_runtime_unavailable'].includes(expected)) {
-      return (await postRevocationProof(caseSelector)) && primaryPassed
+    if (primaryInconclusive || ['invalid_request', 'qualification_invalid_window', 'qualification_response_unavailable', 'qualification_runtime_unavailable'].includes(expected)) {
+      const revoked = await postRevocationProof(caseSelector)
+      return primaryInconclusive && revoked ? 'inconclusive' : (revoked && primaryPassed)
     }
     return primaryPassed
+  }
+
+  async function runConcurrentBatch() {
+    const id = 'concurrent-batch'
+    const route = 'official-invoke'
+    if (!isSelected(id, route)) return null
+    const caseSelector = `${id}--${route}`
+    const pending = Array.from(
+      { length: 8 },
+      () => transport(route, 'wallet_get_status', {})
+    )
+    const settled = await Promise.allSettled(pending)
+    const observed = settled.map((result) => result.status === 'fulfilled'
+      ? fixedOutcome(result.value, true)
+      : fixedOutcome(result.reason, false))
+    const inconclusive = observed.some((result) => result.outcome === 'qualification_transport_inconclusive')
+    const provenRoutes = new Set(observed.map((result) => result.transportEvidence))
+    const oneProvenRoute = provenRoutes.size === 1 &&
+      ['custom_protocol_proven', 'post_message_proven'].includes(observed[0]?.transportEvidence)
+    const passed = observed.length === 8 && observed.every((result) =>
+      result.outcome === 'layer_b_accepted') && oneProvenRoute
+    write({
+      sequence: ++sequence,
+      id,
+      caseSelector,
+      route,
+      command: 'wallet_get_status',
+      outcome: passed
+        ? 'layer_b_accepted'
+        : (inconclusive ? 'qualification_transport_inconclusive' : 'unclassified_error'),
+      expected: 'layer_b_accepted',
+      transportEvidence: passed ? observed[0].transportEvidence : 'transport_route_inconclusive',
+      passed,
+      inconclusive
+    })
+    if (inconclusive) {
+      return (await postRevocationProof(caseSelector)) ? 'inconclusive' : false
+    }
+    return passed
   }
 
   function exactPayload(command) {
@@ -475,16 +521,7 @@
       }
     }
 
-    const concurrent = await Promise.all(
-      Array.from({ length: 8 }, (_, index) => runCase(
-        `concurrent-${index}`,
-        'official-invoke',
-        'wallet_get_status',
-        {},
-        'layer_b_accepted'
-      ))
-    )
-    results.push(...concurrent)
+    results.push(await runConcurrentBatch())
 
     results.push(await directFetchProbe('direct-fetch-text', duplicateFamilies[0][1], 'application/json'))
     results.push(await directFetchProbe('direct-fetch-bytes', new TextEncoder().encode(duplicateFamilies[0][1]), 'application/octet-stream'))
@@ -510,9 +547,10 @@
       'fixed-error'
     ))
     const executed = results.filter((result) => result !== null)
-    const passed = executed.filter(Boolean).length
-    const failed = executed.length - passed
-    const inconclusive = executed.length !== 1
+    const passed = executed.filter((result) => result === true).length
+    const hasInconclusive = executed.some((result) => result === 'inconclusive')
+    const failed = executed.filter((result) => result === false).length
+    const inconclusive = executed.length !== 1 || hasInconclusive
     write({
       marker: 'layer_b_matrix_complete',
       caseSelector: selectedCase,

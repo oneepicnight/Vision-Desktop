@@ -486,6 +486,8 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(layer_b_source.contains("custom_protocol_proven"));
     assert!(layer_b_source.contains("post_message_proven"));
     assert!(layer_b_source.contains("transport_route_inconclusive"));
+    assert!(layer_b_source.contains("qualification_transport_inconclusive"));
+    assert!(layer_b_source.contains("layer_b_terminal_observation"));
     assert!(layer_b_source.contains("REPORT_PROTOCOL"));
     assert!(layer_b_source.contains("CONTROL_PROTOCOL"));
     assert!(layer_b_source.contains("window_authority_matches"));
@@ -549,11 +551,19 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(layer_b_script.contains("qualification-control"));
     assert!(layer_b_script.contains("fallbackIntercepted"));
     assert!(layer_b_script.contains("matrix_inconclusive"));
+    assert!(layer_b_script.contains("runConcurrentBatch"));
+    assert!(layer_b_script.contains("Promise.allSettled(pending)"));
     assert!(layer_b_runner.contains("Start-Process"));
     assert!(layer_b_runner.contains("--wallet-layer-b-case=$case"));
     assert!(layer_b_runner.contains("stdout_sha256"));
     assert!(layer_b_runner.contains("stderr_sha256"));
     assert!(layer_b_runner.contains("'Inconclusive'"));
+    assert!(layer_b_runner.contains("Test-Transcript"));
+    assert!(layer_b_runner.contains("layer_b_terminal_observation"));
+    assert!(layer_b_runner.contains("Get-WebView2Provenance"));
+    assert!(layer_b_runner.contains("Get-FrameworkProvenance"));
+    assert!(layer_b_runner.contains("Get-HarnessSourceHashes"));
+    assert!(layer_b_runner.contains("Get-TreeFingerprint"));
     assert!(!layer_b_script.contains("seed phrase"));
     assert!(!layer_b_script.contains("private key"));
     assert!(build_source.contains("cargo:rustc-link-arg=/MANIFESTINPUT:"));

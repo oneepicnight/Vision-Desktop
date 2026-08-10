@@ -6,14 +6,15 @@ Workstation: Vision Desktop ASUS Windows workstation
 
 Branch: `fix/wallet-signing-adversarial-matrix`
 
-Rejected Layer B commit: `7e5791e43c7f836e8e47b12aef71c6adc7c99036`
+Rejected Layer B corrective commit: `2e5017d4a7967f2797e644ccd7c0d21484d702c9`
 
-Rejected Layer B tree: `a73d856794b04f5f5209da7d1ff8e75fa324bbf3`
+Rejected Layer B corrective tree: `ebf44d779731ccb511ade5b3aa0051bda7c4647e`
 
 ## Result
 
-The four findings from the independent Layer B review have been addressed in the standalone,
-non-custody harness source and source-only tests.
+The four remaining findings from the second independent Layer B review have been addressed in the
+standalone, non-custody harness source, runner, and source-only tests. The prior guarded-metadata
+and linear-revocation corrections remain intact.
 
 The harness and packaged qualification matrix were not launched. This corrective implementation
 does not claim a Passed result. Production `duplicate_key_rejection_proven` remains `false`, and
@@ -71,7 +72,7 @@ overwritten.
 The runner was added for later independently authorized qualification only. It was not executed in
 this tranche.
 
-## M-03 correction: framework-derived transport evidence
+## M-03 correction: inconclusive transport remains inconclusive
 
 Caller-supplied route labels are no longer authoritative in Rust.
 
@@ -81,14 +82,18 @@ transport evidence from the actual framework request:
 - a custom-protocol request requires the exact private invoke-key header plus the framework
   callback, error, and origin headers;
 - a postMessage request requires absence of the custom-protocol framework header set; and
-- any mixed, spoofed, missing-key, or otherwise unprovable shape is
-  `transport_route_inconclusive` and cannot be accepted.
+- any mixed, spoofed, missing-key, or otherwise unprovable shape produces the distinct fixed
+  `qualification_transport_inconclusive` outcome and cannot be accepted or mistaken for an
+  ordinary `invalid_request` rejection.
 
 The browser transcript describes the JavaScript API exercised as a client-side case attribute; it
 is not reused as native transport proof. The forced-fallback case must independently establish both
 that the custom-protocol fetch was intercepted and that Rust observed `post_message_proven`.
+Unproven transport requires a same-process post-revocation proof, a native terminal record, browser
+and native Inconclusive results, and process exit code 3. The runner cannot convert that outcome to
+Passed.
 
-## M-04 correction: executable scenarios and primary transcript
+## M-04a correction: transcript evidence, not exit code, controls acceptance
 
 The harness now implements deterministic cases for:
 
@@ -109,11 +114,44 @@ using a bounded, deny-unknown-fields request and fixed allowlisted values. The s
 must match the reported case. Arbitrary values, field names, case identifiers, commands, outcomes,
 or transport labels are not emitted.
 
-The per-process runner preserves complete stdout and stderr transcripts, exit codes, timestamps,
-case classifications, and transcript hashes. Missing, aborted, timed-out, rejected, or multiply
-observed cases are Failed or Inconclusive, never Passed. A destruction scenario whose response
-cannot be observed after the target WebView is destroyed therefore fails closed as Inconclusive
-rather than being counted as success.
+The native terminal record contains the selected case, fixed result, wrapper-entry count, primary
+record count, post-revocation record count, and revoked state. The runner parses bounded JSON
+stdout and requires exactly one matching browser primary record, one browser terminal record, one
+native terminal record, all required post-revocation evidence, the exact native wrapper count, no
+report-rejection marker, and the matching exit code. Exit code 0 alone is never sufficient.
+Missing, aborted, timed-out, rejected, malformed, or multiply observed evidence is Failed or
+Inconclusive, never Passed. Six runner transcript self-tests cover a clean early exit, complete
+pass, complete and incomplete concurrency evidence, transport Inconclusive, and native report
+rejection without launching the harness.
+
+## M-04b correction: actual eight-invoke concurrency
+
+The former eight separately selected `concurrent-N` processes have been removed. One isolated
+`concurrent-batch` case creates all eight official invoke promises before awaiting any result. It
+accepts only eight exact accepted results with one consistent native-proven transport. The native terminal
+record independently requires eight generated-wrapper entries, or nine when an inconclusive route
+also requires the post-revocation probe.
+
+## M-04c correction: mandatory provenance and integrity evidence
+
+The mandatory runner now captures before execution:
+
+- the exact repository commit, tree, parent, and clean-worktree proof;
+- the Layer B binary hash;
+- installed WebView2 product/file version and executable hash;
+- locked resolved versions for Tauri, Tauri macros, Tauri Wry runtime, Wry, Serde, and Serde JSON;
+- Cargo.lock checksums, package-manifest hashes, and the reviewed source-file hashes for those
+  dependencies; and
+- hashes for the harness, runner, configuration, permission, generated-wrapper, build, lockfile,
+  test, and handoff sources.
+
+The sanctioned runner requires the authoritative wallet-custody root and Vision-Core Git root as
+explicit inputs. It records aggregate custody-data identity and Vision-Core Git identity before and
+after the matrix without publishing custody filenames. After execution it also rechecks the
+Vision Desktop Git state and Layer B binary. Any product, custody, Core, Git, or binary identity
+change forces Failed. Every case retains its process ID, exact bounded launch arguments, bounded
+full stdout/stderr, timestamps, exit code, native record counts, classification reason, transcript
+sizes, and transcript hashes in the new evidence directory.
 
 ## Generated-wrapper and payload coverage
 
@@ -129,7 +167,7 @@ The harness still declares exactly seven feature-gated generated Tauri wrappers:
 
 The isolated process list covers their exact shapes, raw values, JSON primitives and collections,
 missing/extra/wrong-case/secret-like fields, bounded and oversized metadata, malformed nested
-requests, unknown commands, concurrency, direct fetch/XHR, forced postMessage fallback, panic
+requests, unknown commands, an eight-invoke concurrency batch, direct fetch/XHR, forced postMessage fallback, panic
 points, top-level duplicate families, and nested duplicate families.
 
 Duplicate textual payloads are still attempted as strings, UTF-8 bytes, and normalized JavaScript
@@ -140,7 +178,8 @@ duplicates were rejected. The production duplicate-key blocker remains false.
 
 The following checks passed without starting the harness:
 
-- Layer B Rust unit tests: 13 passed;
+- Layer B Rust unit tests: 15 passed;
+- runner self-tests: 9 passed (6 transcript and 3 provenance checks);
 - complete Rust baseline: 293 passed, 4 operator-only ignored;
 - Tauri authority tests: 7 passed;
 - WebView isolation tests: 2 passed;

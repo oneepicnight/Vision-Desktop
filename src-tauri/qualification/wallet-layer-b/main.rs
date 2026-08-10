@@ -82,6 +82,7 @@ struct QualificationState {
     browser_primary_records: AtomicUsize,
     browser_post_records: AtomicUsize,
     browser_primary_passed: AtomicBool,
+    browser_primary_inconclusive: AtomicBool,
     browser_post_required: AtomicBool,
     browser_post_passed: AtomicBool,
     browser_terminal_seen: AtomicBool,
@@ -106,6 +107,7 @@ impl QualificationState {
             browser_primary_records: AtomicUsize::new(0),
             browser_post_records: AtomicUsize::new(0),
             browser_primary_passed: AtomicBool::new(false),
+            browser_primary_inconclusive: AtomicBool::new(false),
             browser_post_required: AtomicBool::new(false),
             browser_post_passed: AtomicBool::new(false),
             browser_terminal_seen: AtomicBool::new(false),
@@ -473,6 +475,17 @@ struct BrowserObservation<'a> {
     fallback_intercepted: bool,
 }
 
+#[derive(Serialize)]
+struct TerminalObservation<'a> {
+    marker: &'static str,
+    case: &'a str,
+    result: &'a str,
+    wrapper_entries: usize,
+    primary_records: usize,
+    post_records: usize,
+    revoked: bool,
+}
+
 fn fixed_member<'a>(value: &'a str, allowed: &[&str]) -> Option<&'a str> {
     allowed
         .iter()
@@ -522,6 +535,7 @@ fn valid_case_name(value: &str) -> bool {
         "contained-response-panic",
         "contained-observation-panic",
         "contained-fixed-error-panic",
+        "concurrent-batch",
     ];
     if fixed.contains(&value) {
         return true;
@@ -537,11 +551,6 @@ fn valid_case_name(value: &str) -> bool {
             LOCK,
         ]
         .contains(&command);
-    }
-    if let Some(index) = value.strip_prefix("concurrent-") {
-        return index
-            .parse::<usize>()
-            .is_ok_and(|index| (0..=7).contains(&index));
     }
     let duplicate = value
         .strip_prefix("duplicate-")
@@ -628,6 +637,7 @@ fn validated_browser_observation<'a>(
         "qualification_invalid_window",
         "qualification_response_unavailable",
         "qualification_runtime_unavailable",
+        "qualification_transport_inconclusive",
         "framework_error_redacted",
         "framework_rejection",
         "transport_rejection",
@@ -652,6 +662,14 @@ fn validated_browser_observation<'a>(
         ],
     )?;
     if request.result == "passed" && request.outcome != request.expected {
+        return None;
+    }
+    if request.result == "inconclusive"
+        && !matches!(
+            request.outcome.as_str(),
+            "qualification_transport_inconclusive" | "case_not_observed" | "matrix_inconclusive"
+        )
+    {
         return None;
     }
     if request.outcome == "layer_b_accepted"
@@ -681,6 +699,29 @@ fn validated_browser_observation<'a>(
     })
 }
 
+fn post_revocation_required(expected: &str, outcome: &str) -> bool {
+    outcome == "qualification_transport_inconclusive"
+        || matches!(
+            expected,
+            "invalid_request"
+                | "qualification_invalid_window"
+                | "qualification_response_unavailable"
+                | "qualification_runtime_unavailable"
+        )
+}
+
+fn expected_wrapper_entries(selected_case: &str, post_required: bool) -> usize {
+    if selected_case.starts_with("direct-") || selected_case.starts_with("unknown-command--") {
+        0
+    } else if selected_case.starts_with("concurrent-batch--") {
+        8 + usize::from(post_required)
+    } else if post_required {
+        2
+    } else {
+        1
+    }
+}
+
 fn report_protocol<R: Runtime>(
     context: tauri::UriSchemeContext<'_, R>,
     request: http::Request<Vec<u8>>,
@@ -701,20 +742,17 @@ fn report_protocol<R: Runtime>(
         let is_post = request.case.ends_with("-post-revocation-proof");
         if is_terminal {
             let wrapper_entries = state.wrapper_entries.load(Ordering::Acquire);
-            let expected_wrapper_entries = if state.selected_case.starts_with("direct-")
-                || state.selected_case.starts_with("unknown-command--")
-            {
-                0
-            } else if state.browser_post_required.load(Ordering::Acquire) {
-                2
-            } else {
-                1
-            };
+            let expected_wrapper_entries = expected_wrapper_entries(
+                &state.selected_case,
+                state.browser_post_required.load(Ordering::Acquire),
+            );
             if state.browser_terminal_seen.swap(true, Ordering::AcqRel)
                 || state.browser_primary_records.load(Ordering::Acquire) != 1
                 || wrapper_entries != expected_wrapper_entries
                 || state.browser_primary_passed.load(Ordering::Acquire)
                     != (request.result == "passed")
+                || state.browser_primary_inconclusive.load(Ordering::Acquire)
+                    != (request.result == "inconclusive")
                 || (state.browser_post_required.load(Ordering::Acquire)
                     && (state.browser_post_records.load(Ordering::Acquire) != 1
                         || !state.browser_post_passed.load(Ordering::Acquire)))
@@ -723,6 +761,15 @@ fn report_protocol<R: Runtime>(
             {
                 return Err(());
             }
+            emit_observation(&TerminalObservation {
+                marker: "layer_b_terminal_observation",
+                case: &state.selected_case,
+                result: &request.result,
+                wrapper_entries,
+                primary_records: state.browser_primary_records.load(Ordering::Acquire),
+                post_records: state.browser_post_records.load(Ordering::Acquire),
+                revoked: state.revoked.load(Ordering::Acquire),
+            })?;
         } else if is_post {
             if state.browser_post_records.fetch_add(1, Ordering::AcqRel) != 0
                 || !state.revoked.load(Ordering::Acquire)
@@ -739,19 +786,20 @@ fn report_protocol<R: Runtime>(
             state
                 .browser_primary_passed
                 .store(request.result == "passed", Ordering::Release);
+            state
+                .browser_primary_inconclusive
+                .store(request.result == "inconclusive", Ordering::Release);
             state.browser_post_required.store(
-                matches!(
-                    request.expected.as_str(),
-                    "invalid_request"
-                        | "qualification_invalid_window"
-                        | "qualification_response_unavailable"
-                        | "qualification_runtime_unavailable"
-                ),
+                post_revocation_required(&request.expected, &request.outcome),
                 Ordering::Release,
             );
         }
         emit_observation(&observation)?;
-        Ok::<Option<i32>, ()>(is_terminal.then_some(if request.result == "passed" { 0 } else { 2 }))
+        Ok::<Option<i32>, ()>(is_terminal.then_some(match request.result.as_str() {
+            "passed" => 0,
+            "inconclusive" => 3,
+            _ => 2,
+        }))
     }));
     let (accepted, exit_code) = match processed {
         Ok(Ok(exit_code)) => (true, exit_code),
@@ -987,9 +1035,17 @@ fn qualify(
                 "qualification_invalid_window",
             )?);
         }
+        if route == FrameworkRoute::Inconclusive {
+            return Err(guarded_rejection(
+                &state,
+                expected_command,
+                route,
+                &metadata,
+                "qualification_transport_inconclusive",
+            )?);
+        }
         if request.declared_command != expected_command
             || request.invoked_command != expected_command
-            || route == FrameworkRoute::Inconclusive
             || !valid_envelope(expected_command, request.body)
         {
             state.invalidate();
@@ -1368,6 +1424,37 @@ mod tests {
         request.outcome = "layer_b_accepted".into();
         request.transport_evidence = "transport_route_inconclusive".into();
         assert!(validated_browser_observation(selected, &request).is_none());
+    }
+
+    #[test]
+    fn unproven_transport_is_distinct_and_requires_revocation_evidence() {
+        let selected = "exact-wallet_get_status--official-invoke";
+        let request = BrowserObservationRequest {
+            marker: "layer_b_browser_observation".into(),
+            case: selected.into(),
+            client_api: "official-invoke".into(),
+            command: GET_STATUS.into(),
+            outcome: "qualification_transport_inconclusive".into(),
+            expected: "layer_b_accepted".into(),
+            result: "inconclusive".into(),
+            transport_evidence: "transport_route_inconclusive".into(),
+            fallback_intercepted: false,
+        };
+        assert!(validated_browser_observation(selected, &request).is_some());
+        assert!(post_revocation_required(
+            &request.expected,
+            &request.outcome
+        ));
+        assert_eq!(expected_wrapper_entries(selected, true), 2);
+    }
+
+    #[test]
+    fn concurrency_batch_requires_all_eight_wrapper_entries() {
+        let selected = "concurrent-batch--official-invoke";
+        assert!(valid_case_selector(selected));
+        assert_eq!(expected_wrapper_entries(selected, false), 8);
+        assert_eq!(expected_wrapper_entries(selected, true), 9);
+        assert!(!valid_case_selector("concurrent-0--official-invoke"));
     }
 
     #[test]

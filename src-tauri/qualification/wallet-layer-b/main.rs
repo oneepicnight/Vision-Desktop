@@ -21,6 +21,7 @@ use tauri::{
     ipc::{CommandArg, CommandItem, InvokeBody, InvokeError, Response},
     Manager, Runtime, State, WebviewWindow,
 };
+use windows_sys::Win32::{Foundation::HWND, UI::WindowsAndMessaging::IsWindow};
 
 const QUALIFICATION_ARGUMENT: &str = "--wallet-layer-b-qualification";
 const QUALIFICATION_CASE_ARGUMENT: &str = "--wallet-layer-b-case=";
@@ -568,6 +569,30 @@ struct TerminalObservation<'a> {
     webview2_runtime_version: &'a str,
 }
 
+#[derive(Serialize)]
+struct NativeDestructionObservation<'a> {
+    marker: &'static str,
+    case: &'a str,
+    command: &'static str,
+    result: &'static str,
+    exact_authorized_hwnd: bool,
+    exact_target_window: bool,
+    destroy_call_succeeded: bool,
+    target_window_absent: bool,
+    native_hwnd_absent: bool,
+    authority_revoked: bool,
+    post_revocation_proven: bool,
+}
+
+struct NativeDestructionRequest<'a> {
+    expected_command: &'static str,
+    invoked_command: &'a str,
+    route: FrameworkRoute,
+    body: &'a InvokeBody,
+    url: &'a tauri::Url,
+    hwnd: isize,
+}
+
 fn fixed_member<'a>(value: &'a str, allowed: &[&str]) -> Option<&'a str> {
     allowed
         .iter()
@@ -643,6 +668,12 @@ fn valid_case_name(value: &str) -> bool {
     let Some(duplicate) = duplicate else {
         return false;
     };
+    let duplicate = duplicate
+        .strip_prefix("create-")
+        .or_else(|| duplicate.strip_prefix("restore-"));
+    let Some(duplicate) = duplicate else {
+        return false;
+    };
     let representations = ["string", "bytes", "object-normalized"];
     let families = [
         "identical",
@@ -681,7 +712,7 @@ fn wrapper_case_parts(value: &str) -> Option<(&'static str, &str)> {
         "wrong-case-top-level",
         "secret-like-top-level",
         "wrong-command-envelope",
-        "wrong-invoked-command",
+        "declared-invoked-mismatch",
         "malformed-nested",
         "oversized-nested",
         "unknown-nested",
@@ -709,6 +740,19 @@ fn wrapper_case_parts(value: &str) -> Option<(&'static str, &str)> {
             .filter(|family| families.contains(family))
             .map(|family| (*command, family))
     })
+}
+
+fn mismatch_declared_command(selected_case: &str, invoked_command: &str) -> Option<&'static str> {
+    let (declared_command, family) = selected_case
+        .rsplit_once("--")
+        .and_then(|(case, _)| wrapper_case_parts(case))?;
+    if family != "declared-invoked-mismatch" {
+        return None;
+    }
+    let index = ALL_COMMANDS
+        .iter()
+        .position(|command| *command == declared_command)?;
+    (invoked_command == ALL_COMMANDS[(index + 1) % ALL_COMMANDS.len()]).then_some(declared_command)
 }
 
 fn valid_case_selector(value: &str) -> bool {
@@ -743,8 +787,11 @@ fn validated_browser_observation<'a>(
             .rsplit_once("--")
             .and_then(|(case, _)| wrapper_case_parts(case))
         {
-            let expected_reported_command = if family == "wrong-invoked-command" {
-                "wallet_unknown"
+            let expected_reported_command = if family == "declared-invoked-mismatch" {
+                let index = ALL_COMMANDS
+                    .iter()
+                    .position(|command| *command == expected_command)?;
+                ALL_COMMANDS[(index + 1) % ALL_COMMANDS.len()]
             } else {
                 expected_command
             };
@@ -864,10 +911,7 @@ fn expected_wrapper_entries(selected_case: &str, post_required: bool) -> usize {
         .rsplit_once("--")
         .and_then(|(case, _)| wrapper_case_parts(case))
         .map(|(_, family)| family);
-    if selected_case.starts_with("direct-")
-        || selected_case.starts_with("unknown-command--")
-        || wrapper_family == Some("wrong-invoked-command")
-    {
+    if selected_case.starts_with("direct-") || selected_case.starts_with("unknown-command--") {
         0
     } else if matches!(
         wrapper_family,
@@ -883,6 +927,61 @@ fn expected_wrapper_entries(selected_case: &str, post_required: bool) -> usize {
     } else {
         1
     }
+}
+
+fn complete_native_destruction(
+    window: &WebviewWindow,
+    state: &QualificationState,
+    request: NativeDestructionRequest<'_>,
+) -> Result<Response, InvokeError> {
+    let app = window.app_handle().clone();
+    let exact_authorized_hwnd = state.authorized_hwnd.load(Ordering::Acquire) == request.hwnd;
+    let exact_target_window = window.label() == QUALIFICATION_WINDOW
+        && is_qualification_origin(request.url)
+        && state.window_authority_matches(request.hwnd);
+    let request_valid = request.route != FrameworkRoute::Inconclusive
+        && request.invoked_command == request.expected_command
+        && valid_envelope(request.expected_command, request.body);
+    state.invalidate();
+    let destroy_call_succeeded =
+        exact_authorized_hwnd && exact_target_window && request_valid && window.destroy().is_ok();
+    let target_window_absent = app.get_webview_window(QUALIFICATION_WINDOW).is_none();
+    let native_hwnd_absent = unsafe { IsWindow(request.hwnd as HWND) } == 0;
+    let authority_revoked = state.revoked.load(Ordering::Acquire);
+    let post_revocation_proven = authority_revoked && target_window_absent && native_hwnd_absent;
+    let passed = destroy_call_succeeded
+        && target_window_absent
+        && native_hwnd_absent
+        && post_revocation_proven;
+    let result = if passed { "passed" } else { "failed" };
+    let runtime_version = state.loaded_webview2_version().unwrap_or("unavailable");
+    let emitted = emit_observation(&NativeDestructionObservation {
+        marker: "layer_b_native_destruction_observation",
+        case: &state.selected_case,
+        command: request.expected_command,
+        result,
+        exact_authorized_hwnd,
+        exact_target_window,
+        destroy_call_succeeded,
+        target_window_absent,
+        native_hwnd_absent,
+        authority_revoked,
+        post_revocation_proven,
+    })
+    .and_then(|()| {
+        emit_observation(&TerminalObservation {
+            marker: "layer_b_terminal_observation",
+            case: &state.selected_case,
+            result,
+            wrapper_entries: state.wrapper_entries.load(Ordering::Acquire),
+            primary_records: 1,
+            post_records: 1,
+            revoked: authority_revoked,
+            webview2_runtime_version: runtime_version,
+        })
+    });
+    app.exit(if passed && emitted.is_ok() { 0 } else { 2 });
+    Err(fixed_error("qualification_runtime_unavailable"))
 }
 
 fn report_protocol<R: Runtime>(
@@ -1176,8 +1275,18 @@ fn qualify(
             state.invalidate();
         }
         if state.destroy_on_invoke.swap(false, Ordering::AcqRel) {
-            state.invalidate();
-            let _ = window.destroy();
+            return complete_native_destruction(
+                &window,
+                &state,
+                NativeDestructionRequest {
+                    expected_command,
+                    invoked_command: request.invoked_command,
+                    route,
+                    body: request.body,
+                    url: &url,
+                    hwnd,
+                },
+            );
         }
         if state.revoked.load(Ordering::Acquire) {
             return Err(guarded_rejection(
@@ -1307,6 +1416,45 @@ qualification_command!(wallet_restore, RESTORE);
 qualification_command!(wallet_unlock, UNLOCK);
 qualification_command!(wallet_lock, LOCK);
 
+fn qualification_invoke_handler(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
+    let mismatch = {
+        let webview = invoke.message.webview();
+        let state = webview.state::<QualificationState>();
+        mismatch_declared_command(&state.selected_case, invoke.message.command())
+    };
+    match mismatch {
+        Some(GET_STATUS) => __cmd__wallet_get_status!(wallet_get_status, invoke),
+        Some(SELECT_RECOVERY_DESTINATION) => {
+            __cmd__wallet_select_recovery_destination!(wallet_select_recovery_destination, invoke)
+        }
+        Some(CREATE) => __cmd__wallet_create!(wallet_create, invoke),
+        Some(SELECT_RECOVERY_SOURCE) => {
+            __cmd__wallet_select_recovery_source!(wallet_select_recovery_source, invoke)
+        }
+        Some(RESTORE) => __cmd__wallet_restore!(wallet_restore, invoke),
+        Some(UNLOCK) => __cmd__wallet_unlock!(wallet_unlock, invoke),
+        Some(LOCK) => __cmd__wallet_lock!(wallet_lock, invoke),
+        Some(_) => false,
+        None => match invoke.message.command() {
+            GET_STATUS => __cmd__wallet_get_status!(wallet_get_status, invoke),
+            SELECT_RECOVERY_DESTINATION => {
+                __cmd__wallet_select_recovery_destination!(
+                    wallet_select_recovery_destination,
+                    invoke
+                )
+            }
+            CREATE => __cmd__wallet_create!(wallet_create, invoke),
+            SELECT_RECOVERY_SOURCE => {
+                __cmd__wallet_select_recovery_source!(wallet_select_recovery_source, invoke)
+            }
+            RESTORE => __cmd__wallet_restore!(wallet_restore, invoke),
+            UNLOCK => __cmd__wallet_unlock!(wallet_unlock, invoke),
+            LOCK => __cmd__wallet_lock!(wallet_lock, invoke),
+            _ => false,
+        },
+    }
+}
+
 fn qualification_mode_requested() -> bool {
     std::env::args().any(|argument| argument == QUALIFICATION_ARGUMENT)
 }
@@ -1391,15 +1539,7 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            wallet_get_status,
-            wallet_select_recovery_destination,
-            wallet_create,
-            wallet_select_recovery_source,
-            wallet_restore,
-            wallet_unlock,
-            wallet_lock,
-        ])
+        .invoke_handler(qualification_invoke_handler)
         .run(tauri::generate_context!(
             "qualification/wallet-layer-b/tauri.conf.json"
         ))
@@ -1659,7 +1799,7 @@ mod tests {
             "wrong-case-top-level",
             "secret-like-top-level",
             "wrong-command-envelope",
-            "wrong-invoked-command",
+            "declared-invoked-mismatch",
             "window-other-local",
             "window-remote-origin",
             "window-recreated-main",
@@ -1691,6 +1831,34 @@ mod tests {
             ] {
                 assert!(valid_case_selector(&format!(
                     "wrapper-{command}-{family}--official-invoke"
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn declared_invoked_mismatch_routes_each_real_generated_wrapper() {
+        for (index, declared) in ALL_COMMANDS.iter().enumerate() {
+            let invoked = ALL_COMMANDS[(index + 1) % ALL_COMMANDS.len()];
+            let selected = format!("wrapper-{declared}-declared-invoked-mismatch--official-invoke");
+            assert_eq!(
+                mismatch_declared_command(&selected, invoked),
+                Some(*declared)
+            );
+            assert_eq!(mismatch_declared_command(&selected, declared), None);
+            assert_eq!(expected_wrapper_entries(&selected, true), 2);
+        }
+    }
+
+    #[test]
+    fn duplicate_case_names_cover_create_and_restore_schemas() {
+        for command in ["create", "restore"] {
+            for prefix in ["duplicate", "nested-duplicate"] {
+                assert!(valid_case_selector(&format!(
+                    "{prefix}-{command}-conflicting-string--official-invoke"
+                )));
+                assert!(valid_case_selector(&format!(
+                    "{prefix}-{command}-escaped-equivalent-bytes--internals-ipc"
                 )));
             }
         }

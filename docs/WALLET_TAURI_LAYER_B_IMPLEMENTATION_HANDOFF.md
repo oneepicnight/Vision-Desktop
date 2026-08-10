@@ -6,13 +6,13 @@ Workstation: Vision Desktop ASUS Windows workstation
 
 Branch: `fix/wallet-signing-adversarial-matrix`
 
-Rejected Layer B corrective commit: `3602698c413cda747f1b33956dadbf336cdf9888`
+Rejected Layer B corrective commit: `ece16d0e860ea841ebfdf99c6e5efd5a92d5ef10`
 
-Rejected Layer B corrective tree: `c155dc6d37afbe1e4251f33f0c6da7270d2c9ce2`
+Rejected Layer B corrective tree: `0472cf91f593385914cb95c2d0622f7239aa459a`
 
 ## Result
 
-The two remaining findings from the third independent Layer B review have been addressed in the
+The two remaining findings from the fourth independent Layer B review have been addressed in the
 standalone, non-custody harness source, runner, and source-only tests. The prior guarded-metadata,
 linear-revocation, transport-proof, transcript, and genuine-concurrency corrections remain intact.
 
@@ -93,7 +93,7 @@ Unproven transport requires a same-process post-revocation proof, a native termi
 and native Inconclusive results, and process exit code 3. The runner cannot convert that outcome to
 Passed.
 
-## M-04a correction: transcript evidence, not exit code, controls acceptance
+## M-04a correction: surviving native window-destruction evidence
 
 The harness now implements deterministic cases for:
 
@@ -109,20 +109,39 @@ Native authority binds the original HWND and first page generation. Recreated wi
 page generations cannot silently inherit it. Qualification-only control and reporting protocols
 are separate from the seven generated wallet-shaped wrappers and contain no custody action.
 
+The destruction case no longer relies on the page being destroyed to report its own result. Before
+destruction, the generated wrapper captures and verifies the exact authorized HWND, target label,
+origin, page generation, transport, command, and request. Rust then revokes authority, invokes
+forced destruction, and continues as the surviving native controller. A passing native record
+requires all of the following:
+
+- the forced-destruction call succeeded for the exact authorized target;
+- the target was removed from Tauri's live WebView-window registry;
+- Win32 `IsWindow` proves that the captured HWND no longer exists;
+- wallet-shaped qualification authority remains revoked; and
+- the destroyed target is structurally unable to issue a later successful invoke.
+
+The native controller emits one fixed destruction record and one terminal record directly to the
+bounded process transcript, then exits with the matching fixed code. It does not wait for browser
+primary, post-revocation, or terminal records from a JavaScript context that no longer exists. The
+runner has a dedicated destruction classifier that requires exactly those two native records, the
+exact command and count fields, all destruction/revocation predicates, the loaded WebView2
+identity, and the matching exit code. A clean exit, missing record, surviving HWND, failed destroy,
+or mismatched field cannot pass.
+
 Every browser-only result is sent to the native reporting protocol and written to process stdout
 using a bounded, deny-unknown-fields request and fixed allowlisted values. The selected native case
 must match the reported case. Arbitrary values, field names, case identifiers, commands, outcomes,
 or transport labels are not emitted.
 
-The native terminal record contains the selected case, fixed result, wrapper-entry count, primary
+For non-destruction cases, the native terminal record contains the selected case, fixed result, wrapper-entry count, primary
 record count, post-revocation record count, and revoked state. The runner parses bounded JSON
 stdout and requires exactly one matching browser primary record, one browser terminal record, one
 native terminal record, all required post-revocation evidence, the exact native wrapper count, no
 report-rejection marker, and the matching exit code. Exit code 0 alone is never sufficient.
 Missing, aborted, timed-out, rejected, malformed, or multiply observed evidence is Failed or
-Inconclusive, never Passed. Six runner transcript self-tests cover a clean early exit, complete
-pass, complete and incomplete concurrency evidence, transport Inconclusive, and native report
-rejection without launching the harness.
+Inconclusive, never Passed. Runner self-tests now include complete and incomplete native
+destruction evidence without launching the harness.
 
 ## M-04b correction: actual eight-invoke concurrency
 
@@ -171,7 +190,7 @@ Every one of the seven generated wrappers now receives its own isolated process 
 - raw empty, JSON-looking, arbitrary, and byte payloads;
 - JSON null, Boolean, number, string, and array payloads;
 - missing, extra, wrong-case, secret-like, shape-mismatched, and wrong-command envelopes;
-- wrong invoked-command handling;
+- a genuine generated-wrapper declared/invoked command mismatch;
 - all six window, origin, generation, destruction, and revocation scenarios;
 - metadata, body, response, observation, and fixed-error panic points;
 - sequential repeat, a genuine eight-invoke concurrent batch, reordered invocation, and an
@@ -183,6 +202,19 @@ invoke the next generated wrapper followed by the selected wrapper, and the runn
 requires that exact native order. Concurrent cases issue all eight promises before awaiting and
 require eight native entries for the selected wrapper. The runner treats missing or incorrect
 sequence/concurrency evidence as Inconclusive.
+
+The mismatch case no longer invokes an unknown command that bypasses every wrapper. For each of
+the seven cases, the native router deliberately sends the next permitted framework command through
+the selected real `#[tauri::command]` wrapper. The wrapper therefore observes its own generated
+declared name and a different framework-provided invoked name, rejects the mismatch, revokes
+authority, and rejects the same mismatched route again during the post-revocation probe. Runner
+evidence requires both native entries to identify the selected generated wrapper.
+
+Both top-level and nested textual duplicate families now run independently against
+`wallet_create` and `wallet_restore`. Restore cases use the distinct
+`recovery_source_handle` schema; create cases use `recovery_destination_handle`. Each schema runs
+all nine families through string, byte, and normalized-object representations over all three
+transport APIs.
 
 ## Generated-wrapper and payload coverage
 
@@ -197,7 +229,7 @@ The harness still declares exactly seven feature-gated generated Tauri wrappers:
 - `wallet_lock`.
 
 The isolated process list covers every wrapper as described above, plus direct fetch/XHR, forced
-postMessage fallback, comprehensive top-level duplicate families, and nested duplicate families.
+postMessage fallback, and complete create/restore top-level and nested duplicate families.
 
 Duplicate textual payloads are still attempted as strings, UTF-8 bytes, and normalized JavaScript
 objects. Normalized object acceptance is recorded as unsafe evidence, not proof that textual
@@ -207,8 +239,8 @@ duplicates were rejected. The production duplicate-key blocker remains false.
 
 The following checks passed without starting the harness:
 
-- Layer B Rust unit tests: 17 passed;
-- runner self-tests: 12 passed (9 transcript and 3 provenance checks);
+- Layer B Rust unit tests: 19 passed;
+- runner self-tests: 16 passed (13 transcript and 3 provenance checks);
 - complete Rust baseline: 293 passed, 4 operator-only ignored;
 - Tauri authority tests: 7 passed;
 - WebView isolation tests: 2 passed;

@@ -223,6 +223,41 @@ function Test-Transcript(
         }
         $records.Add($record)
     }
+    $wrapperCase = Get-WrapperCaseInfo $Case
+    if ($wrapperCase.family -eq 'window-destruction-race') {
+        $destruction = @($records | Where-Object { $_.marker -eq 'layer_b_native_destruction_observation' -and $_.case -eq $Case })
+        $terminal = @($records | Where-Object { $_.marker -eq 'layer_b_terminal_observation' -and $_.case -eq $Case })
+        $unexpectedBrowser = @($records | Where-Object { $_.marker -eq 'layer_b_browser_observation' })
+        if ($records.Count -ne 2 -or $destruction.Count -ne 1 -or $terminal.Count -ne 1 -or $unexpectedBrowser.Count -ne 0) {
+            return [ordered]@{ classification = 'Inconclusive'; reason = 'native_destruction_records_incomplete' }
+        }
+        $runtimeVersion = [string]$terminal[0].webview2_runtime_version
+        if ($runtimeVersion -notmatch '^\d{1,5}(\.\d{1,5}){3}$') {
+            return [ordered]@{ classification = 'Inconclusive'; reason = 'loaded_webview2_runtime_unproven' }
+        }
+        if ([string]$destruction[0].command -ne $wrapperCase.command -or
+            [int]$terminal[0].wrapper_entries -ne 1 -or
+            [int]$terminal[0].primary_records -ne 1 -or
+            [int]$terminal[0].post_records -ne 1 -or
+            $terminal[0].revoked -ne $true -or
+            [string]$terminal[0].result -ne [string]$destruction[0].result) {
+            return [ordered]@{ classification = 'Inconclusive'; reason = 'native_destruction_proof_mismatch' }
+        }
+        if ([string]$destruction[0].result -eq 'failed' -and $ExitCode -eq 2) {
+            return [ordered]@{ classification = 'Failed'; reason = 'native_target_destruction_failed'; terminal_result = 'failed'; wrapper_entries = 1; primary_records = 1; post_records = 1; webview2_runtime_version = $runtimeVersion }
+        }
+        if ([string]$destruction[0].result -eq 'passed' -and $ExitCode -eq 0 -and
+            $destruction[0].exact_authorized_hwnd -eq $true -and
+            $destruction[0].exact_target_window -eq $true -and
+            $destruction[0].destroy_call_succeeded -eq $true -and
+            $destruction[0].target_window_absent -eq $true -and
+            $destruction[0].native_hwnd_absent -eq $true -and
+            $destruction[0].authority_revoked -eq $true -and
+            $destruction[0].post_revocation_proven -eq $true) {
+            return [ordered]@{ classification = 'Passed'; reason = 'verified_native_target_destruction'; terminal_result = 'passed'; wrapper_entries = 1; primary_records = 1; post_records = 1; webview2_runtime_version = $runtimeVersion }
+        }
+        return [ordered]@{ classification = 'Inconclusive'; reason = 'native_destruction_exit_mismatch' }
+    }
     $browser = @($records | Where-Object { $_.marker -eq 'layer_b_browser_observation' })
     $primary = @($browser | Where-Object { $_.case -eq $Case -and $_.command -ne 'matrix' })
     $post = @($browser | Where-Object { $_.case -eq "$Case-post-revocation-proof" })
@@ -240,8 +275,7 @@ function Test-Transcript(
         (-not $postRequired -and $post.Count -ne 0)) {
         return [ordered]@{ classification = 'Inconclusive'; reason = 'post_revocation_evidence_mismatch' }
     }
-    $wrapperCase = Get-WrapperCaseInfo $Case
-    $expectedWrappers = if ($Case.StartsWith('direct-') -or $Case.StartsWith('unknown-command--') -or $wrapperCase.family -eq 'wrong-invoked-command') {
+    $expectedWrappers = if ($Case.StartsWith('direct-') -or $Case.StartsWith('unknown-command--')) {
         0
     } elseif ($wrapperCase.family -eq 'concurrent-batch') {
         8 + [int]$postRequired
@@ -279,6 +313,10 @@ function Test-Transcript(
     if ($wrapperCase.family -eq 'concurrent-batch' -and
         ($nativeCommands.Count -ne 8 -or @($nativeCommands | Where-Object { $_ -ne $wrapperCase.command }).Count -ne 0)) {
         return [ordered]@{ classification = 'Inconclusive'; reason = 'concurrent_native_entries_unproven' }
+    }
+    if ($wrapperCase.family -eq 'declared-invoked-mismatch' -and
+        ($nativeCommands.Count -ne 2 -or @($nativeCommands | Where-Object { $_ -ne $wrapperCase.command }).Count -ne 0)) {
+        return [ordered]@{ classification = 'Inconclusive'; reason = 'generated_wrapper_name_mismatch_unproven' }
     }
     $result = [string]$terminalBrowser[0].result
     if ($result -eq 'passed' -and $primary[0].result -eq 'passed' -and $ExitCode -eq 0) {
@@ -367,6 +405,40 @@ if ($SelfTest) {
         $assessment = Test-Transcript $sequenceCase $badSequence $stderr 0 $false
         if ($assessment.classification -ne 'Inconclusive') { throw 'Incorrect wrapper order did not fail closed.' }
 
+        $mismatchCase = 'wrapper-wallet_get_status-declared-invoked-mismatch--official-invoke'
+        $mismatchRecords = @(
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_get_status'; result = 'invalid_request' },
+            [ordered]@{ marker = 'layer_b_observation'; command = 'wallet_get_status'; result = 'qualification_runtime_unavailable' },
+            [ordered]@{ marker = 'layer_b_browser_observation'; case = $mismatchCase; command = 'wallet_select_recovery_destination'; outcome = 'invalid_request'; expected = 'invalid_request'; result = 'passed' },
+            [ordered]@{ marker = 'layer_b_browser_observation'; case = "$mismatchCase-post-revocation-proof"; command = 'wallet_select_recovery_destination'; outcome = 'qualification_runtime_unavailable'; expected = 'qualification_runtime_unavailable'; result = 'passed' },
+            [ordered]@{ marker = 'layer_b_terminal_observation'; case = $mismatchCase; result = 'passed'; wrapper_entries = 2; primary_records = 1; post_records = 1; revoked = $true; webview2_runtime_version = '151.0.4129.72' },
+            [ordered]@{ marker = 'layer_b_browser_observation'; case = $mismatchCase; command = 'matrix'; outcome = 'matrix_complete'; expected = 'matrix_complete'; result = 'passed' }
+        )
+        $mismatch = Join-Path $temporary 'mismatch.stdout.log'
+        Write-Utf8NoBom $mismatch @($mismatchRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
+        $assessment = Test-Transcript $mismatchCase $mismatch $stderr 0 $false
+        if ($assessment.classification -ne 'Passed') { throw 'Generated-wrapper mismatch evidence was not accepted.' }
+        $mismatchRecords[0].command = 'wallet_select_recovery_destination'
+        $badMismatch = Join-Path $temporary 'bad-mismatch.stdout.log'
+        Write-Utf8NoBom $badMismatch @($mismatchRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
+        $assessment = Test-Transcript $mismatchCase $badMismatch $stderr 0 $false
+        if ($assessment.classification -ne 'Inconclusive') { throw 'Wrong generated-wrapper mismatch evidence did not fail closed.' }
+
+        $destructionCase = 'wrapper-wallet_get_status-window-destruction-race--official-invoke'
+        $destructionRecords = @(
+            [ordered]@{ marker = 'layer_b_native_destruction_observation'; case = $destructionCase; command = 'wallet_get_status'; result = 'passed'; exact_authorized_hwnd = $true; exact_target_window = $true; destroy_call_succeeded = $true; target_window_absent = $true; native_hwnd_absent = $true; authority_revoked = $true; post_revocation_proven = $true },
+            [ordered]@{ marker = 'layer_b_terminal_observation'; case = $destructionCase; result = 'passed'; wrapper_entries = 1; primary_records = 1; post_records = 1; revoked = $true; webview2_runtime_version = '151.0.4129.72' }
+        )
+        $destruction = Join-Path $temporary 'destruction.stdout.log'
+        Write-Utf8NoBom $destruction @($destructionRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
+        $assessment = Test-Transcript $destructionCase $destruction $stderr 0 $false
+        if ($assessment.classification -ne 'Passed') { throw 'Verified native destruction evidence was not accepted.' }
+        $destructionRecords[0].target_window_absent = $false
+        $badDestruction = Join-Path $temporary 'bad-destruction.stdout.log'
+        Write-Utf8NoBom $badDestruction @($destructionRecords | ForEach-Object { $_ | ConvertTo-Json -Compress })
+        $assessment = Test-Transcript $destructionCase $badDestruction $stderr 0 $false
+        if ($assessment.classification -ne 'Inconclusive') { throw 'Incomplete native destruction evidence did not fail closed.' }
+
         $inconclusiveCase = 'exact-wallet_get_status--official-invoke'
         $inconclusiveRecords = @(
             [ordered]@{ marker = 'layer_b_observation'; result = 'qualification_transport_inconclusive' },
@@ -393,7 +465,7 @@ if ($SelfTest) {
         $sourceProof = @(Get-HarnessSourceHashes $selfTestRepository)
         if ($sourceProof.Count -lt 10) { throw 'Harness source provenance is incomplete.' }
 
-        Write-Output 'Layer B runner self-tests passed: 12 (9 transcript, 3 provenance)'
+        Write-Output 'Layer B runner self-tests passed: 16 (13 transcript, 3 provenance)'
         exit 0
     } finally {
         Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
@@ -463,7 +535,7 @@ foreach ($command in $commands) {
             $cases.Add("wrapper-$command-$family--official-invoke")
         }
     }
-    $cases.Add("wrapper-$command-wrong-invoked-command--official-invoke")
+    $cases.Add("wrapper-$command-declared-invoked-mismatch--official-invoke")
     foreach ($family in @(
         'window-other-local', 'window-remote-origin', 'window-recreated-main',
         'window-reloaded-generation', 'window-destruction-race', 'window-revocation-race'
@@ -482,8 +554,10 @@ foreach ($route in @('internals-invoke', 'internals-ipc')) { $cases.Add("exact-s
 foreach ($family in $duplicateFamilies) {
     foreach ($representation in $representations) {
         foreach ($route in $routes) {
-            $cases.Add("duplicate-$family-$representation--$route")
-            $cases.Add("nested-duplicate-$family-$representation--$route")
+            foreach ($commandName in @('create', 'restore')) {
+                $cases.Add("duplicate-$commandName-$family-$representation--$route")
+                $cases.Add("nested-duplicate-$commandName-$family-$representation--$route")
+            }
         }
     }
 }

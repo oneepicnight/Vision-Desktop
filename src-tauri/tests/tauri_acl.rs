@@ -475,7 +475,8 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
         assert!(layer_b_source.contains(command));
     }
     assert!(layer_b_source.contains("QualificationInvokeRequest"));
-    assert!(layer_b_source.contains("tauri::generate_handler!["));
+    assert!(layer_b_source.contains("qualification_invoke_handler"));
+    assert_eq!(layer_b_source.match_indices("__cmd__wallet_").count(), 14);
     assert!(layer_b_source.contains("QUALIFICATION_ARGUMENT"));
     assert!(layer_b_source.contains("Layer B qualification mode was not explicitly requested"));
     assert!(layer_b_source.contains("QUALIFICATION_WINDOW"));
@@ -555,9 +556,15 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(layer_b_script.contains("Promise.allSettled(pending)"));
     assert!(layer_b_source.contains("BrowserVersionString"));
     assert!(layer_b_source.contains("loaded_webview2_version"));
+    assert!(layer_b_source.contains("NativeDestructionObservation"));
+    assert!(layer_b_source.contains("native_hwnd_absent"));
+    assert!(layer_b_source.contains("mismatch_declared_command"));
     assert!(layer_b_script.contains("appendGeneratedWrapperCases"));
     assert!(layer_b_script.contains("sequential-repeat"));
     assert!(layer_b_script.contains("reordered-invoke"));
+    assert!(layer_b_script.contains("declared-invoked-mismatch"));
+    assert!(layer_b_script.contains("duplicateFamilies('wallet_create')"));
+    assert!(layer_b_script.contains("['wallet_create', 'wallet_restore']"));
     assert!(layer_b_runner.contains("Start-Process"));
     assert!(layer_b_runner.contains("--wallet-layer-b-case=$case"));
     assert!(layer_b_runner.contains("stdout_sha256"));

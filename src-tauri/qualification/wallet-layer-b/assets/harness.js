@@ -348,29 +348,42 @@
     }
   }
 
-  const duplicateFamilies = [
-    ['identical', `{"request":${JSON.stringify(exactPayload('wallet_create').request)},"request":${JSON.stringify(exactPayload('wallet_create').request)}}`],
-    ['conflicting', `{"request":${JSON.stringify(exactPayload('wallet_create').request)},"request":{"wallet_id":"conflict","label":"Conflict","recovery_destination_handle":"${HANDLE}"}}`],
-    ['valid-then-malformed', `{"request":${JSON.stringify(exactPayload('wallet_create').request)},"request":false}`],
-    ['malformed-then-valid', `{"request":false,"request":${JSON.stringify(exactPayload('wallet_create').request)}}`],
-    ['public-then-secret-like', `{"request":${JSON.stringify(exactPayload('wallet_create').request)},"password":"${PUBLIC_CANARY}"}`],
-    ['exact-and-wrong-case', `{"request":${JSON.stringify(exactPayload('wallet_create').request)},"Request":${JSON.stringify(exactPayload('wallet_create').request)}}`],
-    ['three-repeated', `{"request":false,"request":null,"request":${JSON.stringify(exactPayload('wallet_create').request)}}`],
-    ['escaped-equivalent', `{"request":false,"reque\\u0073t":${JSON.stringify(exactPayload('wallet_create').request)}}`],
-    ['bounded-whitespace', `{"request":false,${' '.repeat(4096)}"request":${JSON.stringify(exactPayload('wallet_create').request)}}`]
-  ]
+  function duplicateFamilies(command) {
+    const request = exactPayload(command).request
+    const handleName = command === 'wallet_restore'
+      ? 'recovery_source_handle'
+      : 'recovery_destination_handle'
+    const conflicting = { wallet_id: 'conflict', label: 'Conflict', [handleName]: HANDLE }
+    return [
+      ['identical', `{"request":${JSON.stringify(request)},"request":${JSON.stringify(request)}}`],
+      ['conflicting', `{"request":${JSON.stringify(request)},"request":${JSON.stringify(conflicting)}}`],
+      ['valid-then-malformed', `{"request":${JSON.stringify(request)},"request":false}`],
+      ['malformed-then-valid', `{"request":false,"request":${JSON.stringify(request)}}`],
+      ['public-then-secret-like', `{"request":${JSON.stringify(request)},"password":"${PUBLIC_CANARY}"}`],
+      ['exact-and-wrong-case', `{"request":${JSON.stringify(request)},"Request":${JSON.stringify(request)}}`],
+      ['three-repeated', `{"request":false,"request":null,"request":${JSON.stringify(request)}}`],
+      ['escaped-equivalent', `{"request":false,"reque\\u0073t":${JSON.stringify(request)}}`],
+      ['bounded-whitespace', `{"request":false,${' '.repeat(4096)}"request":${JSON.stringify(request)}}`]
+    ]
+  }
 
-  const nestedDuplicateFamilies = [
-    ['identical', `{"request":{"wallet_id":"nested","wallet_id":"nested","label":"Nested","recovery_destination_handle":"${HANDLE}"}}`],
-    ['conflicting', `{"request":{"wallet_id":"first","wallet_id":"second","label":"Nested","recovery_destination_handle":"${HANDLE}"}}`],
-    ['valid-then-malformed', `{"request":{"wallet_id":"nested","wallet_id":false,"label":"Nested","recovery_destination_handle":"${HANDLE}"}}`],
-    ['malformed-then-valid', `{"request":{"wallet_id":false,"wallet_id":"nested","label":"Nested","recovery_destination_handle":"${HANDLE}"}}`],
-    ['public-then-secret-like', `{"request":{"wallet_id":"nested","label":"Nested","recovery_destination_handle":"${HANDLE}","password":"${PUBLIC_CANARY}"}}`],
-    ['exact-and-wrong-case', `{"request":{"wallet_id":"nested","Wallet_Id":"wrong-case","label":"Nested","recovery_destination_handle":"${HANDLE}"}}`],
-    ['three-repeated', `{"request":{"wallet_id":false,"wallet_id":null,"wallet_id":"nested","label":"Nested","recovery_destination_handle":"${HANDLE}"}}`],
-    ['escaped-equivalent', `{"request":{"wallet_id":false,"wallet_\\u0069d":"nested","label":"Nested","recovery_destination_handle":"${HANDLE}"}}`],
-    ['bounded-whitespace', `{"request":{"wallet_id":false,${' '.repeat(4096)}"wallet_id":"nested","label":"Nested","recovery_destination_handle":"${HANDLE}"}}`]
-  ]
+  function nestedDuplicateFamilies(command) {
+    const handleName = command === 'wallet_restore'
+      ? 'recovery_source_handle'
+      : 'recovery_destination_handle'
+    const suffix = `"label":"Nested","${handleName}":"${HANDLE}"`
+    return [
+      ['identical', `{"request":{"wallet_id":"nested","wallet_id":"nested",${suffix}}}`],
+      ['conflicting', `{"request":{"wallet_id":"first","wallet_id":"second",${suffix}}}`],
+      ['valid-then-malformed', `{"request":{"wallet_id":"nested","wallet_id":false,${suffix}}}`],
+      ['malformed-then-valid', `{"request":{"wallet_id":false,"wallet_id":"nested",${suffix}}}`],
+      ['public-then-secret-like', `{"request":{"wallet_id":"nested",${suffix},"password":"${PUBLIC_CANARY}"}}`],
+      ['exact-and-wrong-case', `{"request":{"wallet_id":"nested","Wallet_Id":"wrong-case",${suffix}}}`],
+      ['three-repeated', `{"request":{"wallet_id":false,"wallet_id":null,"wallet_id":"nested",${suffix}}}`],
+      ['escaped-equivalent', `{"request":{"wallet_id":false,"wallet_\\u0069d":"nested",${suffix}}}`],
+      ['bounded-whitespace', `{"request":{"wallet_id":false,${' '.repeat(4096)}"wallet_id":"nested",${suffix}}}`]
+    ]
+  }
 
   async function directFetchProbe(kind, body, contentType) {
     if (!isSelected(`${kind}-missing-invoke-key`, kind)) return null
@@ -576,12 +589,13 @@
           ))
         }
       }
+      const mismatchedInvokedCommand = nextCommand(command)
       results.push(await runCase(
-        `wrapper-${command}-wrong-invoked-command`,
+        `wrapper-${command}-declared-invoked-mismatch`,
         'official-invoke',
-        'wallet_unknown',
-        {},
-        'framework_error_redacted'
+        mismatchedInvokedCommand,
+        exactPayload(command),
+        'invalid_request'
       ))
       for (const [family, path, expected] of windowFamilies) {
         results.push(await controlScenario(
@@ -686,29 +700,33 @@
 
     results.push(await runCase('unknown-command', 'official-invoke', 'wallet_unknown', {}, 'framework_error_redacted'))
 
-    for (const [family, text] of duplicateFamilies) {
-      for (const route of ['official-invoke', 'internals-invoke', 'internals-ipc']) {
-        results.push(await runCase(`duplicate-${family}-string`, route, 'wallet_create', text, 'invalid_request'))
-        results.push(await runCase(`duplicate-${family}-bytes`, route, 'wallet_create', new TextEncoder().encode(text), 'invalid_request'))
-        const normalized = JSON.parse(text)
-        const expected = validNormalizedCreate(normalized) ? 'layer_b_accepted' : 'invalid_request'
-        results.push(await runCase(`duplicate-${family}-object-normalized`, route, 'wallet_create', normalized, expected))
+    for (const command of ['wallet_create', 'wallet_restore']) {
+      const commandName = command === 'wallet_create' ? 'create' : 'restore'
+      for (const [family, text] of duplicateFamilies(command)) {
+        for (const route of ['official-invoke', 'internals-invoke', 'internals-ipc']) {
+          results.push(await runCase(`duplicate-${commandName}-${family}-string`, route, command, text, 'invalid_request'))
+          results.push(await runCase(`duplicate-${commandName}-${family}-bytes`, route, command, new TextEncoder().encode(text), 'invalid_request'))
+          const normalized = JSON.parse(text)
+          const expected = validNormalizedRequest(command, normalized) ? 'layer_b_accepted' : 'invalid_request'
+          results.push(await runCase(`duplicate-${commandName}-${family}-object-normalized`, route, command, normalized, expected))
+        }
+      }
+
+      for (const [family, text] of nestedDuplicateFamilies(command)) {
+        for (const route of ['official-invoke', 'internals-invoke', 'internals-ipc']) {
+          results.push(await runCase(`nested-duplicate-${commandName}-${family}-string`, route, command, text, 'invalid_request'))
+          results.push(await runCase(`nested-duplicate-${commandName}-${family}-bytes`, route, command, new TextEncoder().encode(text), 'invalid_request'))
+          const normalized = JSON.parse(text)
+          const expected = validNormalizedRequest(command, normalized) ? 'layer_b_accepted' : 'invalid_request'
+          results.push(await runCase(`nested-duplicate-${commandName}-${family}-object-normalized`, route, command, normalized, expected))
+        }
       }
     }
 
-    for (const [family, text] of nestedDuplicateFamilies) {
-      for (const route of ['official-invoke', 'internals-invoke', 'internals-ipc']) {
-        results.push(await runCase(`nested-duplicate-${family}-string`, route, 'wallet_create', text, 'invalid_request'))
-        results.push(await runCase(`nested-duplicate-${family}-bytes`, route, 'wallet_create', new TextEncoder().encode(text), 'invalid_request'))
-        const normalized = JSON.parse(text)
-        const expected = validNormalizedCreate(normalized) ? 'layer_b_accepted' : 'invalid_request'
-        results.push(await runCase(`nested-duplicate-${family}-object-normalized`, route, 'wallet_create', normalized, expected))
-      }
-    }
-
-    results.push(await directFetchProbe('direct-fetch-text', duplicateFamilies[0][1], 'application/json'))
-    results.push(await directFetchProbe('direct-fetch-bytes', new TextEncoder().encode(duplicateFamilies[0][1]), 'application/octet-stream'))
-    results.push(await directXhrProbe(duplicateFamilies[0][1]))
+    const directDuplicate = duplicateFamilies('wallet_create')[0][1]
+    results.push(await directFetchProbe('direct-fetch-text', directDuplicate, 'application/json'))
+    results.push(await directFetchProbe('direct-fetch-bytes', new TextEncoder().encode(directDuplicate), 'application/octet-stream'))
+    results.push(await directXhrProbe(directDuplicate))
     results.push(await forcePostMessageFallback())
 
     for (const panicPoint of ['metadata', 'body', 'response', 'observation']) {
@@ -752,15 +770,18 @@
     runButton.disabled = false
   }
 
-  function validNormalizedCreate(value) {
+  function validNormalizedRequest(command, value) {
     const request = value && typeof value === 'object' ? value.request : null
+    const handleName = command === 'wallet_restore'
+      ? 'recovery_source_handle'
+      : 'recovery_destination_handle'
     return Boolean(
       value && Object.keys(value).length === 1 && request && typeof request === 'object' &&
       Object.keys(request).length === 3 &&
       typeof request.wallet_id === 'string' &&
       typeof request.label === 'string' &&
-      typeof request.recovery_destination_handle === 'string' &&
-      request.recovery_destination_handle.length === 64
+      typeof request[handleName] === 'string' &&
+      request[handleName].length === 64
     )
   }
 

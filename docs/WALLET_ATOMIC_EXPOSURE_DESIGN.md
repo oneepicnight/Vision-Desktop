@@ -165,6 +165,40 @@ presentation is limited to `not_observed`, `pending`, `mined_observed`, or
 `mined_high_confidence`; none claims irreversible finality. The fixed limit, local scope, and
 explicit incompleteness avoid implying chain-wide history.
 
+After a matching wallet is unlocked, this command also performs bounded authenticated discovery of
+the one canonical reconciliation store. Its response includes exactly one
+`pending_reconciliation` field whose value is `null` or one of:
+
+- `{"state":"accepted_recording_pending","transaction_id":"<64 lowercase hex>"}`; or
+- `{"state":"outcome_unknown","transaction_id":"<64 lowercase hex>"}`.
+
+The field is derived from authenticated Rust storage on every call; it is not restored from React,
+browser persistence, or the general Desktop reducer. A reload, navigation, main-window replacement,
+application restart, or explicit UI-state clearing therefore cannot erase the durable warning. The
+Wallet UI must call `wallet_list_activity` after every successful matching-wallet unlock and after a
+reload or restart before it enables preview or submission controls.
+
+Discovery uses the existing matching-wallet, canonical-custody, restart-only reconciliation permit.
+That permit carries no signing, submission, Core-write, retry, or replacement authority:
+
+- `MayHaveBeenSubmitted` is reported as `outcome_unknown`. When a supported Core authority is
+  available, the same call may perform the reviewed exact-envelope read-only lookup. `NotFound`,
+  unavailable or recovering Core, timeout, peer/generation failure, or any unproven response leaves
+  the durable state and public outcome unchanged. It never submits again.
+- `AcceptedRecordingPending` first attempts only the reviewed authenticated journal-completion
+  transition. Success resolves the reconciliation record to recorded acceptance and returns the new
+  activity record with `pending_reconciliation: null`. Journal unavailability or write failure
+  preserves the durable phase and returns `accepted_recording_pending` again. Core connectivity is
+  neither required nor consulted for this journal-only completion.
+- Prepared or terminal cleanup follows the reviewed restart state machine and cannot manufacture a
+  public acceptance, ambiguity, signature, or write permit.
+
+Any authenticated nonterminal reconciliation record blocks `wallet_prepare_transfer_preview` and
+`wallet_confirm_and_submit_transfer`. They return the fixed `wallet_reconciliation_pending` error
+before creating or consuming new transaction authority. The block remains through reload, restart,
+Core unavailability, and repeated activity queries until the reviewed state machine reaches a
+terminal phase. No UI dismissal can clear it.
+
 `wallet_refresh_transaction_observation` operates only on one authenticated local record for which
 Rust can reconstruct or retain the reviewed exact-envelope lookup expectation. It returns the
 updated public activity record and a change classification that may include `reorganized` or
@@ -195,6 +229,7 @@ to fixed IPC codes. It must include, at minimum:
 - `wallet_amount_arithmetic_rejected`
 - `wallet_preview_unavailable`
 - `wallet_confirmation_cancelled`
+- `wallet_reconciliation_pending`
 - `wallet_activity_unavailable`
 - `wallet_transaction_unknown`
 
@@ -304,6 +339,7 @@ React may hold only public intent and public presentation:
 - recipient and amount draft;
 - public preview fields and opaque preview handle;
 - public transaction identifier, conservative outcome, and authenticated activity presentation;
+- one bounded pending reconciliation presentation restored from authenticated Rust storage; and
 - bounded loading, cancellation, and fixed error code.
 
 Passwords and portable recovery credentials are collected only in Rust-owned native controls.
@@ -316,6 +352,12 @@ Wallet capability state remains outside the general Desktop reducer and event st
 feature-local presentation state is cleared on lock, reload, navigation, main-window destruction,
 session lock, sleep, process lease loss, and application exit. No password input is added to the
 WebView, and no browser storage is used for wallet state.
+
+Clearing frontend state does not clear reconciliation state. After reload, restart, or a new
+matching-wallet unlock, the frontend must keep preview and submission controls disabled until
+`wallet_list_activity` completes and supplies the current authenticated
+`pending_reconciliation` value. Failure or cancellation of that query leaves spending controls
+disabled; it never means that no pending record exists.
 
 The UI must preserve the current distinction between a configured mining reward address and a
 Desktop-custodied wallet. Creation or unlock does not automatically edit mining configuration,
@@ -355,6 +397,8 @@ That tranche is limited to:
 - exact whole-envelope parsing and bounded public response projection;
 - composition of the already reviewed preview, native confirmation, signing, submission,
   reconciliation, receipt, and journal modules;
+- bounded matching-wallet restart discovery and pending-state projection through
+  `wallet_list_activity`;
 - proof that activity refresh has an authenticated exact-envelope expectation;
 - fixed error translation and non-emitting diagnostics; and
 - focused generated-wrapper-shaped and adversarial Rust tests.
@@ -379,6 +423,10 @@ Before publication of the frozen atomic release candidate, independent evidence 
 - native confirmation only, with the accepted DPI, focus, IME, input-origin, and revocation matrix;
 - exact transaction, signature, Core peer, submission, ambiguity, receipt, reorganization, journal,
   and restart-reconciliation vectors;
+- reload, restart, Core-offline, journal-failure, and repeated-query cases proving that one durable
+  `outcome_unknown` or `accepted_recording_pending` state remains visible and blocks new spending;
+- successful journal-only completion of `accepted_recording_pending` without Core access, followed
+  by terminal reconciliation and exactly one authenticated activity record;
 - no automatic write retry or replacement after any ambiguous network outcome;
 - secret and telemetry canaries across fixed errors, panic containment, logs, diagnostics, support
   packages, crash output, command line, frontend state, browser storage, and packaged assets;

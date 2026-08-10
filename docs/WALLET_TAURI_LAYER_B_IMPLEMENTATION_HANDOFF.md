@@ -6,9 +6,9 @@ Workstation: Vision Desktop ASUS Windows workstation
 
 Branch: `fix/wallet-signing-adversarial-matrix`
 
-Correction parent and qualification implementation: `63b524c915dc919450e7f1b09f27cb8a38ad2528`
+Correction parent: `6ad56eedf479d88ed864df75402ca64b3af6ded3`
 
-Qualification implementation tree: `bb0e465617cecc43c2b15fddfc112bb90039a7d7`
+Prior qualification implementation: `63b524c915dc919450e7f1b09f27cb8a38ad2528`
 
 ## Result
 
@@ -22,7 +22,12 @@ terminal report was rejected.
 These executions are Inconclusive and do not claim a Passed result. Production
 `duplicate_key_rejection_proven` remains `false`, and all production wallet command, permission,
 frontend, activation, signing, and submission surfaces remain closed. This correction is limited
-to the qualification runner, native report validation, regression tests, and this handoff.
+to the non-custody qualification startup, runner provenance, regression tests, and this handoff.
+
+Independent review accepted the exit-code and forced-fallback corrections but did not authorize
+another execution. It identified seven remote-origin cases with no evidence, seven recreated-main
+cases with no evidence, and a race in four of seven other-local cases. The current tranche corrects
+those three startup/lifecycle findings without launching the harness.
 
 ## Isolation remains unchanged
 
@@ -362,11 +367,51 @@ acceptance of the correctly bounded terminal record.
 
 No packaged matrix was run after these source changes.
 
+## M-01 correction: deterministic remote-origin startup
+
+The configured qualification window now starts on `bootstrap.html`, a static page containing no
+script, harness import, Tauri reference, selected-case logic, or automatic action. Native setup
+captures the original main-window identity and loaded WebView2 runtime before navigating that same
+WebView to the bounded loopback remote-origin page. The remote page therefore tests an invalid
+origin without destroying the app's only window, recreating a label, or losing the surviving native
+report protocol.
+
+Bootstrap page loads do not consume the authorized page generation. The remote page is the first
+executable generation and must fail the existing exact-origin authority check while retaining the
+same native process and report controller. The old destroy-and-rebuild remote path was removed.
+
+## M-02 correction: surviving recreated-main controller
+
+Recreated-main cases now create one hidden native controller window before the executable main page
+loads. The controller uses the non-executable bootstrap asset, has a distinct fixed label, is absent
+from the qualification capability window list, and cannot invoke any generated wallet wrapper.
+
+When recreation is requested, native code requires that controller to exist, destroys the exact
+main window, builds the replacement main window with the executable harness, and only then destroys
+the controller. The process therefore cannot terminate merely because the original main window was
+removed. The replacement receives a new page generation while the original authorized generation
+remains fixed, so it must exercise the intended invalid-window result. Any missing window,
+replacement failure, or controller teardown failure invalidates authority, emits one fixed marker,
+and exits failed.
+
+## M-03 correction: no executable initial-window race
+
+Other-local cases also begin with the non-executable bootstrap main window. Native setup builds the
+other local window with the harness before retiring the bootstrap main window. Only the other window
+can execute the selected case; the original authorized window has no script capable of invoking a
+wrapper. This removes the observed race in which the main page sometimes submitted an accepted
+request before setup destroyed it.
+
+Normal cases are likewise navigated to the harness only after native setup finishes. Startup-plan,
+bootstrap-content, config-URL, capability-exclusion, and generation regressions make these ordering
+properties explicit. The runner fingerprints the new bootstrap asset as mandatory primary source
+identity.
+
 ## Source-only validation performed
 
 The following checks passed without starting the harness:
 
-- Layer B Rust unit tests: 20 passed;
+- Layer B Rust unit tests: 22 passed;
 - runner self-tests: 24 passed (16 transcript, 3 provenance, and 5 Windows PowerShell compatibility checks);
 - complete Rust baseline: 293 passed, 4 operator-only ignored;
 - Tauri authority tests: 7 passed;
@@ -386,8 +431,10 @@ corrective commit and tree authorizes execution.
 ## Corrective files
 
 - `docs/WALLET_TAURI_LAYER_B_IMPLEMENTATION_HANDOFF.md`
+- `src-tauri/qualification/wallet-layer-b/assets/bootstrap.html`
 - `src-tauri/qualification/wallet-layer-b/main.rs`
 - `src-tauri/qualification/wallet-layer-b/run-layer-b-qualification.ps1`
+- `src-tauri/qualification/wallet-layer-b/tauri.conf.json`
 
 No dependency or lockfile change is required.
 

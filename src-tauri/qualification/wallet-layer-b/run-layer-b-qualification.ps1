@@ -189,6 +189,7 @@ function Get-HarnessSourceHashes([string]$Repository) {
         'src-tauri\qualification\wallet-layer-b\main.rs',
         'src-tauri\qualification\wallet-layer-b\tauri.conf.json',
         'src-tauri\qualification\wallet-layer-b\permissions\wallet-layer-b.toml',
+        'src-tauri\qualification\wallet-layer-b\assets\bootstrap.html',
         'src-tauri\qualification\wallet-layer-b\assets\index.html',
         'src-tauri\qualification\wallet-layer-b\assets\harness.js',
         'src-tauri\qualification\wallet-layer-b\assets\harness.css',

@@ -12,6 +12,7 @@
       {
         "label": "wallet-transport-qualification",
         "title": "Vision Wallet Transport Qualification ? NOT PRODUCTION",
+        "url": "bootstrap.html",
         "width": 1060,
         "height": 760,
         "resizable": true

@@ -27,6 +27,7 @@ const QUALIFICATION_ARGUMENT: &str = "--wallet-layer-b-qualification";
 const QUALIFICATION_CASE_ARGUMENT: &str = "--wallet-layer-b-case=";
 const QUALIFICATION_WINDOW: &str = "wallet-transport-qualification";
 const QUALIFICATION_OTHER_WINDOW: &str = "wallet-transport-qualification-other";
+const QUALIFICATION_CONTROLLER_WINDOW: &str = "wallet-transport-qualification-controller";
 const QUALIFICATION_HOST: &str = "tauri.localhost";
 const REPORT_PROTOCOL: &str = "qualification-report";
 const CONTROL_PROTOCOL: &str = "qualification-control";
@@ -160,7 +161,10 @@ impl QualificationState {
             .map_err(|_| ())
     }
 
-    fn note_page_load(&self) {
+    fn note_page_load(&self, url: &tauri::Url) {
+        if is_bootstrap_page(url) {
+            return;
+        }
         let generation = self.page_generation.fetch_add(1, Ordering::AcqRel) + 1;
         let _ = self.authorized_generation.compare_exchange(
             0,
@@ -189,6 +193,27 @@ impl QualificationState {
         if !self.revoked.swap(true, Ordering::AcqRel) {
             self.invalidations.fetch_add(1, Ordering::AcqRel);
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+enum StartupPlan {
+    Main,
+    OtherLocal,
+    RemoteOrigin,
+    RecreatedMain,
+}
+
+fn startup_plan(selected_case: &str) -> StartupPlan {
+    if selected_case.contains("window-other-local--") {
+        StartupPlan::OtherLocal
+    } else if selected_case.contains("window-remote-origin--") {
+        StartupPlan::RemoteOrigin
+    } else if selected_case.contains("window-recreated-main--") {
+        StartupPlan::RecreatedMain
+    } else {
+        StartupPlan::Main
     }
 }
 
@@ -421,6 +446,15 @@ fn is_qualification_origin(url: &tauri::Url) -> bool {
         && url.password().is_none()
         && url.query().is_none()
         && url.fragment().is_none()
+}
+
+fn is_bootstrap_page(url: &tauri::Url) -> bool {
+    is_qualification_origin(url) && url.path() == "/bootstrap.html"
+}
+
+fn local_harness_url() -> Result<tauri::Url, &'static str> {
+    tauri::Url::parse("http://tauri.localhost/index.html")
+        .map_err(|_| "Layer B local harness URL is invalid")
 }
 
 fn fixed_error(code: &'static str) -> InvokeError {
@@ -1145,22 +1179,50 @@ fn schedule_window_replacement<R: Runtime>(app_handle: tauri::AppHandle<R>, relo
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let app_for_main = app_handle.clone();
-        let _ = app_handle.run_on_main_thread(move || {
-            if let Some(window) = app_for_main.get_webview_window(QUALIFICATION_WINDOW) {
-                if reload_only {
-                    let _ = window.reload();
-                } else {
-                    let _ = window.destroy();
-                    let _ = tauri::WebviewWindowBuilder::new(
+        if app_handle
+            .run_on_main_thread(move || {
+                let replacement = (|| -> Result<(), ()> {
+                    let window = app_for_main
+                        .get_webview_window(QUALIFICATION_WINDOW)
+                        .ok_or(())?;
+                    if reload_only {
+                        window.reload().map_err(|_| ())?;
+                        return Ok(());
+                    }
+                    if app_for_main
+                        .get_webview_window(QUALIFICATION_CONTROLLER_WINDOW)
+                        .is_none()
+                    {
+                        return Err(());
+                    }
+                    window.destroy().map_err(|_| ())?;
+                    tauri::WebviewWindowBuilder::new(
                         &app_for_main,
                         QUALIFICATION_WINDOW,
                         tauri::WebviewUrl::App("index.html".into()),
                     )
                     .title("Vision Wallet Transport Qualification - Recreated")
-                    .build();
+                    .build()
+                    .map_err(|_| ())?;
+                    if let Some(controller) =
+                        app_for_main.get_webview_window(QUALIFICATION_CONTROLLER_WINDOW)
+                    {
+                        controller.destroy().map_err(|_| ())?;
+                    }
+                    Ok(())
+                })();
+                if replacement.is_err() {
+                    app_for_main.state::<QualificationState>().invalidate();
+                    let _ = io::stderr().write_all(b"layer_b_window_replacement_failed\n");
+                    app_for_main.exit(2);
                 }
-            }
-        });
+            })
+            .is_err()
+        {
+            app_handle.state::<QualificationState>().invalidate();
+            let _ = io::stderr().write_all(b"layer_b_window_replacement_failed\n");
+            app_handle.exit(2);
+        }
     });
 }
 
@@ -1532,7 +1594,9 @@ fn main() {
         .manage(QualificationState::new(selected_case))
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
-                webview.state::<QualificationState>().note_page_load();
+                webview
+                    .state::<QualificationState>()
+                    .note_page_load(payload.url());
             }
         })
         .setup(|app| {
@@ -1550,31 +1614,39 @@ fn main() {
                         .0 as isize,
                 )
                 .map_err(|_| "Layer B native identity was already initialized")?;
-            if state.selected_case.contains("window-other-local--") {
-                main.destroy()
-                    .map_err(|_| "Layer B could not replace the main window")?;
-                let other = tauri::WebviewWindowBuilder::new(
-                    app,
-                    QUALIFICATION_OTHER_WINDOW,
-                    tauri::WebviewUrl::App("index.html".into()),
-                )
-                .title("Vision Wallet Transport Qualification - Other Window")
-                .build()?;
-                capture_loaded_webview2_runtime(&other, app.handle().clone())?;
-            } else if state.selected_case.contains("window-remote-origin--") {
-                let remote_url = start_remote_origin_server(&state.selected_case)?;
-                main.destroy()
-                    .map_err(|_| "Layer B could not replace the main window")?;
-                let remote = tauri::WebviewWindowBuilder::new(
-                    app,
-                    QUALIFICATION_WINDOW,
-                    tauri::WebviewUrl::External(remote_url),
-                )
-                .title("Vision Wallet Transport Qualification - Remote Origin")
-                .build()?;
-                capture_loaded_webview2_runtime(&remote, app.handle().clone())?;
-            } else {
-                capture_loaded_webview2_runtime(&main, app.handle().clone())?;
+            match startup_plan(&state.selected_case) {
+                StartupPlan::OtherLocal => {
+                    let other = tauri::WebviewWindowBuilder::new(
+                        app,
+                        QUALIFICATION_OTHER_WINDOW,
+                        tauri::WebviewUrl::App("index.html".into()),
+                    )
+                    .title("Vision Wallet Transport Qualification - Other Window")
+                    .build()?;
+                    capture_loaded_webview2_runtime(&other, app.handle().clone())?;
+                    main.destroy()
+                        .map_err(|_| "Layer B could not retire the bootstrap window")?;
+                }
+                StartupPlan::RemoteOrigin => {
+                    capture_loaded_webview2_runtime(&main, app.handle().clone())?;
+                    main.navigate(start_remote_origin_server(&state.selected_case)?)?;
+                }
+                StartupPlan::RecreatedMain => {
+                    capture_loaded_webview2_runtime(&main, app.handle().clone())?;
+                    tauri::WebviewWindowBuilder::new(
+                        app,
+                        QUALIFICATION_CONTROLLER_WINDOW,
+                        tauri::WebviewUrl::App("bootstrap.html".into()),
+                    )
+                    .title("Vision Wallet Transport Qualification Controller")
+                    .visible(false)
+                    .build()?;
+                    main.navigate(local_harness_url()?)?;
+                }
+                StartupPlan::Main => {
+                    capture_loaded_webview2_runtime(&main, app.handle().clone())?;
+                    main.navigate(local_harness_url()?)?;
+                }
             }
             Ok(())
         })
@@ -2013,6 +2085,63 @@ mod tests {
             "http://tauri.localhost/?remote=true",
         ] {
             assert!(!is_qualification_origin(&rejected.parse().unwrap()));
+        }
+    }
+
+    #[test]
+    fn bootstrap_page_is_non_executable_and_cannot_consume_window_authority() {
+        let bootstrap = include_str!("assets/bootstrap.html");
+        assert!(!bootstrap.contains("<script"));
+        assert!(!bootstrap.contains("harness.js"));
+        assert!(!bootstrap.contains("__TAURI"));
+
+        let config: Value = serde_json::from_str(include_str!("tauri.conf.json")).unwrap();
+        assert_eq!(
+            config["app"]["windows"][0]["url"].as_str(),
+            Some("bootstrap.html")
+        );
+        let permitted_windows = config["app"]["security"]["capabilities"][0]["windows"]
+            .as_array()
+            .unwrap();
+        assert!(!permitted_windows
+            .iter()
+            .any(|window| { window.as_str() == Some(QUALIFICATION_CONTROLLER_WINDOW) }));
+
+        let state =
+            QualificationState::new("wrapper-wallet_get_status-exact--official-invoke".into());
+        state.note_page_load(&"http://tauri.localhost/bootstrap.html".parse().unwrap());
+        assert_eq!(state.page_generation.load(Ordering::Acquire), 0);
+        assert_eq!(state.authorized_generation.load(Ordering::Acquire), 0);
+        state.note_page_load(&"http://tauri.localhost/index.html".parse().unwrap());
+        assert_eq!(state.page_generation.load(Ordering::Acquire), 1);
+        assert_eq!(state.authorized_generation.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn special_window_cases_have_deterministic_native_startup_plans() {
+        for command in ALL_COMMANDS {
+            assert_eq!(
+                startup_plan(&format!(
+                    "wrapper-{command}-window-other-local--official-invoke"
+                )),
+                StartupPlan::OtherLocal
+            );
+            assert_eq!(
+                startup_plan(&format!(
+                    "wrapper-{command}-window-remote-origin--official-invoke"
+                )),
+                StartupPlan::RemoteOrigin
+            );
+            assert_eq!(
+                startup_plan(&format!(
+                    "wrapper-{command}-window-recreated-main--official-invoke"
+                )),
+                StartupPlan::RecreatedMain
+            );
+            assert_eq!(
+                startup_plan(&format!("wrapper-{command}-exact--official-invoke")),
+                StartupPlan::Main
+            );
         }
     }
 }

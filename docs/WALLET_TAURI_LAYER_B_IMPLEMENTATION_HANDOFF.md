@@ -6,23 +6,23 @@ Workstation: Vision Desktop ASUS Windows workstation
 
 Branch: `fix/wallet-signing-adversarial-matrix`
 
-Qualification-approved commit with incompatible runner preflight: `781640b90ea387665c576bcf6815317f3b6c149f`
+Qualification execution target with incomplete first case: `9184b0c4856c307c10a2ccc8b4f9f831239fcef7`
 
-Qualification-approved tree: `a660152c95b5d9484b95c815828ee15abe349b92`
+Qualification execution tree: `03520c71db1990d4064fa9969b63bf8f2f9466bc`
 
 ## Result
 
 All findings from the fifth independent Layer B review remain corrected. The subsequent authorized
-qualification attempt stopped during runner preflight because Windows PowerShell 5.1 does not
-provide `System.IO.Path.GetRelativePath`. No harness process or matrix case started, and no evidence
-directory was created. This correction makes only the runner and handoff compatible with the
-supported workstation shell; all prior guarded-metadata, linear-revocation, transport-proof,
-transcript, destruction, mismatch, duplicate, and genuine-concurrency corrections remain intact.
+matrix attempt launched only the first isolated case. Its native generated wrapper accepted the
+exact request and proved `custom_protocol_proven`, but the browser-observation protocol rejected its
+cross-origin report. The case then reached the 60-second deadline. Windows PowerShell 5.1 rejected
+the runner's PowerShell-7-only `Kill(true)` overload, so the runner exited without a terminal
+classification or evidence manifest and left the exact harness process alive. That process was
+verified by full executable path and command line, terminated, and confirmed absent.
 
-The harness and packaged qualification matrix were not launched. This corrective implementation
-does not claim a Passed result. Production `duplicate_key_rejection_proven` remains `false`, and
-all production wallet command, permission, frontend, activation, signing, and submission surfaces
-remain closed.
+This execution is Inconclusive and does not claim a Passed result. No second case ran. Production
+`duplicate_key_rejection_proven` remains `false`, and all production wallet command, permission,
+frontend, activation, signing, and submission surfaces remain closed.
 
 ## Isolation remains unchanged
 
@@ -256,15 +256,49 @@ substring only after that validation succeeds. It does not use the unavailable
 `System.IO.Path.GetRelativePath` API. Out-of-root paths fail closed.
 
 Runner self-tests execute under the workstation's Windows PowerShell 5.1 runtime and prove both a
-nested relative path and rejection of an outside sibling path. The complete matrix must not be
-retried until this exact corrective commit receives independent execution approval.
+nested relative path and rejection of an outside sibling path. That correction was independently
+approved before the incomplete first-case attempt described below.
+
+## Preserved incomplete execution evidence
+
+Evidence directory:
+
+`C:\Vision\wallet-layer-b-evidence-9184b0c-20260810`
+
+Only these immutable primary files exist:
+
+- stdout: 276 bytes, SHA-256 `516257D6C86E1C86D231124DD3F47B9D87E24E8F6865E84DF36640F33479CABC`;
+- stderr: 37 bytes, SHA-256 `EDB08204292949C170670BBDF4D779567B3796334E49D3F13605A15B96C1432C`.
+
+Stdout contains one bounded native `layer_b_observation` showing the exact
+`wallet_get_status` wrapper accepted the empty JSON object through
+`custom_protocol_proven`. Stderr contains only the fixed
+`layer_b_browser_observation_rejected` marker. There is no browser primary record, native
+terminal record, manifest, or Passed result.
+
+The Desktop worktree remained clean. The four pre-existing Vision-Core working-tree entries were
+preserved. The wallet-custody root remained absent, and no qualification process remained after
+controlled cleanup.
+
+## First-execution correction
+
+The browser report now uses CORS-safelisted `text/plain;charset=UTF-8` for its cross-origin
+custom-protocol fetch. The body remains the same bounded JSON and still undergoes strict
+deny-unknown-fields parsing and fixed-value validation in Rust. This avoids an unauthoritative
+OPTIONS preflight reaching the POST-only observation handler.
+
+Timeout cleanup now uses the Windows PowerShell 5.1-compatible parameterless `Kill()` method,
+then always performs a parameterless `WaitForExit()` to prove process exit and flush redirected
+stdout/stderr before transcript classification. A still-live exact process fails closed. Real
+Windows PowerShell self-tests launch a bounded timeout probe and a successful redirected-output
+probe, proving both termination and transcript flushing through the same helper used by the runner.
 
 ## Source-only validation performed
 
 The following checks passed without starting the harness:
 
 - Layer B Rust unit tests: 20 passed;
-- runner self-tests: 21 passed (16 transcript, 3 provenance, and 2 Windows PowerShell compatibility checks);
+- runner self-tests: 23 passed (16 transcript, 3 provenance, and 4 Windows PowerShell compatibility checks);
 - complete Rust baseline: 293 passed, 4 operator-only ignored;
 - Tauri authority tests: 7 passed;
 - WebView isolation tests: 2 passed;
@@ -283,7 +317,9 @@ corrective commit and tree authorizes execution.
 ## Corrective files
 
 - `docs/WALLET_TAURI_LAYER_B_IMPLEMENTATION_HANDOFF.md`
+- `src-tauri/qualification/wallet-layer-b/assets/harness.js`
 - `src-tauri/qualification/wallet-layer-b/run-layer-b-qualification.ps1`
+- `src-tauri/tests/tauri_acl.rs`
 
 No dependency or lockfile change is required.
 

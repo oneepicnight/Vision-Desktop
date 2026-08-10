@@ -33,6 +33,16 @@ function Get-RelativePathWithinRoot([string]$Root, [string]$Path) {
     return $pathFull.Substring($rootPrefix.Length)
 }
 
+function Wait-QualificationProcess([System.Diagnostics.Process]$Process, [int]$TimeoutMilliseconds) {
+    $timedOut = -not $Process.WaitForExit($TimeoutMilliseconds)
+    if ($timedOut) { $Process.Kill() }
+    $Process.WaitForExit()
+    if (Get-Process -Id $Process.Id -ErrorAction SilentlyContinue) {
+        throw 'Qualification process remained alive after bounded shutdown.'
+    }
+    return $timedOut
+}
+
 function Get-StringSha256([string]$Value) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
@@ -365,6 +375,28 @@ if ($SelfTest) {
         } catch {
             if ($_.Exception.Message -eq 'Out-of-root fingerprint path did not fail closed.') { throw }
         }
+        $probeExecutable = Join-Path $PSHOME 'powershell.exe'
+        $timeoutStdout = Join-Path $temporary 'timeout-probe.stdout.log'
+        $timeoutStderr = Join-Path $temporary 'timeout-probe.stderr.log'
+        $timeoutProbe = Start-Process -FilePath $probeExecutable -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -RedirectStandardOutput $timeoutStdout -RedirectStandardError $timeoutStderr -PassThru -WindowStyle Hidden
+        try {
+            if (-not (Wait-QualificationProcess $timeoutProbe 100)) {
+                throw 'Windows PowerShell timeout probe did not time out.'
+            }
+        } finally {
+            if (-not $timeoutProbe.HasExited) { $timeoutProbe.Kill(); $timeoutProbe.WaitForExit() }
+        }
+
+        $flushStdout = Join-Path $temporary 'flush-probe.stdout.log'
+        $flushStderr = Join-Path $temporary 'flush-probe.stderr.log'
+        $flushProbe = Start-Process -FilePath $probeExecutable -ArgumentList @('-NoProfile', '-Command', 'Write-Output runner-flush-proof') -RedirectStandardOutput $flushStdout -RedirectStandardError $flushStderr -PassThru -WindowStyle Hidden
+        if (Wait-QualificationProcess $flushProbe 10000) {
+            throw 'Windows PowerShell flush probe unexpectedly timed out.'
+        }
+        if ((Get-Content -Raw -LiteralPath $flushStdout).Trim() -ne 'runner-flush-proof') {
+            throw 'Redirected qualification output was not flushed before classification.'
+        }
+
         $stderr = Join-Path $temporary 'stderr.log'
         Set-Content -LiteralPath $stderr -Value '' -NoNewline
 
@@ -513,7 +545,7 @@ if ($SelfTest) {
         $sourceProof = @(Get-HarnessSourceHashes $selfTestRepository)
         if ($sourceProof.Count -lt 10) { throw 'Harness source provenance is incomplete.' }
 
-        Write-Output 'Layer B runner self-tests passed: 21 (16 transcript, 3 provenance, 2 Windows PowerShell compatibility)'
+        Write-Output 'Layer B runner self-tests passed: 23 (16 transcript, 3 provenance, 4 Windows PowerShell compatibility)'
         exit 0
     } finally {
         Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
@@ -623,8 +655,7 @@ foreach ($case in $cases) {
     $startedUtc = [DateTimeOffset]::UtcNow.ToString('O')
     $process = Start-Process -FilePath $binary -ArgumentList @('--wallet-layer-b-qualification', "--wallet-layer-b-case=$case") -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -WindowStyle Hidden
     $processId = $process.Id
-    $timedOut = -not $process.WaitForExit($CaseTimeoutSeconds * 1000)
-    if ($timedOut) { $process.Kill($true); $process.WaitForExit() }
+    $timedOut = Wait-QualificationProcess $process ($CaseTimeoutSeconds * 1000)
     $endedUtc = [DateTimeOffset]::UtcNow.ToString('O')
     $exitCode = if ($timedOut) { $null } else { $process.ExitCode }
     $assessment = Test-Transcript $case $stdoutPath $stderrPath $exitCode $timedOut

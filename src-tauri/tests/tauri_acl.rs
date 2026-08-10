@@ -566,6 +566,11 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(layer_b_script.contains("sequential-repeat"));
     assert!(layer_b_script.contains("reordered-invoke"));
     assert!(layer_b_script.contains("declared-invoked-mismatch"));
+    assert!(layer_b_script.contains("text/plain;charset=UTF-8"));
+    assert!(layer_b_runner.contains("Wait-QualificationProcess"));
+    assert!(layer_b_runner.contains("$Process.Kill()"));
+    assert!(layer_b_runner.contains("runner-flush-proof"));
+    assert!(!layer_b_runner.contains(".Kill($true)"));
     assert!(layer_b_script.contains("duplicateFamilies('wallet_create')"));
     assert!(layer_b_script.contains("['wallet_create', 'wallet_restore']"));
     assert!(layer_b_runner.contains("Start-Process"));

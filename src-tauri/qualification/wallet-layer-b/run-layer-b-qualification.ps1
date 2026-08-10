@@ -23,6 +23,16 @@ $ErrorActionPreference = 'Stop'
 $MaximumTranscriptBytes = 1MB
 $MaximumErrorTranscriptBytes = 256KB
 
+function Get-RelativePathWithinRoot([string]$Root, [string]$Path) {
+    $rootFull = [System.IO.Path]::GetFullPath($Root)
+    $rootPrefix = $rootFull.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+    $pathFull = [System.IO.Path]::GetFullPath($Path)
+    if (-not $pathFull.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Fingerprint path must remain within its protected root.'
+    }
+    return $pathFull.Substring($rootPrefix.Length)
+}
+
 function Get-StringSha256([string]$Value) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
@@ -67,7 +77,7 @@ function Get-TreeFingerprint([string]$Root) {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw 'Wallet custody evidence cannot traverse a reparse point.'
         }
-        $relative = [System.IO.Path]::GetRelativePath($absolute, $item.FullName)
+        $relative = Get-RelativePathWithinRoot $absolute $item.FullName
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName).Hash
         $entries.Add("$relative|$($item.Length)|$($item.LastWriteTimeUtc.Ticks)|$hash")
         $total += $item.Length
@@ -344,6 +354,17 @@ if ($SelfTest) {
     $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("vision-layer-b-runner-test-" + [guid]::NewGuid().ToString('N'))
     [System.IO.Directory]::CreateDirectory($temporary) | Out-Null
     try {
+        $relativeRoot = Join-Path $temporary 'protected-root'
+        $relativeChild = Join-Path $relativeRoot 'nested\file.bin'
+        if ((Get-RelativePathWithinRoot $relativeRoot $relativeChild) -ne 'nested\file.bin') {
+            throw 'Windows PowerShell-compatible relative-path derivation failed.'
+        }
+        try {
+            Get-RelativePathWithinRoot $relativeRoot (Join-Path $temporary 'outside.bin') | Out-Null
+            throw 'Out-of-root fingerprint path did not fail closed.'
+        } catch {
+            if ($_.Exception.Message -eq 'Out-of-root fingerprint path did not fail closed.') { throw }
+        }
         $stderr = Join-Path $temporary 'stderr.log'
         Set-Content -LiteralPath $stderr -Value '' -NoNewline
 
@@ -492,7 +513,7 @@ if ($SelfTest) {
         $sourceProof = @(Get-HarnessSourceHashes $selfTestRepository)
         if ($sourceProof.Count -lt 10) { throw 'Harness source provenance is incomplete.' }
 
-        Write-Output 'Layer B runner self-tests passed: 19 (16 transcript, 3 provenance)'
+        Write-Output 'Layer B runner self-tests passed: 21 (16 transcript, 3 provenance, 2 Windows PowerShell compatibility)'
         exit 0
     } finally {
         Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue

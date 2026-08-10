@@ -6,15 +6,18 @@ Workstation: Vision Desktop ASUS Windows workstation
 
 Branch: `fix/wallet-signing-adversarial-matrix`
 
-Rejected Layer B corrective commit: `b824eba942d7ea33fedfd4f3e3710337e51fd83f`
+Qualification-approved commit with incompatible runner preflight: `781640b90ea387665c576bcf6815317f3b6c149f`
 
-Rejected Layer B corrective tree: `abac671b0847a07c09385e5fd5aae5803a85d487`
+Qualification-approved tree: `a660152c95b5d9484b95c815828ee15abe349b92`
 
 ## Result
 
-The two remaining findings from the fifth independent Layer B review have been addressed in the
-standalone, non-custody harness source, runner, and source-only tests. The prior guarded-metadata,
-linear-revocation, transport-proof, transcript, and genuine-concurrency corrections remain intact.
+All findings from the fifth independent Layer B review remain corrected. The subsequent authorized
+qualification attempt stopped during runner preflight because Windows PowerShell 5.1 does not
+provide `System.IO.Path.GetRelativePath`. No harness process or matrix case started, and no evidence
+directory was created. This correction makes only the runner and handoff compatible with the
+supported workstation shell; all prior guarded-metadata, linear-revocation, transport-proof,
+transcript, destruction, mismatch, duplicate, and genuine-concurrency corrections remain intact.
 
 The harness and packaged qualification matrix were not launched. This corrective implementation
 does not claim a Passed result. Production `duplicate_key_rejection_proven` remains `false`, and
@@ -245,12 +248,23 @@ Duplicate textual payloads are still attempted as strings, UTF-8 bytes, and norm
 objects. Normalized object acceptance is recorded as unsafe evidence, not proof that textual
 duplicates were rejected. The production duplicate-key blocker remains false.
 
+## Windows PowerShell 5.1 preflight correction
+
+The runner now derives protected-root-relative paths using a local bounded helper built from
+`GetFullPath`, a canonical root prefix, ordinal case-insensitive descendant validation, and a
+substring only after that validation succeeds. It does not use the unavailable
+`System.IO.Path.GetRelativePath` API. Out-of-root paths fail closed.
+
+Runner self-tests execute under the workstation's Windows PowerShell 5.1 runtime and prove both a
+nested relative path and rejection of an outside sibling path. The complete matrix must not be
+retried until this exact corrective commit receives independent execution approval.
+
 ## Source-only validation performed
 
 The following checks passed without starting the harness:
 
 - Layer B Rust unit tests: 20 passed;
-- runner self-tests: 19 passed (16 transcript and 3 provenance checks);
+- runner self-tests: 21 passed (16 transcript, 3 provenance, and 2 Windows PowerShell compatibility checks);
 - complete Rust baseline: 293 passed, 4 operator-only ignored;
 - Tauri authority tests: 7 passed;
 - WebView isolation tests: 2 passed;
@@ -269,10 +283,7 @@ corrective commit and tree authorizes execution.
 ## Corrective files
 
 - `docs/WALLET_TAURI_LAYER_B_IMPLEMENTATION_HANDOFF.md`
-- `src-tauri/qualification/wallet-layer-b/main.rs`
-- `src-tauri/qualification/wallet-layer-b/assets/harness.js`
 - `src-tauri/qualification/wallet-layer-b/run-layer-b-qualification.ps1`
-- `src-tauri/tests/tauri_acl.rs`
 
 No dependency or lockfile change is required.
 

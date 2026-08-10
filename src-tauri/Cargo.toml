@@ -6,6 +6,12 @@ edition = "2021"
 
 [features]
 wallet-layer-a-qualification = []
+wallet-layer-b-qualification = []
+
+[[bin]]
+name = "vision-wallet-transport-qualification"
+path = "qualification/wallet-layer-b/main.rs"
+required-features = ["wallet-layer-b-qualification"]
 
 [lib]
 name = "vision_desktop_lib"

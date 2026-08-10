@@ -1,0 +1,29 @@
+# Test-only permissions for the standalone Layer B transport classifier.
+
+[[permission]]
+identifier = "allow-wallet-get-status"
+commands.allow = ["wallet_get_status"]
+
+[[permission]]
+identifier = "allow-wallet-select-recovery-destination"
+commands.allow = ["wallet_select_recovery_destination"]
+
+[[permission]]
+identifier = "allow-wallet-create"
+commands.allow = ["wallet_create"]
+
+[[permission]]
+identifier = "allow-wallet-select-recovery-source"
+commands.allow = ["wallet_select_recovery_source"]
+
+[[permission]]
+identifier = "allow-wallet-restore"
+commands.allow = ["wallet_restore"]
+
+[[permission]]
+identifier = "allow-wallet-unlock"
+commands.allow = ["wallet_unlock"]
+
+[[permission]]
+identifier = "allow-wallet-lock"
+commands.allow = ["wallet_lock"]

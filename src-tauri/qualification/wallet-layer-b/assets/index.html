@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vision Wallet Transport Qualification</title>
+    <link rel="stylesheet" href="harness.css" />
+  </head>
+  <body>
+    <main>
+      <p class="warning">TEST-ONLY NON-CUSTODY HARNESS ? NOT VISION DESKTOP</p>
+      <h1>Wallet IPC Layer B</h1>
+      <p>
+        This standalone harness contains public canaries only. It does not load a wallet, vault,
+        recovery file, Core client, seed, signing authority, or submission path.
+      </p>
+      <section class="status-grid">
+        <div><span>Application</span><strong>com.vision.desktop.wallet-transport-qualification</strong></div>
+        <div><span>Window</span><strong>wallet-transport-qualification</strong></div>
+        <div><span>Result</span><strong id="status">Ready; matrix not run</strong></div>
+      </section>
+      <div class="actions">
+        <button id="run" type="button">Run automated transport matrix</button>
+      </div>
+      <p class="notice">
+        Running this page is not a qualification verdict. Primary transcripts, hashes, platform
+        identity, release-closure evidence, and independent acceptance are required separately.
+      </p>
+      <pre id="output" aria-live="polite"></pre>
+    </main>
+    <script src="harness.js"></script>
+  </body>
+</html>

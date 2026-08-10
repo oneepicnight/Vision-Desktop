@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
         OnceLock,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
     http,
@@ -32,6 +32,8 @@ const QUALIFICATION_HOST: &str = "tauri.localhost";
 const REPORT_PROTOCOL: &str = "qualification-report";
 const CONTROL_PROTOCOL: &str = "qualification-control";
 const MAX_REPORT_BYTES: usize = 2_048;
+const WINDOW_TRANSITION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const WINDOW_TRANSITION_ATTEMPTS: usize = 501;
 
 const GET_STATUS: &str = "wallet_get_status";
 const SELECT_RECOVERY_DESTINATION: &str = "wallet_select_recovery_destination";
@@ -200,6 +202,7 @@ impl QualificationState {
 #[cfg_attr(test, derive(Debug))]
 enum StartupPlan {
     Main,
+    MainWithController,
     OtherLocal,
     RemoteOrigin,
     RecreatedMain,
@@ -212,9 +215,59 @@ fn startup_plan(selected_case: &str) -> StartupPlan {
         StartupPlan::RemoteOrigin
     } else if selected_case.contains("window-recreated-main--") {
         StartupPlan::RecreatedMain
+    } else if selected_case.contains("window-destruction-race--") {
+        StartupPlan::MainWithController
     } else {
         StartupPlan::Main
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+struct WindowRetirementState {
+    target_window_absent: bool,
+    native_hwnd_absent: bool,
+}
+
+impl WindowRetirementState {
+    fn complete(self) -> bool {
+        self.target_window_absent && self.native_hwnd_absent
+    }
+}
+
+fn observe_window_retirement<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    hwnd: isize,
+) -> WindowRetirementState {
+    WindowRetirementState {
+        target_window_absent: app.get_webview_window(QUALIFICATION_WINDOW).is_none(),
+        native_hwnd_absent: unsafe { IsWindow(hwnd as HWND) } == 0,
+    }
+}
+
+fn wait_for_window_retirement_with(
+    mut observe: impl FnMut() -> WindowRetirementState,
+    mut pause: impl FnMut(),
+) -> WindowRetirementState {
+    let mut last = observe();
+    for _ in 1..WINDOW_TRANSITION_ATTEMPTS {
+        if last.complete() {
+            return last;
+        }
+        pause();
+        last = observe();
+    }
+    last
+}
+
+fn wait_for_window_retirement<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    hwnd: isize,
+) -> WindowRetirementState {
+    wait_for_window_retirement_with(
+        || observe_window_retirement(app, hwnd),
+        || std::thread::sleep(WINDOW_TRANSITION_POLL_INTERVAL),
+    )
 }
 
 struct FailClosedGuard<'a> {
@@ -995,6 +1048,18 @@ fn complete_native_destruction(
     request: NativeDestructionRequest<'_>,
 ) -> Result<Response, InvokeError> {
     let app = window.app_handle().clone();
+    let selected_case = state.selected_case.to_string();
+    let expected_command = request.expected_command;
+    let route = request.route.label();
+    let body_kind = request.metadata.kind;
+    let top_level_key_count = request.metadata.key_count;
+    let top_level_shape = request.metadata.shape;
+    let runtime_version = state
+        .loaded_webview2_version()
+        .unwrap_or("unavailable")
+        .to_owned();
+    let wrapper_entries = state.wrapper_entries.load(Ordering::Acquire);
+    let hwnd = request.hwnd;
     let exact_authorized_hwnd = state.authorized_hwnd.load(Ordering::Acquire) == request.hwnd;
     let exact_target_window = window.label() == QUALIFICATION_WINDOW
         && is_qualification_origin(request.url)
@@ -1009,50 +1074,53 @@ fn complete_native_destruction(
     state.invalidate();
     let destroy_call_succeeded =
         exact_authorized_hwnd && exact_target_window && request_valid && window.destroy().is_ok();
-    let target_window_absent = app.get_webview_window(QUALIFICATION_WINDOW).is_none();
-    let native_hwnd_absent = unsafe { IsWindow(request.hwnd as HWND) } == 0;
-    let authority_revoked = state.revoked.load(Ordering::Acquire);
-    let structural_post_revocation_proven =
-        authority_revoked && target_window_absent && native_hwnd_absent;
-    let passed = destroy_call_succeeded
-        && target_window_absent
-        && native_hwnd_absent
-        && structural_post_revocation_proven;
-    let result = if passed { "passed" } else { "failed" };
-    let runtime_version = state.loaded_webview2_version().unwrap_or("unavailable");
-    let emitted = emit_observation(&NativeDestructionObservation {
-        marker: "layer_b_native_destruction_observation",
-        case: &state.selected_case,
-        command: request.expected_command,
-        route: request.route.label(),
-        body_kind: request.metadata.kind,
-        top_level_key_count: request.metadata.key_count,
-        top_level_shape: request.metadata.shape,
-        result,
-        wrapper_ran: true,
-        command_body_ran: true,
-        native_destruction_records: 1,
-        exact_authorized_hwnd,
-        exact_target_window,
-        destroy_call_succeeded,
-        target_window_absent,
-        native_hwnd_absent,
-        authority_revoked,
-        structural_post_revocation_proven,
-    })
-    .and_then(|()| {
-        emit_observation(&TerminalObservation {
-            marker: "layer_b_terminal_observation",
-            case: &state.selected_case,
+    std::thread::spawn(move || {
+        let retirement = if destroy_call_succeeded {
+            wait_for_window_retirement(&app, hwnd)
+        } else {
+            observe_window_retirement(&app, hwnd)
+        };
+        let authority_revoked = app
+            .state::<QualificationState>()
+            .revoked
+            .load(Ordering::Acquire);
+        let structural_post_revocation_proven = authority_revoked && retirement.complete();
+        let passed = destroy_call_succeeded && structural_post_revocation_proven;
+        let result = if passed { "passed" } else { "failed" };
+        let emitted = emit_observation(&NativeDestructionObservation {
+            marker: "layer_b_native_destruction_observation",
+            case: &selected_case,
+            command: expected_command,
+            route,
+            body_kind,
+            top_level_key_count,
+            top_level_shape,
             result,
-            wrapper_entries: state.wrapper_entries.load(Ordering::Acquire),
-            primary_records: 0,
-            post_records: 0,
-            revoked: authority_revoked,
-            webview2_runtime_version: runtime_version,
+            wrapper_ran: true,
+            command_body_ran: true,
+            native_destruction_records: 1,
+            exact_authorized_hwnd,
+            exact_target_window,
+            destroy_call_succeeded,
+            target_window_absent: retirement.target_window_absent,
+            native_hwnd_absent: retirement.native_hwnd_absent,
+            authority_revoked,
+            structural_post_revocation_proven,
         })
+        .and_then(|()| {
+            emit_observation(&TerminalObservation {
+                marker: "layer_b_terminal_observation",
+                case: &selected_case,
+                result,
+                wrapper_entries,
+                primary_records: 0,
+                post_records: 0,
+                revoked: authority_revoked,
+                webview2_runtime_version: &runtime_version,
+            })
+        });
+        app.exit(if passed && emitted.is_ok() { 0 } else { 2 });
     });
-    app.exit(if passed && emitted.is_ok() { 0 } else { 2 });
     Err(fixed_error("qualification_runtime_unavailable"))
 }
 
@@ -1175,19 +1243,26 @@ fn control_response(status: http::StatusCode, phase: &'static str) -> http::Resp
         .unwrap_or_else(|_| http::Response::new(Vec::new()))
 }
 
+fn fail_window_transition<R: Runtime>(app: &tauri::AppHandle<R>) {
+    app.state::<QualificationState>().invalidate();
+    let _ = io::stderr().write_all(b"layer_b_window_replacement_failed\n");
+    app.exit(2);
+}
+
 fn schedule_window_replacement<R: Runtime>(app_handle: tauri::AppHandle<R>, reload_only: bool) {
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
+        let (retirement_sender, retirement_receiver) = std::sync::mpsc::sync_channel(1);
         let app_for_main = app_handle.clone();
         if app_handle
             .run_on_main_thread(move || {
-                let replacement = (|| -> Result<(), ()> {
+                let transition = (|| -> Result<Option<isize>, ()> {
                     let window = app_for_main
                         .get_webview_window(QUALIFICATION_WINDOW)
                         .ok_or(())?;
                     if reload_only {
                         window.reload().map_err(|_| ())?;
-                        return Ok(());
+                        return Ok(None);
                     }
                     if app_for_main
                         .get_webview_window(QUALIFICATION_CONTROLLER_WINDOW)
@@ -1195,7 +1270,44 @@ fn schedule_window_replacement<R: Runtime>(app_handle: tauri::AppHandle<R>, relo
                     {
                         return Err(());
                     }
+                    let hwnd = window.hwnd().map_err(|_| ())?.0 as isize;
                     window.destroy().map_err(|_| ())?;
+                    Ok(Some(hwnd))
+                })();
+                let _ = retirement_sender.send(transition);
+            })
+            .is_err()
+        {
+            fail_window_transition(&app_handle);
+            return;
+        }
+        let retired_hwnd = match retirement_receiver.recv_timeout(Duration::from_secs(6)) {
+            Ok(Ok(None)) => return,
+            Ok(Ok(Some(hwnd))) => hwnd,
+            _ => {
+                fail_window_transition(&app_handle);
+                return;
+            }
+        };
+        if !wait_for_window_retirement(&app_handle, retired_hwnd).complete() {
+            fail_window_transition(&app_handle);
+            return;
+        }
+
+        let (replacement_sender, replacement_receiver) = std::sync::mpsc::sync_channel(1);
+        let app_for_main = app_handle.clone();
+        if app_handle
+            .run_on_main_thread(move || {
+                let replacement = (|| -> Result<(), ()> {
+                    if app_for_main
+                        .get_webview_window(QUALIFICATION_CONTROLLER_WINDOW)
+                        .is_none()
+                        || app_for_main
+                            .get_webview_window(QUALIFICATION_WINDOW)
+                            .is_some()
+                    {
+                        return Err(());
+                    }
                     tauri::WebviewWindowBuilder::new(
                         &app_for_main,
                         QUALIFICATION_WINDOW,
@@ -1204,28 +1316,25 @@ fn schedule_window_replacement<R: Runtime>(app_handle: tauri::AppHandle<R>, relo
                     .title("Vision Wallet Transport Qualification - Recreated")
                     .build()
                     .map_err(|_| ())?;
-                    if let Some(controller) =
-                        app_for_main.get_webview_window(QUALIFICATION_CONTROLLER_WINDOW)
-                    {
-                        controller.destroy().map_err(|_| ())?;
-                    }
+                    app_for_main
+                        .get_webview_window(QUALIFICATION_CONTROLLER_WINDOW)
+                        .ok_or(())?
+                        .destroy()
+                        .map_err(|_| ())?;
                     Ok(())
                 })();
-                if replacement.is_err() {
-                    app_for_main.state::<QualificationState>().invalidate();
-                    let _ = io::stderr().write_all(b"layer_b_window_replacement_failed\n");
-                    app_for_main.exit(2);
-                }
+                let _ = replacement_sender.send(replacement);
             })
             .is_err()
+            || !matches!(
+                replacement_receiver.recv_timeout(Duration::from_secs(6)),
+                Ok(Ok(()))
+            )
         {
-            app_handle.state::<QualificationState>().invalidate();
-            let _ = io::stderr().write_all(b"layer_b_window_replacement_failed\n");
-            app_handle.exit(2);
+            fail_window_transition(&app_handle);
         }
     });
 }
-
 fn write_remote_response(
     mut stream: TcpStream,
     status: &str,
@@ -1631,7 +1740,7 @@ fn main() {
                     capture_loaded_webview2_runtime(&main, app.handle().clone())?;
                     main.navigate(start_remote_origin_server(&state.selected_case)?)?;
                 }
-                StartupPlan::RecreatedMain => {
+                StartupPlan::RecreatedMain | StartupPlan::MainWithController => {
                     capture_loaded_webview2_runtime(&main, app.handle().clone())?;
                     tauri::WebviewWindowBuilder::new(
                         app,
@@ -2118,6 +2227,59 @@ mod tests {
     }
 
     #[test]
+    fn window_retirement_waits_for_both_tauri_and_native_absence() {
+        let mut observations = std::collections::VecDeque::from([
+            WindowRetirementState {
+                target_window_absent: false,
+                native_hwnd_absent: false,
+            },
+            WindowRetirementState {
+                target_window_absent: true,
+                native_hwnd_absent: false,
+            },
+            WindowRetirementState {
+                target_window_absent: false,
+                native_hwnd_absent: true,
+            },
+            WindowRetirementState {
+                target_window_absent: true,
+                native_hwnd_absent: true,
+            },
+        ]);
+        let pauses = std::cell::Cell::new(0);
+        let retirement = wait_for_window_retirement_with(
+            || {
+                observations
+                    .pop_front()
+                    .expect("bounded retirement observation")
+            },
+            || pauses.set(pauses.get() + 1),
+        );
+        assert!(retirement.complete());
+        assert_eq!(pauses.get(), 3);
+        assert!(observations.is_empty());
+    }
+
+    #[test]
+    fn window_retirement_timeout_remains_fail_closed() {
+        let observations = std::cell::Cell::new(0);
+        let pauses = std::cell::Cell::new(0);
+        let retirement = wait_for_window_retirement_with(
+            || {
+                observations.set(observations.get() + 1);
+                WindowRetirementState {
+                    target_window_absent: true,
+                    native_hwnd_absent: false,
+                }
+            },
+            || pauses.set(pauses.get() + 1),
+        );
+        assert!(!retirement.complete());
+        assert_eq!(observations.get(), WINDOW_TRANSITION_ATTEMPTS);
+        assert_eq!(pauses.get(), WINDOW_TRANSITION_ATTEMPTS - 1);
+    }
+
+    #[test]
     fn special_window_cases_have_deterministic_native_startup_plans() {
         for command in ALL_COMMANDS {
             assert_eq!(
@@ -2137,6 +2299,12 @@ mod tests {
                     "wrapper-{command}-window-recreated-main--official-invoke"
                 )),
                 StartupPlan::RecreatedMain
+            );
+            assert_eq!(
+                startup_plan(&format!(
+                    "wrapper-{command}-window-destruction-race--official-invoke"
+                )),
+                StartupPlan::MainWithController
             );
             assert_eq!(
                 startup_plan(&format!("wrapper-{command}-exact--official-invoke")),

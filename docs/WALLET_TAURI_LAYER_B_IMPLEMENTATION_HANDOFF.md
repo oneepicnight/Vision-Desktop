@@ -386,13 +386,16 @@ Recreated-main cases now create one hidden native controller window before the e
 loads. The controller uses the non-executable bootstrap asset, has a distinct fixed label, is absent
 from the qualification capability window list, and cannot invoke any generated wallet wrapper.
 
-When recreation is requested, native code requires that controller to exist, destroys the exact
-main window, builds the replacement main window with the executable harness, and only then destroys
-the controller. The process therefore cannot terminate merely because the original main window was
-removed. The replacement receives a new page generation while the original authorized generation
-remains fixed, so it must exercise the intended invalid-window result. Any missing window,
-replacement failure, or controller teardown failure invalidates authority, emits one fixed marker,
-and exits failed.
+When recreation is requested, native code requires that controller to exist and destroys the exact
+main window. A bounded worker then requires both removal of the Tauri window registration and
+absence of the exact native HWND before it schedules replacement construction back on the main
+thread. The executable replacement is built only after those two retirement facts are simultaneously
+true, and only then is the controller destroyed. The process therefore cannot terminate merely
+because the original main window was removed, and the replacement cannot race the asynchronous
+WebView teardown. The replacement receives a new page generation while the original authorized
+generation remains fixed, so it must exercise the intended invalid-window result. Any missing
+window, retirement timeout, replacement failure, or controller teardown failure invalidates
+authority, emits one fixed marker, and exits failed.
 
 ## M-03 correction: no executable initial-window race
 
@@ -407,11 +410,59 @@ bootstrap-content, config-URL, capability-exclusion, and generation regressions 
 properties explicit. The runner fingerprints the new bootstrap asset as mandatory primary source
 identity.
 
+## Preserved `0387362` execution evidence
+
+The independently authorized packaged run against commit
+`0387362a1e14250395ca49078a6782d56557b964` and tree
+`9c9476d3084b7b0427f0c8a2d359bfe3f5ca6f2c` is permanently **Inconclusive**.
+Its fresh evidence directory is:
+
+`C:\Vision\wallet-layer-b-evidence-0387362-20260810`
+
+The manifest is `layer-b-evidence-manifest.json`, with SHA-256:
+
+`13B296C5000A8C18A914221DABC27F8C2F82E2566D48BC0F766DB36A0F932D6A`
+
+Of 562 cases, 548 passed and 14 were Inconclusive. All seven generated command shapes produced
+the same two lifecycle failures:
+
+- recreated-main emitted no stdout and the fixed `layer_b_window_replacement_failed` marker; the
+  preserved stderr also recorded Windows error 1412 while unregistering `Chrome_WidgetWin_0`;
+- destruction-race recorded a successful destroy call but still observed both the Tauri target and
+  exact native HWND, so structural post-revocation proof remained false.
+
+The runner correctly rejected both families. It recorded `integrity_preserved: true`; the exact
+reviewed Git identity, production executable, installation, production data, wallet-custody
+absence, and pre-existing Vision-Core state were unchanged. No harness process remained after the
+run. This evidence may not be combined with or used to reclassify any earlier attempt.
+
+## Current asynchronous lifecycle correction
+
+Destruction-race cases now start with the same hidden, capability-excluded bootstrap controller used
+for recreated-main. After the exact generated wrapper invalidates authority and successfully
+requests destruction of the authorized window, a bounded worker observes both the Tauri window map
+and Windows `IsWindow` result. It emits the native destruction and terminal records only after both
+prove absence, or emits a failed terminal result after the bounded deadline. Result construction,
+wrapper count, fixed metadata classifications, authority state, and WebView2 identity remain owned
+by native code; the removed WebView is not needed to report evidence.
+
+Recreated-main now uses two explicit main-thread phases joined by the same bounded retirement
+observer. Phase one captures the exact old HWND and requests destruction. Phase two is not scheduled
+until both retirement predicates pass. A surviving controller maintains process lifetime and is
+removed only after the replacement window is successfully constructed. Channel timeouts, missing
+controller state, incomplete retirement, creation failure, and controller teardown failure all
+invalidate and exit failed.
+
+Deterministic unit coverage proves that neither Tauri removal nor native-HWND removal alone is
+sufficient, that the observation deadline fails closed, and that all seven destruction command
+shapes select the controller-backed startup plan. No packaged harness or matrix was run after this
+correction.
+
 ## Source-only validation performed
 
 The following checks passed without starting the harness:
 
-- Layer B Rust unit tests: 22 passed;
+- Layer B Rust unit tests: 24 passed;
 - runner self-tests: 24 passed (16 transcript, 3 provenance, and 5 Windows PowerShell compatibility checks);
 - complete Rust baseline: 293 passed, 4 operator-only ignored;
 - Tauri authority tests: 7 passed;

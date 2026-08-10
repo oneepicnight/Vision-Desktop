@@ -14,10 +14,12 @@ reconciliation, and journal implementations remain unreachable from the WebView.
 production security approval flags remain `false`, and the current Core compatibility manifest
 cannot construct production wallet authority.
 
-The next permitted implementation after an independent review of this design is only a private,
-unregistered command-boundary adapter with no `#[tauri::command]`, invoke registration, generated
-permission, capability grant, React wrapper, or activation change. Actual user-facing activation
-must wait for the atomic full-wallet release gate defined below.
+The private lifecycle command boundary has since received independent approval, and the complete
+Layer B transport qualification has been independently accepted. Neither result authorizes
+production exposure. The next proposed implementation, only after independent review of
+`WALLET_ATOMIC_EXPOSURE_DESIGN.md`, is a private, unregistered transaction command boundary with no
+`#[tauri::command]`, invoke registration, generated permission, capability grant, React wrapper, or
+activation change.
 
 ## Objective
 
@@ -42,6 +44,11 @@ sign, submit, reconcile, receipt, recovery-export, arbitrary-file, arbitrary-add
 clipboard, shell, filesystem, HTTP, or generic dialog command.
 
 ## Atomic full-wallet release gate
+
+`WALLET_ATOMIC_EXPOSURE_DESIGN.md` is the sole normative contract for the combined lifecycle and
+transaction inventory, atomic registration sequence, ACL parity, frontend authority, and release
+rollback. This section remains normative for the rule that lifecycle custody cannot be exposed by
+itself.
 
 Lifecycle implementation approval is not custody activation approval. Vision Desktop must not let
 a user create, restore, unlock, or fund a wallet that cannot complete the separately reviewed
@@ -365,21 +372,11 @@ custody.
 
 ## Staged implementation and review plan
 
-1. Obtain independent approval of this exact documentation design.
-2. Implement a private `WalletLifecycleCommandBoundary` and private window/exposure authority types
-   with command-shaped methods and focused Rust tests. Do not use `#[tauri::command]`, register an
-   invoke handler, create permissions, change capabilities, add frontend code, or change flags.
-3. Submit that exact private implementation for independent review and correct every finding.
-4. Independently review, implement, and accept the generated-wrapper and raw-transport
-   qualification defined by `WALLET_TAURI_TRANSPORT_QUALIFICATION_DESIGN.md`. Keep all qualification
-   commands test-only and keep production duplicate-key approval structurally false.
-5. Integrate and qualify the supported private-loopback Core release through the separate Core
-   compatibility workflow without changing Vision-Core here.
-6. Complete the final packaged Windows and clean-device end-to-end wallet matrix, including a real
-   funded send and spend-after-restore drill.
-7. Obtain final independent review of the combined lifecycle and transaction command contract,
-   permissions, frontend public-intent UI, binaries, evidence, and support-package exclusions.
-8. Only then land the one atomic activation tranche described above.
+The private lifecycle boundary and generated-wrapper/raw-transport qualification are complete and
+independently accepted. The remaining staged sequence is defined only by
+`WALLET_ATOMIC_EXPOSURE_DESIGN.md`: private transaction-boundary review, supported private-loopback
+Core integration through the separate workflow, disabled integrated qualification, clean-device
+end-to-end evidence, exact atomic registration review, and final activation review.
 
 Any failed gate returns to the private, unreachable state. There is no temporary lifecycle-only
 exposure, beta custody address, hidden command, developer bypass, mock production authority, or

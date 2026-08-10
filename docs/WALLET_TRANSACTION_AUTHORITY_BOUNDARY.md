@@ -438,7 +438,9 @@ authorize spending.
 ## Future Tauri boundary
 
 No transaction command or permission may be added before private implementation, exact Core
-qualification, and independent review. Candidate command categories are:
+qualification, and independent review. `WALLET_ATOMIC_EXPOSURE_DESIGN.md` now defines the exact
+combined command inventory, transaction names and public schemas, ACL parity, frontend authority,
+and all-or-nothing activation sequence. The required transaction categories are:
 
 - prepare one transfer preview;
 - cancel one preview;
@@ -446,9 +448,10 @@ qualification, and independent review. Candidate command categories are:
 - list authenticated local activity as explicitly incomplete; and
 - refresh one known transaction observation.
 
-Names and schemas require review. Commands derive the invoking `WebviewWindow`, require `main`, and
-never accept a caller-supplied owner label, Core port, path, session token, activation proof, nonce,
-fee, signed payload, retry flag, or replacement flag.
+The exact names and schemas remain design-only until that atomic design and the subsequent private,
+unregistered transaction command boundary receive independent approval. Commands derive the
+invoking `WebviewWindow`, require `main`, and never accept a caller-supplied owner label, Core port,
+path, session token, activation proof, nonce, fee, signed payload, retry flag, or replacement flag.
 
 Permissions are individually generated and added only to `main-desktop`. They remain absent from
 Linux mock and plugin permission sets. React wrappers remain in `src/services/coreApi.ts`. Public

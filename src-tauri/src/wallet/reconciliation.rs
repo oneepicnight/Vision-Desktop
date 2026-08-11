@@ -1216,6 +1216,33 @@ impl ReconciliationPhaseTag {
 }
 
 impl AcceptedSubmissionEvidence {
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn for_journal_test(
+        wallet_id: String,
+        transaction_id: String,
+        sender_address: String,
+        recipient_address: String,
+        envelope_commitment_hex: String,
+    ) -> Self {
+        Self {
+            attempt_id: "aa".repeat(32),
+            wallet_id,
+            transaction_id,
+            sender_address,
+            recipient_address,
+            amount_raw_units: "1".to_string(),
+            nonce: 7,
+            tip_raw_units: 0,
+            fee_limit_raw_units: 201,
+            envelope_commitment_hex,
+            parent_head_generation: 0,
+            parent_head_authentication_tag_hex: "00".repeat(32),
+            reserved_prepared_generation: 1,
+            submitted_at_unix_ms: 1,
+        }
+    }
+
     pub(super) fn wallet_id(&self) -> &str {
         &self.wallet_id
     }
@@ -1760,6 +1787,40 @@ mod tests {
                 == ReconciliationPhaseTag::ResolvedRecorded
         );
         let _ = fs::remove_dir_all(vault_path.parent().unwrap());
+    }
+
+    #[test]
+    fn phase_transition_cannot_rewrite_commitment_parent_or_reserved_generation() {
+        for case in 0..4 {
+            let (vault_path, store, authenticator, record) = fixture();
+            publish_prepared_for_test(&store, &authenticator, record).unwrap();
+            let current = store
+                .load_authenticated(&authenticator)
+                .unwrap()
+                .into_record()
+                .unwrap();
+            let mut next = current.into_phase(ReconciliationPhase::MayHaveBeenSubmitted);
+            match case {
+                0 => next.envelope_commitment_hex = "99".repeat(32),
+                1 => next.parent_head_generation = next.parent_head_generation.saturating_add(1),
+                2 => next.parent_head_authentication_tag_hex = "99".repeat(32),
+                _ => {
+                    next.reserved_prepared_generation =
+                        next.reserved_prepared_generation.saturating_add(1)
+                }
+            }
+            assert_eq!(
+                store
+                    .transition(
+                        &authenticator,
+                        ExpectedTransition::Exact(ReconciliationPhaseTag::Prepared),
+                        next,
+                    )
+                    .err(),
+                Some(ReconciliationError::InvalidTransition)
+            );
+            let _ = fs::remove_dir_all(vault_path.parent().unwrap());
+        }
     }
 
     #[test]

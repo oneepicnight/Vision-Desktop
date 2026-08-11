@@ -109,12 +109,21 @@ pub(super) struct EnvelopeEntryInput<'a> {
     pub created_at_unix_ms: u64,
 }
 
+#[cfg_attr(test, derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RetentionState {
     Prepared,
     Ambiguous,
     Accepted,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EnvelopePublicationCheckpoint {
+    BeforeHeadTransition,
+    HeadTransitionPublished,
+    ContainerPublished,
+    HeadCommitted,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -314,6 +323,7 @@ impl EnvelopeStore {
             return Err(EnvelopeStoreError::InvalidRequest);
         }
         let _lock = lock_store()?;
+        validate_store_directory_health(&self.container_path)?;
         if !self.container_path.try_exists().unwrap_or(true)
             && !self.head_path.try_exists().unwrap_or(true)
         {
@@ -721,6 +731,16 @@ impl EnvelopeStore {
         current_head: &EnvelopeHead,
         entries: Vec<EnvelopeEntry>,
     ) -> Result<(), EnvelopeStoreError> {
+        self.publish_container_with_observer(authenticator, current_head, entries, |_| Ok(()))
+    }
+
+    fn publish_container_with_observer(
+        &self,
+        authenticator: &EnvelopeStoreAuthenticator,
+        current_head: &EnvelopeHead,
+        entries: Vec<EnvelopeEntry>,
+        mut observe: impl FnMut(EnvelopePublicationCheckpoint) -> Result<(), EnvelopeStoreError>,
+    ) -> Result<(), EnvelopeStoreError> {
         let generation = current_head
             .generation
             .checked_add(1)
@@ -767,13 +787,16 @@ impl EnvelopeStore {
             authentication_tag_hex: String::new(),
         };
         authenticate_head(authenticator, &mut transition)?;
+        observe(EnvelopePublicationCheckpoint::BeforeHeadTransition)?;
         persist_json(&self.head_path, &transition, false, MAX_HEAD_BYTES)?;
+        observe(EnvelopePublicationCheckpoint::HeadTransitionPublished)?;
         persist_bytes(
             &self.container_path,
             &encoded_wrapper,
             current_head.generation == 0,
             MAX_CONTAINER_BYTES,
         )?;
+        observe(EnvelopePublicationCheckpoint::ContainerPublished)?;
         let mut committed = EnvelopeHead {
             schema: HEAD_SCHEMA.to_string(),
             version: HEAD_VERSION,
@@ -787,6 +810,7 @@ impl EnvelopeStore {
         };
         authenticate_head(authenticator, &mut committed)?;
         persist_json(&self.head_path, &committed, false, MAX_HEAD_BYTES)?;
+        observe(EnvelopePublicationCheckpoint::HeadCommitted)?;
         Ok(())
     }
 }
@@ -814,6 +838,7 @@ mod tests {
     };
     use std::{
         fs,
+        process::Command,
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -1127,6 +1152,389 @@ mod tests {
         drop(held);
         fs::remove_dir_all(directory).unwrap();
     }
+
+    #[test]
+    fn every_publication_checkpoint_recovers_only_the_exact_old_or_new_state() {
+        for checkpoint in [
+            EnvelopePublicationCheckpoint::BeforeHeadTransition,
+            EnvelopePublicationCheckpoint::HeadTransitionPublished,
+            EnvelopePublicationCheckpoint::ContainerPublished,
+            EnvelopePublicationCheckpoint::HeadCommitted,
+        ] {
+            let (directory, custody, seed, transaction) = fixture();
+            let (store, authenticator, _prepared) = publish_fixture(&custody, &seed, &transaction);
+            let mut loaded = store.load_authenticated_unlocked(&authenticator).unwrap();
+            let mut entries = std::mem::take(&mut loaded.container.as_mut().unwrap().entries);
+            entries[0].retention_state = RetentionState::Ambiguous;
+            let result = store.publish_container_with_observer(
+                &authenticator,
+                &loaded.head,
+                entries,
+                |observed| {
+                    if observed == checkpoint {
+                        Err(EnvelopeStoreError::StorageUnavailable)
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result.err(), Some(EnvelopeStoreError::StorageUnavailable));
+            let recovered = store.load_authenticated_unlocked(&authenticator).unwrap();
+            let expected = if matches!(
+                checkpoint,
+                EnvelopePublicationCheckpoint::ContainerPublished
+                    | EnvelopePublicationCheckpoint::HeadCommitted
+            ) {
+                RetentionState::Ambiguous
+            } else {
+                RetentionState::Prepared
+            };
+            assert_eq!(
+                recovered.container.unwrap().entries[0].retention_state,
+                expected
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn first_publication_checkpoint_never_exposes_a_partial_container() {
+        for checkpoint in [
+            EnvelopePublicationCheckpoint::BeforeHeadTransition,
+            EnvelopePublicationCheckpoint::HeadTransitionPublished,
+            EnvelopePublicationCheckpoint::ContainerPublished,
+            EnvelopePublicationCheckpoint::HeadCommitted,
+        ] {
+            let (directory, custody, seed, transaction) = fixture();
+            let store = EnvelopeStore::for_custody(&custody).unwrap();
+            let authenticator = EnvelopeStoreAuthenticator::new("primary", &seed).unwrap();
+            let reconciliation = ReconciliationStore::for_custody(&custody).unwrap();
+            let reconciliation_authenticator =
+                ReconciliationAuthenticator::new("primary", &seed).unwrap();
+            let reservation = reconciliation
+                .reserve_prepared(&reconciliation_authenticator)
+                .unwrap();
+            let loaded = store.load_or_create_genesis(&authenticator).unwrap();
+            let body =
+                serialize_sensitive(&transaction, EnvelopeStoreError::InvalidRequest).unwrap();
+            let transaction_id = canonical_transaction_id(&transaction).unwrap();
+            let body_digest = digest_hex(BODY_DIGEST_CONTEXT, body.as_slice());
+            let entry = build_entry(
+                &authenticator,
+                EnvelopeEntryInput {
+                    wallet_id: "primary",
+                    attempt_id: &"11".repeat(32),
+                    transaction_id: &transaction_id,
+                    transaction: &transaction,
+                    exact_body: body.as_slice(),
+                    signed_body_digest_hex: &body_digest,
+                    compatibility_contract_digest_hex: &"33".repeat(32),
+                    created_at_unix_ms: 1,
+                },
+                &reservation,
+            )
+            .unwrap();
+            let result = store.publish_container_with_observer(
+                &authenticator,
+                &loaded.head,
+                vec![entry],
+                |observed| {
+                    if observed == checkpoint {
+                        Err(EnvelopeStoreError::StorageUnavailable)
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result.err(), Some(EnvelopeStoreError::StorageUnavailable));
+            let recovered = store.load_authenticated_unlocked(&authenticator).unwrap();
+            let published = matches!(
+                checkpoint,
+                EnvelopePublicationCheckpoint::ContainerPublished
+                    | EnvelopePublicationCheckpoint::HeadCommitted
+            );
+            assert_eq!(recovered.container.is_some(), published);
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn wrapper_and_head_metadata_mutations_fail_closed_independently() {
+        for case in 0..15 {
+            let (directory, custody, seed, transaction) = fixture();
+            let (store, authenticator, authority) = publish_fixture(&custody, &seed, &transaction);
+            if case < 7 {
+                let mut wire: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&store.container_path).unwrap()).unwrap();
+                match case {
+                    0 => wire["nonce_hex"] = serde_json::Value::String("00".repeat(24)),
+                    1 => wire["generation"] = serde_json::json!(99),
+                    2 => wire["previous_head_tag_hex"] = serde_json::Value::String("11".repeat(32)),
+                    3 => wire["ciphertext_length"] = serde_json::json!(17),
+                    4 => wire["entry_count"] = serde_json::json!(2),
+                    5 => wire["ciphertext_hex"] = serde_json::Value::String("00".repeat(17)),
+                    _ => wire["wallet_id"] = serde_json::Value::String("other".to_string()),
+                }
+                fs::write(&store.container_path, serde_json::to_vec(&wire).unwrap()).unwrap();
+                storage_security::protect_file(&store.container_path).unwrap();
+            } else {
+                let mut wire: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&store.head_path).unwrap()).unwrap();
+                match case {
+                    7 => wire["schema"] = serde_json::Value::String("wrong".to_string()),
+                    8 => wire["version"] = serde_json::json!(99),
+                    9 => wire["wallet_id"] = serde_json::Value::String("other".to_string()),
+                    10 => wire["generation"] = serde_json::json!(99),
+                    11 => {
+                        wire["previous_head_tag_hex"] = serde_json::Value::String("11".repeat(32))
+                    }
+                    12 => {
+                        wire["state"]["position"]["ciphertext_digest_hex"] =
+                            serde_json::Value::String("22".repeat(32))
+                    }
+                    13 => wire["state"]["position"]["ciphertext_length"] = serde_json::json!(1),
+                    _ => {
+                        wire["authentication_tag_hex"] = serde_json::Value::String("33".repeat(32))
+                    }
+                }
+                fs::write(&store.head_path, serde_json::to_vec(&wire).unwrap()).unwrap();
+                storage_security::protect_file(&store.head_path).unwrap();
+            }
+            assert!(store.verify_prepared(&authenticator, &authority).is_err());
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_immutable_entry_field_mutation_fails_authenticated_load_validation() {
+        for case in 0..17 {
+            let (directory, custody, seed, transaction) = fixture();
+            let (store, authenticator, _authority) = publish_fixture(&custody, &seed, &transaction);
+            let mut loaded = store.load_authenticated_unlocked(&authenticator).unwrap();
+            let mut container = loaded.container.take().unwrap();
+            let entry = &mut container.entries[0];
+            match case {
+                0 => entry.attempt_id = "44".repeat(32),
+                1 => entry.transaction_id = "44".repeat(32),
+                2 => entry.transaction.sender_pubkey = "44".repeat(32),
+                3 => entry.transaction.nonce = entry.transaction.nonce.saturating_add(1),
+                4 => entry.transaction.module = "other".to_string(),
+                5 => entry.transaction.method = "other".to_string(),
+                6 => entry.transaction.args = br#"{"to":"00","amount":1}"#.to_vec(),
+                7 => entry.transaction.tip = 1,
+                8 => entry.transaction.fee_limit = 202,
+                9 => entry.transaction.sig = "44".repeat(64),
+                10 => entry.exact_body_hex.replace_range(0..2, "00"),
+                11 => entry.signed_body_digest_hex = "44".repeat(32),
+                12 => entry.compatibility_contract_digest_hex = "44".repeat(32),
+                13 => entry.reconciliation_parent_generation = 99,
+                14 => entry.reconciliation_parent_tag_hex = "44".repeat(32),
+                15 => entry.reserved_prepared_generation = 99,
+                _ => entry.envelope_commitment_hex = "44".repeat(32),
+            }
+            container.generation = loaded.head.generation + 1;
+            container.previous_head_tag_hex = loaded.head.authentication_tag_hex.clone();
+            let wrapper = encrypt_container(&authenticator, &container).unwrap();
+            fs::write(&store.container_path, serde_json::to_vec(&wrapper).unwrap()).unwrap();
+            storage_security::protect_file(&store.container_path).unwrap();
+            let mut head = EnvelopeHead {
+                schema: HEAD_SCHEMA.to_string(),
+                version: HEAD_VERSION,
+                wallet_id: "primary".to_string(),
+                generation: container.generation,
+                previous_head_tag_hex: loaded.head.authentication_tag_hex,
+                state: EnvelopeHeadState::Committed {
+                    position: position_for_wrapper(&wrapper).unwrap(),
+                },
+                authentication_tag_hex: String::new(),
+            };
+            authenticate_head(&authenticator, &mut head).unwrap();
+            fs::write(&store.head_path, serde_json::to_vec(&head).unwrap()).unwrap();
+            storage_security::protect_file(&store.head_path).unwrap();
+            assert_eq!(
+                store.load_authenticated_unlocked(&authenticator).err(),
+                Some(EnvelopeStoreError::AuthenticationFailed)
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn authenticated_plaintext_container_metadata_mutations_fail_closed() {
+        for case in 0..5 {
+            let (directory, custody, seed, transaction) = fixture();
+            let (store, authenticator, _authority) = publish_fixture(&custody, &seed, &transaction);
+            let mut loaded = store.load_authenticated_unlocked(&authenticator).unwrap();
+            let mut container = loaded.container.take().unwrap();
+            let expected_generation = loaded.head.generation + 1;
+            let expected_previous = loaded.head.authentication_tag_hex.clone();
+            container.generation = expected_generation;
+            container.previous_head_tag_hex = expected_previous.clone();
+            match case {
+                0 => container.schema = "wrong".to_string(),
+                1 => container.version = 99,
+                2 => container.wallet_id = "other".to_string(),
+                3 => container.generation = 99,
+                _ => container.previous_head_tag_hex = "99".repeat(32),
+            }
+            let wrapper = encrypt_container(&authenticator, &container).unwrap();
+            fs::write(&store.container_path, serde_json::to_vec(&wrapper).unwrap()).unwrap();
+            storage_security::protect_file(&store.container_path).unwrap();
+            let mut head = EnvelopeHead {
+                schema: HEAD_SCHEMA.to_string(),
+                version: HEAD_VERSION,
+                wallet_id: "primary".to_string(),
+                generation: expected_generation,
+                previous_head_tag_hex: expected_previous,
+                state: EnvelopeHeadState::Committed {
+                    position: position_for_wrapper(&wrapper).unwrap(),
+                },
+                authentication_tag_hex: String::new(),
+            };
+            authenticate_head(&authenticator, &mut head).unwrap();
+            fs::write(&store.head_path, serde_json::to_vec(&head).unwrap()).unwrap();
+            storage_security::protect_file(&store.head_path).unwrap();
+            assert!(store.load_authenticated_unlocked(&authenticator).is_err());
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn malformed_duplicate_and_allocation_bound_inputs_fail_before_publication() {
+        let (directory, custody, seed, transaction) = fixture();
+        let (store, authenticator, authority) = publish_fixture(&custody, &seed, &transaction);
+        let original = String::from_utf8(fs::read(&store.container_path).unwrap()).unwrap();
+        let mut excessive: CiphertextWrapper = serde_json::from_str(&original).unwrap();
+        excessive.entry_count = u32::try_from(MAX_ENTRIES + 1).unwrap();
+        assert_eq!(
+            validate_wrapper(&authenticator, &excessive).err(),
+            Some(EnvelopeStoreError::AuthenticationFailed)
+        );
+        let mut excessive_length: CiphertextWrapper = serde_json::from_str(&original).unwrap();
+        excessive_length.ciphertext_length = MAX_CONTAINER_BYTES as u64 + 1;
+        assert_eq!(
+            validate_wrapper(&authenticator, &excessive_length).err(),
+            Some(EnvelopeStoreError::AuthenticationFailed)
+        );
+        let duplicated = original.replacen(
+            "{",
+            "{\"schema\":\"vision-desktop-wallet-signed-envelopes-ciphertext\",",
+            1,
+        );
+        let unknown = original.replacen("{", "{\"unknown\":true,", 1);
+        assert_eq!(
+            decode_wrapper(unknown.as_bytes()).err(),
+            Some(EnvelopeStoreError::AuthenticationFailed)
+        );
+        fs::write(&store.container_path, duplicated).unwrap();
+        storage_security::protect_file(&store.container_path).unwrap();
+        assert!(store.verify_prepared(&authenticator, &authority).is_err());
+        fs::remove_dir_all(&directory).unwrap();
+
+        let (directory, custody, seed, transaction) = fixture();
+        let store = EnvelopeStore::for_custody(&custody).unwrap();
+        let authenticator = EnvelopeStoreAuthenticator::new("primary", &seed).unwrap();
+        let reconciliation = ReconciliationStore::for_custody(&custody).unwrap();
+        let reconciliation_authenticator =
+            ReconciliationAuthenticator::new("primary", &seed).unwrap();
+        let reservation = reconciliation
+            .reserve_prepared(&reconciliation_authenticator)
+            .unwrap();
+        let oversized = Zeroizing::new(vec![b'x'; MAX_BODY_BYTES + 1]);
+        let transaction_id = canonical_transaction_id(&transaction).unwrap();
+        assert_eq!(
+            store
+                .publish_prepared(
+                    &authenticator,
+                    EnvelopeEntryInput {
+                        wallet_id: "primary",
+                        attempt_id: &"11".repeat(32),
+                        transaction_id: &transaction_id,
+                        transaction: &transaction,
+                        exact_body: oversized.as_slice(),
+                        signed_body_digest_hex: &"22".repeat(32),
+                        compatibility_contract_digest_hex: &"33".repeat(32),
+                        created_at_unix_ms: 1,
+                    },
+                    &reservation,
+                )
+                .err(),
+            Some(EnvelopeStoreError::InvalidRequest)
+        );
+        assert!(!store.container_path.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn sensitive_serialization_and_poisoned_lock_paths_emit_no_privacy_canary() {
+        const CANARY: &str = "wallet-envelope-privacy-canary-9f2a";
+        for (test_name, mode) in [
+            (
+                "wallet::envelope_store::tests::privacy_panic_child",
+                "panic",
+            ),
+            (
+                "wallet::envelope_store::tests::privacy_poison_child",
+                "poison",
+            ),
+        ] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture"])
+                .env("VISION_ENVELOPE_PRIVACY_CHILD", mode)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let mut emitted = output.stdout;
+            emitted.extend(output.stderr);
+            assert!(!String::from_utf8_lossy(&emitted).contains(CANARY));
+        }
+        let source = include_str!("envelope_store.rs");
+        assert!(source.contains("serde_json::to_writer(&mut *bytes, value)"));
+        assert!(!source.contains(&["serde_json::to_", "vec(input.transaction)"].concat()));
+        assert!(!source.contains(&["serde_json::to_", "vec(&entry.transaction)"].concat()));
+    }
+
+    #[test]
+    fn privacy_panic_child() {
+        if std::env::var("VISION_ENVELOPE_PRIVACY_CHILD").as_deref() != Ok("panic") {
+            return;
+        }
+        struct PanicAfterCanary;
+        impl Serialize for PanicAfterCanary {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                let _ = serializer.serialize_str("wallet-envelope-privacy-canary-9f2a")?;
+                panic!("injected serialization panic");
+            }
+        }
+        assert!(std::panic::catch_unwind(|| {
+            let _ = serialize_sensitive(&PanicAfterCanary, EnvelopeStoreError::InvalidRequest);
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn privacy_poison_child() {
+        if std::env::var("VISION_ENVELOPE_PRIVACY_CHILD").as_deref() != Ok("poison") {
+            return;
+        }
+        let (directory, custody, seed, transaction) = fixture();
+        let (store, authenticator, _authority) = publish_fixture(&custody, &seed, &transaction);
+        let _ = std::panic::catch_unwind(|| {
+            let _held = STORE_LOCK.lock().unwrap();
+            panic!("injected lock poison");
+        });
+        assert_eq!(
+            store
+                .contains_transaction_id(&authenticator, &"11".repeat(32))
+                .err(),
+            Some(EnvelopeStoreError::StorageUnavailable)
+        );
+        STORE_LOCK.clear_poison();
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
 
 impl PreparedEnvelopeAuthority {
@@ -1169,12 +1577,13 @@ fn build_entry(
     input: EnvelopeEntryInput<'_>,
     reservation: &ReconciliationReservation,
 ) -> Result<EnvelopeEntry, EnvelopeStoreError> {
+    let encoded_transaction =
+        serialize_sensitive(input.transaction, EnvelopeStoreError::InvalidRequest)?;
     if input.wallet_id != authenticator.wallet_id
         || input.transaction.sender_pubkey != authenticator.sender_address
         || input.exact_body.is_empty()
         || input.exact_body.len() > MAX_BODY_BYTES
-        || serde_json::to_vec(input.transaction).map_err(|_| EnvelopeStoreError::InvalidRequest)?
-            != input.exact_body
+        || encoded_transaction.as_slice() != input.exact_body
         || canonical_transaction_id(input.transaction)
             .map_err(|_| EnvelopeStoreError::InvalidRequest)?
             != input.transaction_id
@@ -1304,6 +1713,8 @@ fn validate_entry(
     let body = Zeroizing::new(
         hex::decode(&entry.exact_body_hex).map_err(|_| EnvelopeStoreError::AuthenticationFailed)?,
     );
+    let encoded_transaction =
+        serialize_sensitive(&entry.transaction, EnvelopeStoreError::AuthenticationFailed)?;
     if body.is_empty()
         || body.len() > MAX_BODY_BYTES
         || !is_lower_hex(&entry.attempt_id, 32)
@@ -1318,9 +1729,7 @@ fn validate_entry(
                 .reconciliation_parent_generation
                 .checked_add(1)
                 .unwrap_or(0)
-        || serde_json::to_vec(&entry.transaction)
-            .map_err(|_| EnvelopeStoreError::AuthenticationFailed)?
-            != body.as_slice()
+        || encoded_transaction.as_slice() != body.as_slice()
         || canonical_transaction_id(&entry.transaction)
             .map_err(|_| EnvelopeStoreError::AuthenticationFailed)?
             != entry.transaction_id
@@ -1420,9 +1829,7 @@ fn encrypt_container(
     authenticator: &EnvelopeStoreAuthenticator,
     container: &PlaintextContainer,
 ) -> Result<CiphertextWrapper, EnvelopeStoreError> {
-    let plaintext = Zeroizing::new(
-        serde_json::to_vec(container).map_err(|_| EnvelopeStoreError::InvalidRequest)?,
-    );
+    let plaintext = serialize_sensitive(container, EnvelopeStoreError::InvalidRequest)?;
     if plaintext.is_empty() || plaintext.len() > MAX_CONTAINER_BYTES {
         return Err(EnvelopeStoreError::StoreFull);
     }
@@ -1466,6 +1873,15 @@ fn encrypt_container(
             .map_err(|_| EnvelopeStoreError::StoreFull)?,
         ciphertext_hex: hex::encode(ciphertext),
     })
+}
+
+fn serialize_sensitive<T: Serialize>(
+    value: &T,
+    error: EnvelopeStoreError,
+) -> Result<Zeroizing<Vec<u8>>, EnvelopeStoreError> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    serde_json::to_writer(&mut *bytes, value).map_err(|_| error)?;
+    Ok(bytes)
 }
 
 fn decrypt_container(
@@ -1738,28 +2154,12 @@ fn persist_bytes(
 }
 
 fn read_protected(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, EnvelopeStoreError> {
+    validate_store_directory_health(path)?;
     let parent = path
         .parent()
         .ok_or(EnvelopeStoreError::StorageUnavailable)?;
-    let _directories = match DirectoryChainGuard::open_existing(parent) {
-        Ok(guard) => guard,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(EnvelopeStoreError::StorageUnavailable),
-    };
-    storage_security::verify_directory(parent)
+    let _directories = DirectoryChainGuard::open_existing(parent)
         .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
-    if fs::read_dir(parent)
-        .map_err(|_| EnvelopeStoreError::StorageUnavailable)?
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(STAGING_PREFIX)
-        })
-    {
-        return Err(EnvelopeStoreError::StorageUnavailable);
-    }
     let file = match open_existing_file(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1784,4 +2184,27 @@ fn read_protected(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, Envelo
         return Err(EnvelopeStoreError::StoreFull);
     }
     Ok(Some(bytes))
+}
+
+fn validate_store_directory_health(path: &Path) -> Result<(), EnvelopeStoreError> {
+    let parent = path
+        .parent()
+        .ok_or(EnvelopeStoreError::StorageUnavailable)?;
+    let _directories = DirectoryChainGuard::open_existing(parent)
+        .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
+    storage_security::verify_directory(parent)
+        .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
+    if fs::read_dir(parent)
+        .map_err(|_| EnvelopeStoreError::StorageUnavailable)?
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(STAGING_PREFIX)
+        })
+    {
+        return Err(EnvelopeStoreError::StorageUnavailable);
+    }
+    Ok(())
 }

@@ -578,7 +578,11 @@ mod tests {
     use crate::wallet::{
         account::derive_account_identity,
         core_client::{WalletCoreAccountSnapshot, WalletCoreStatus},
+        journal::{append_accepted_submission, WalletJournalAuthenticator},
+        lifecycle::WalletCustodyPathAuthority,
         secrets::{WalletPassword, WalletSeed},
+        submission::WalletSubmissionOutcome,
+        transaction::{canonical_transaction_id, sign_cash_transfer_for_test, CashTransferDraft},
         vault::EncryptedWalletVault,
     };
     use std::{
@@ -936,5 +940,84 @@ mod tests {
         assert!(!production.contains("sign_cash_transfer"));
         assert!(!production.contains(&["PO", "ST "].concat()));
         assert!(!production.contains("submit"));
+    }
+
+    #[test]
+    fn real_preview_path_rejects_staging_only_envelope_storage_before_installing_a_handle() {
+        let (runtime, sender) = unlocked_runtime(31);
+        let directory = tempfile::tempdir().unwrap();
+        crate::wallet::storage_security::protect_directory(directory.path()).unwrap();
+        let custody =
+            WalletCustodyPathAuthority::issue_for_test(&directory.path().join("wallet.vault.json"));
+        let staging = directory
+            .path()
+            .join(".wallet-signed-envelopes-stage-interrupted.tmp");
+        std::fs::write(&staging, b"interrupted").unwrap();
+        crate::wallet::storage_security::protect_file(&staging).unwrap();
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+            .unwrap();
+        assert_eq!(
+            prepare_with_source_and_custody(
+                &permit,
+                request(&"d".repeat(64), "1"),
+                &source(&sender),
+                &custody,
+            )
+            .err(),
+            Some(WalletPreviewError::ActivityUnavailable)
+        );
+    }
+
+    #[test]
+    fn real_preview_path_rejects_journal_identifier_when_envelope_store_is_missing() {
+        let seed = WalletSeed::for_test(32);
+        let (runtime, sender) = unlocked_runtime(32);
+        let recipient = "e".repeat(64);
+        let directory = tempfile::tempdir().unwrap();
+        crate::wallet::storage_security::protect_directory(directory.path()).unwrap();
+        let custody =
+            WalletCustodyPathAuthority::issue_for_test(&directory.path().join("wallet.vault.json"));
+        let transaction = sign_cash_transfer_for_test(
+            &seed,
+            &CashTransferDraft {
+                nonce: 7,
+                recipient: recipient.clone(),
+                amount_raw_units: 1_000_000_000,
+                tip_raw_units: 0,
+                fee_limit_raw_units: 201,
+            },
+        )
+        .unwrap();
+        let transaction_id = canonical_transaction_id(&transaction).unwrap();
+        let journal_authenticator = WalletJournalAuthenticator::new("primary", &seed).unwrap();
+        append_accepted_submission(
+            custody.journal_path(),
+            &journal_authenticator,
+            &transaction,
+            &WalletSubmissionOutcome::Accepted {
+                tx_id: transaction_id,
+                current_nonce: 7,
+            },
+            1,
+        )
+        .unwrap();
+        assert!(!directory
+            .path()
+            .join("wallet.signed-envelopes.v1.enc")
+            .exists());
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+            .unwrap();
+        assert_eq!(
+            prepare_with_source_and_custody(
+                &permit,
+                request(&recipient, "1"),
+                &source(&sender),
+                &custody,
+            )
+            .err(),
+            Some(WalletPreviewError::ActivityUnavailable)
+        );
     }
 }

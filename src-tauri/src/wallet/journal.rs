@@ -132,6 +132,12 @@ impl WalletActivityJournal {
         })
     }
 
+    pub(in crate::wallet) fn contains_transaction_id(&self, transaction_id: &str) -> bool {
+        self.records
+            .iter()
+            .any(|record| record.tx_id == transaction_id)
+    }
+
     #[cfg(test)]
     pub(in crate::wallet) fn from_records_for_test(records: Vec<WalletActivityRecord>) -> Self {
         Self {
@@ -394,6 +400,13 @@ pub(in crate::wallet) fn append_accepted_evidence(
         } else {
             Err(WalletJournalError::SubmissionMismatch)
         };
+    }
+    if journal
+        .records
+        .iter()
+        .any(|record| record.envelope_commitment_hex == submitted.envelope_commitment_hex)
+    {
+        return Err(WalletJournalError::SubmissionMismatch);
     }
     let mut event = JournalEvent {
         schema: JOURNAL_SCHEMA.to_string(),
@@ -1368,6 +1381,60 @@ mod tests {
             append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 101)
                 .unwrap_err(),
             WalletJournalError::DuplicateTransaction
+        );
+    }
+
+    #[test]
+    fn journal_v3_permanently_binds_one_identifier_to_one_envelope_commitment() {
+        let directory = tempfile::tempdir().unwrap();
+        storage_security::protect_directory(directory.path()).unwrap();
+        let path = directory.path().join("activity.jsonl");
+        let sender = derive_account_identity(&TEST_SEED).address;
+        let evidence = |transaction_id: String, commitment: String| {
+            AcceptedSubmissionEvidence::for_journal_test(
+                WALLET_ID.to_string(),
+                transaction_id,
+                sender.clone(),
+                "22".repeat(32),
+                commitment,
+            )
+        };
+        append_accepted_evidence(
+            &path,
+            &authenticator(),
+            &evidence("11".repeat(32), "aa".repeat(32)),
+        )
+        .unwrap();
+        assert!(append_accepted_evidence(
+            &path,
+            &authenticator(),
+            &evidence("11".repeat(32), "aa".repeat(32)),
+        )
+        .is_ok());
+        assert_eq!(
+            append_accepted_evidence(
+                &path,
+                &authenticator(),
+                &evidence("11".repeat(32), "bb".repeat(32)),
+            )
+            .err(),
+            Some(WalletJournalError::SubmissionMismatch)
+        );
+        assert_eq!(
+            append_accepted_evidence(
+                &path,
+                &authenticator(),
+                &evidence("33".repeat(32), "aa".repeat(32)),
+            )
+            .err(),
+            Some(WalletJournalError::SubmissionMismatch)
+        );
+        assert_eq!(
+            load_activity_journal(&path, &authenticator())
+                .unwrap()
+                .records()
+                .len(),
+            1
         );
     }
 

@@ -1046,10 +1046,16 @@ impl<'a> WalletOperationPermit<'a> {
             .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
         let mut inner = self.state.lock_inner()?;
         let result = inner.session.with_seed(|wallet_id, seed| {
-            let authenticator = EnvelopeStoreAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
-            store
-                .contains_transaction_id(&authenticator, transaction_id)
-                .map_err(|_| ())
+            let envelope_authenticator =
+                EnvelopeStoreAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+            let envelope_collision = store
+                .contains_transaction_id(&envelope_authenticator, transaction_id)
+                .map_err(|_| ())?;
+            let journal_authenticator =
+                WalletJournalAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+            let journal = load_activity_journal(custody.journal_path(), &journal_authenticator)
+                .map_err(|_| ())?;
+            Ok::<bool, ()>(envelope_collision || journal.contains_transaction_id(transaction_id))
         });
         if !self.is_current(&inner)
             || self.state.revocation_is_pending()
@@ -1425,11 +1431,20 @@ impl WalletSubmissionPermit<'_> {
 
     pub(in crate::wallet) fn publish_prepared_envelope(
         &self,
+        custody: &WalletCustodyPathAuthority,
         store: &EnvelopeStore,
         input: EnvelopeEntryInput<'_>,
         reservation: &ReconciliationReservation,
     ) -> Result<PreparedEnvelopeAuthority, WalletRuntimeError> {
-        self.with_envelope_auth(|authenticator| {
+        self.with_envelope_and_journal_auth(|authenticator, journal_authenticator| {
+            if store.contains_transaction_id(authenticator, input.transaction_id)? {
+                return Err(super::envelope_store::EnvelopeStoreError::Collision);
+            }
+            let journal = load_activity_journal(custody.journal_path(), journal_authenticator)
+                .map_err(|_| super::envelope_store::EnvelopeStoreError::AuthenticationFailed)?;
+            if journal.contains_transaction_id(input.transaction_id) {
+                return Err(super::envelope_store::EnvelopeStoreError::Collision);
+            }
             store.publish_prepared(authenticator, input, reservation)
         })
     }
@@ -1647,6 +1662,55 @@ impl WalletSubmissionPermit<'_> {
                 }
                 let authenticator = EnvelopeStoreAuthenticator::new(wallet_id, seed)?;
                 action(&authenticator)
+            })
+        }));
+        let result = match result {
+            Ok(Ok(Ok(result))) => result,
+            Ok(Ok(Err(_))) | Ok(Err(_)) => {
+                return Err(WalletRuntimeError::ReconciliationUnavailable)
+            }
+            Err(payload) => {
+                self.permit.state.revoke_current_authority();
+                inner.invalidate_all();
+                drop(inner);
+                std::panic::resume_unwind(payload);
+            }
+        };
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(result)
+    }
+
+    fn with_envelope_and_journal_auth<T>(
+        &self,
+        action: impl FnOnce(
+            &EnvelopeStoreAuthenticator,
+            &WalletJournalAuthenticator<'_>,
+        ) -> Result<T, super::envelope_store::EnvelopeStoreError>,
+    ) -> Result<T, WalletRuntimeError> {
+        self.ensure_current()?;
+        let mut inner = self.permit.state.lock_inner()?;
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inner.session.with_seed(|wallet_id, seed| {
+                if wallet_id != self.wallet_id {
+                    return Err(super::envelope_store::EnvelopeStoreError::AuthenticationFailed);
+                }
+                let envelope = EnvelopeStoreAuthenticator::new(wallet_id, seed)?;
+                let journal = WalletJournalAuthenticator::new(wallet_id, seed)
+                    .map_err(|_| super::envelope_store::EnvelopeStoreError::AuthenticationFailed)?;
+                action(&envelope, &journal)
             })
         }));
         let result = match result {

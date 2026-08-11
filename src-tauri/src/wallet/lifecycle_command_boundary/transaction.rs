@@ -385,9 +385,9 @@ impl WalletTransactionCommandBoundary {
         {
             return Err(TransactionBoundaryError::TransactionUnknown);
         }
-        // Journal v2 authenticates public activity but deliberately does not retain the exact
-        // signed envelope required for a safe Core refresh. Keep this reviewed command shape
-        // fail-closed until a separately reviewed storage extension exists.
+        // Journal v3 and private encrypted envelope storage now retain the required authenticated
+        // association, but the separately reviewed read-only refresh coordinator is not yet
+        // implemented. Keep this command shape fail-closed until that tranche is approved.
         Err(TransactionBoundaryError::TransactionUnknown)
     }
 

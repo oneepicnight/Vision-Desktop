@@ -134,6 +134,7 @@ fn submit_signed_artifact_inner<S: WalletCoreSubmissionSource>(
         .map_err(map_runtime_error)?;
     let prepared_envelope = permit
         .publish_prepared_envelope(
+            custody,
             &envelope_store,
             EnvelopeEntryInput {
                 wallet_id: &artifact.wallet_id,
@@ -454,6 +455,7 @@ mod tests {
             WalletCoreAccountSnapshot, WalletCoreClientError, WalletCoreHttpResponse,
             WalletCoreReadSource, WalletCoreStatus,
         },
+        journal::{append_accepted_submission, WalletJournalAuthenticator},
         lifecycle::WalletCustodyPathAuthority,
         preview::{
             bind_consumed_preview_for_test, prepare_with_source_for_test,
@@ -466,8 +468,11 @@ mod tests {
             WalletRuntimeState,
         },
         secrets::{WalletPassword, WalletSeed},
-        submission::SubmissionRejectionPolicy,
-        transaction::VisionTransaction,
+        submission::{SubmissionRejectionPolicy, WalletSubmissionOutcome},
+        transaction::{
+            canonical_transaction_id, sign_cash_transfer_for_test, CashTransferDraft,
+            VisionTransaction,
+        },
         transaction_confirmation::NativeConfirmationApproval,
         vault::EncryptedWalletVault,
     };
@@ -502,6 +507,7 @@ mod tests {
         identity_calls: Arc<AtomicUsize>,
         revoke_on_identity_call: Option<(usize, Arc<WalletRuntimeState>)>,
         lookup_body: Arc<Mutex<Option<Vec<u8>>>>,
+        journal_failure_path: Option<std::path::PathBuf>,
     }
 
     impl WalletCoreReadSource for FakeSubmissionCore {
@@ -556,6 +562,9 @@ mod tests {
             assert_eq!(previous, 0, "the write capability was reused");
             if matches!(self.mode, ResponseMode::PanicDuringWrite) {
                 panic!("injected private submission write panic");
+            }
+            if let Some(path) = &self.journal_failure_path {
+                std::fs::create_dir(path).unwrap();
             }
             let transaction: VisionTransaction = serde_json::from_slice(exact_body).unwrap();
             let tx_id = canonical_transaction_id(&transaction).unwrap();
@@ -662,7 +671,16 @@ mod tests {
         lookup_body: Arc<Mutex<Option<Vec<u8>>>>,
         mode: ResponseMode,
     ) -> PendingTransferConfirmation<'a, FakeSubmissionCore> {
-        pending_with_revocation(runtime, sender, recipient, writes, lookup_body, mode, None)
+        pending_with_options(
+            runtime,
+            sender,
+            recipient,
+            writes,
+            lookup_body,
+            mode,
+            None,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -675,6 +693,29 @@ mod tests {
         mode: ResponseMode,
         revoke_on_identity_call: Option<(usize, Arc<WalletRuntimeState>)>,
     ) -> PendingTransferConfirmation<'a, FakeSubmissionCore> {
+        pending_with_options(
+            runtime,
+            sender,
+            recipient,
+            writes,
+            lookup_body,
+            mode,
+            revoke_on_identity_call,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pending_with_options<'a>(
+        runtime: &'a WalletRuntimeState,
+        sender: &str,
+        recipient: &str,
+        writes: Arc<AtomicUsize>,
+        lookup_body: Arc<Mutex<Option<Vec<u8>>>>,
+        mode: ResponseMode,
+        revoke_on_identity_call: Option<(usize, Arc<WalletRuntimeState>)>,
+        journal_failure_path: Option<std::path::PathBuf>,
+    ) -> PendingTransferConfirmation<'a, FakeSubmissionCore> {
         let identity_calls = Arc::new(AtomicUsize::new(0));
         let prepare_source = FakeSubmissionCore {
             address: sender.to_string(),
@@ -684,6 +725,7 @@ mod tests {
             identity_calls: identity_calls.clone(),
             revoke_on_identity_call: revoke_on_identity_call.clone(),
             lookup_body: lookup_body.clone(),
+            journal_failure_path: journal_failure_path.clone(),
         };
         let request: WalletTransferPreviewRequest = serde_json::from_value(serde_json::json!({
             "recipient": recipient,
@@ -712,6 +754,7 @@ mod tests {
                 identity_calls,
                 revoke_on_identity_call,
                 lookup_body,
+                journal_failure_path,
             },
         )
         .unwrap()
@@ -755,20 +798,77 @@ mod tests {
     }
 
     #[test]
-    fn proven_acceptance_with_journal_failure_remains_recording_pending() {
+    fn journal_collision_rechecked_immediately_before_envelope_publication_prevents_write() {
         let (runtime, sender) = unlocked_runtime();
+        let recipient = "c".repeat(64);
         let writes = Arc::new(AtomicUsize::new(0));
         let pending = pending(
             &runtime,
             &sender,
-            &"b".repeat(64),
+            &recipient,
             writes.clone(),
             Arc::new(Mutex::new(None)),
             ResponseMode::Accepted,
         );
         let directory = tempfile::tempdir().unwrap();
         let custody = custody(&directory);
-        std::fs::create_dir(custody.journal_path()).unwrap();
+        let seed = WalletSeed::for_test(0x41);
+        let transaction = sign_cash_transfer_for_test(
+            &seed,
+            &CashTransferDraft {
+                nonce: 7,
+                recipient,
+                amount_raw_units: 2_500_000_000,
+                tip_raw_units: 0,
+                fee_limit_raw_units: 201,
+            },
+        )
+        .unwrap();
+        let transaction_id = canonical_transaction_id(&transaction).unwrap();
+        let journal_authenticator = WalletJournalAuthenticator::new("primary", &seed).unwrap();
+        append_accepted_submission(
+            custody.journal_path(),
+            &journal_authenticator,
+            &transaction,
+            &WalletSubmissionOutcome::Accepted {
+                tx_id: transaction_id,
+                current_nonce: 7,
+            },
+            1,
+        )
+        .unwrap();
+
+        assert!(super::super::sign_and_submit_after_native_approval(
+            pending,
+            NativeConfirmationApproval::issue_for_test(),
+            &custody,
+            2,
+            &SubmissionRejectionPolicy::production(),
+        )
+        .is_err());
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        assert!(!directory
+            .path()
+            .join("wallet.signed-envelopes.v1.enc")
+            .exists());
+    }
+
+    #[test]
+    fn proven_acceptance_with_journal_failure_remains_recording_pending() {
+        let (runtime, sender) = unlocked_runtime();
+        let directory = tempfile::tempdir().unwrap();
+        let custody = custody(&directory);
+        let writes = Arc::new(AtomicUsize::new(0));
+        let pending = pending_with_options(
+            &runtime,
+            &sender,
+            &"b".repeat(64),
+            writes.clone(),
+            Arc::new(Mutex::new(None)),
+            ResponseMode::Accepted,
+            None,
+            Some(custody.journal_path().to_path_buf()),
+        );
         let result = super::super::sign_and_submit_after_native_approval(
             pending,
             NativeConfirmationApproval::issue_for_test(),
@@ -841,6 +941,7 @@ mod tests {
                     identity_calls: Arc::new(AtomicUsize::new(0)),
                     revoke_on_identity_call: None,
                     lookup_body,
+                    journal_failure_path: None,
                 };
                 assert!(matches!(
                     reconciliation
@@ -901,6 +1002,7 @@ mod tests {
             identity_calls: Arc::new(AtomicUsize::new(0)),
             revoke_on_identity_call: None,
             lookup_body,
+            journal_failure_path: None,
         };
         assert!(matches!(
             reconciliation
@@ -954,6 +1056,7 @@ mod tests {
             identity_calls: Arc::new(AtomicUsize::new(0)),
             revoke_on_identity_call: None,
             lookup_body,
+            journal_failure_path: None,
         };
         assert_eq!(
             reconciliation
@@ -1075,6 +1178,7 @@ mod tests {
             identity_calls: Arc::new(AtomicUsize::new(0)),
             revoke_on_identity_call: None,
             lookup_body,
+            journal_failure_path: None,
         };
         assert!(matches!(
             reconciliation
@@ -1099,15 +1203,16 @@ mod tests {
         let journal_path = custody.journal_path().to_path_buf();
 
         let writes = Arc::new(AtomicUsize::new(0));
-        let pending = pending(
+        let pending = pending_with_options(
             &runtime,
             &sender,
             &"b".repeat(64),
             writes.clone(),
             Arc::new(Mutex::new(None)),
             ResponseMode::Accepted,
+            None,
+            Some(journal_path.clone()),
         );
-        std::fs::create_dir(&journal_path).unwrap();
         let result = super::super::sign_and_submit_after_native_approval(
             pending,
             NativeConfirmationApproval::issue_for_test(),
@@ -1295,6 +1400,7 @@ mod tests {
             identity_calls: Arc::new(AtomicUsize::new(0)),
             revoke_on_identity_call: None,
             lookup_body,
+            journal_failure_path: None,
         };
         assert_eq!(
             reconciliation

@@ -7,15 +7,45 @@ authorize a wallet command, invoke registration, permission, capability, fronten
 approval flag, supported-Core manifest entry, signing activation, submission activation, recovery
 export, or Vision-Core change.
 
-The reviewed implementation baseline is commit
-`0164a9d327c392a36a61e941cbd497aae1d4e7d7`, tree
-`1bfd394eb26581c15ae3b344e76c982b71df6f6a`. The accepted Layer B evidence is commit
+The current private implementation baseline is commit
+`653630cf2c5a60ee1f80343c37fd53e91299527c`, tree
+`d80c8519eb3c2601066a40e9f3a226847cdab7b3`. It is the approved, private, unregistered receipt-
+refresh correction built on the complete private wallet implementation chain. The accepted Layer B
+evidence is commit
 `b294b6bfdae28ca7674950c12a159e4d8cdb1e9b`, tree
 `61120ad35fee58c756d2aa910ddcc0c767e3aaad`. Its report SHA-256 is
 `D83B950A576EABA11B3997577E132C925CA923B392249E75C17AC363F5E4FA02`; its manifest SHA-256 is
 `432C41AAEF4059F39235584B08B849DC6923811D15015A7FC36B26D161FA2D8B`. Independent review accepted
 all 562 Layer B cases for that exact implementation, dependency set, Windows environment, and
 WebView2 runtime.
+
+The independently approved private implementation anchors incorporated by the current baseline are:
+
+- lifecycle command boundary: commit `58e0843d57fec6a7b47004ed868d57df910d61d9`, tree
+  `0498bd1f298c6e8648848f282fd6faa22bc6d4c2`;
+- native transaction confirmation: commit `a54bdf06be75b762755b96c87294c82af1dd6920`, tree
+  `42b5332fb163bdd187c44b658f3626a32c31b843`, with accepted physical evidence commit
+  `5e6acbc7c8e7003c11b0520cf42bc4729118d278`, tree
+  `ffd79b1e841fb7c0ae6ae4ac28618b41ab207328`;
+- private signing: commit `7a3f6f3ceaf8f24d35244a7c103dc98ea600f7fd`, tree
+  `6a2a0a5e4ed6120ba7706d0db685ae207008198a`;
+- private one-attempt submission and reconciliation: commit
+  `31c95a156bc98a3e7b1bb7d549d2b03670864129`, tree
+  `32a44de596f446c139a4e2cb0df343da51af6580`;
+- private transaction command boundary: commit
+  `b108d54a88f658219ec5ab6fce5a07bbf316ce0f`, tree
+  `394503ea8d7d0abff9c9cd36f2d58426f4196d74`;
+- authenticated envelope storage and journal-v3 association: commit
+  `239f64f0c4c8fb483ea1d1be8a2163ea9ee206db`, tree
+  `136c742f275538e58b51beed600ea8df75194d73`; and
+- private receipt refresh and its final correction: current baseline commit
+  `653630cf2c5a60ee1f80343c37fd53e91299527c`, tree
+  `d80c8519eb3c2601066a40e9f3a226847cdab7b3`.
+
+These approvals establish private implementation baselines only. They do not authorize production
+registration, activation, distribution, or a supported Core contract. Any later source change to an
+approved private boundary invalidates that anchor and requires focused re-review before atomic
+integration can continue.
 
 That acceptance closes the raw Tauri/WebView transport qualification gate. It does not itself make
 the production policy true. `duplicate_key_rejection_proven` and the lifecycle, signing, and
@@ -30,6 +60,8 @@ Normative ownership is deliberately narrow:
   native confirmation, signing, receipt confidence, and Core authority.
 - `WALLET_PRIVATE_TRANSACTION_SUBMISSION_DESIGN.md` remains normative for one-attempt submission,
   durable ambiguity, reconciliation, and authenticated journal transitions.
+- `WALLET_AUTHENTICATED_ENVELOPE_STORAGE_DESIGN.md` remains normative for encrypted exact-envelope
+  retention, journal-v3 commitment association, and private receipt refresh.
 - This document is the sole normative contract for the combined command inventory, atomic exposure
   sequence, ACL parity, frontend authority, release rollback, and final activation gate.
 
@@ -200,19 +232,22 @@ Core unavailability, and repeated activity queries until the reviewed state mach
 terminal phase. No UI dismissal can clear it.
 
 `wallet_refresh_transaction_observation` operates only on one authenticated local record for which
-Rust can reconstruct or retain the reviewed exact-envelope lookup expectation. It returns the
-updated public activity record and a change classification that may include `reorganized` or
-`observation_lost`. If exact signed-envelope equivalence
-cannot be proven from authenticated local state, the command fails closed; transaction identifier,
-nonce movement, or a Core `NotFound` result is insufficient. The private transaction-boundary
-tranche must prove that the current storage schema supports this invariant. If it does not, this
-command and therefore atomic activation remain blocked pending a separately reviewed storage
-extension. `WALLET_AUTHENTICATED_ENVELOPE_STORAGE_DESIGN.md` defines the proposed encrypted,
-authenticated storage and private read-only refresh extension. That document is design-only and
-does not remove this activation blocker.
-The proposed extension also requires an internal journal version 3 acceptance event that
-authenticates the immutable envelope commitment while omitting it from IPC. Identifier-only journal
-association remains insufficient.
+Rust retains the reviewed exact-envelope lookup expectation. It returns the updated public activity
+record and a change classification that may include `reorganized` or `observation_lost`. If exact
+signed-envelope equivalence cannot be proven from authenticated local state, the command fails
+closed; transaction identifier, nonce movement, or a Core `NotFound` result is insufficient.
+
+The approved private implementation authenticates the journal-v3 record and immutable envelope
+commitment before requesting Core authority. It then uses only a fresh peer-proven read-only Core
+connection, validates the complete signed envelope and Core generation at every required
+checkpoint, and authenticates and reads back the resulting public journal observation before it
+escapes. Local eligibility failure requests zero Core authority. Unchanged observations do not grow
+the journal or fabricate a new observation time. No refresh authority can sign, submit, retry,
+replace, export recovery material, or project raw envelope bytes.
+
+This approval closes the former private storage and refresh implementation blocker. Production use
+remains blocked by the atomic registration, supported-Core, frozen-artifact, and publication gates
+in this document. Identifier-only journal association remains prohibited.
 
 ## Fixed transaction errors
 
@@ -252,8 +287,10 @@ non-forgeable `WalletExposureAuthority`; there is no second store or parallel ex
 Runtime authority issuance in the exact unpublished release candidate requires all of the following
 simultaneously:
 
-1. The accepted whole-envelope transport proof is compiled for the exact pinned Tauri/Wry/WebView2
-   release and its qualification identity matches the release manifest.
+1. The accepted whole-envelope transport mechanism and duplicate-key proof are compiled for the
+   exact pinned Tauri/Wry/WebView2 release, and the accepted Layer B identity matches the release
+   manifest. The production `duplicate_key_rejection_proven` policy becomes `true` only in the
+   complete unpublished atomic candidate; it is never changed independently.
 2. The exact supported private-loopback Core release and peer-binding contract are present in the
    Desktop compatibility manifest.
 3. The held Core process, generation, manifest, literal loopback endpoint, and connected socket peer
@@ -274,6 +311,11 @@ and at the deepest irreversible transition.
 Production construction remains impossible until all conditions are implemented and reviewed. The
 accepted Layer B result must not be represented by manually changing
 `WholeEnvelopeTransportPolicy::production()` in isolation.
+
+The current private baseline intentionally satisfies none of the production-construction shortcut
+conditions: all three approval constants and the production duplicate-key policy remain `false`, no
+wallet wrapper is registered, and the current Core manifest cannot issue wallet production
+authority. Documentation approval cannot change those facts.
 
 ## Release-candidate authority and publication gate
 
@@ -390,29 +432,33 @@ before rollback can strand custody.
 No operator may repair a failed gate by changing only one constant, permission, manifest entry, or
 frontend route. A correction receives a new exact-commit review and repeats affected qualification.
 
-## Required private transaction-boundary tranche
+## Approved private baseline and composition constraints
 
-Before any atomic exposure implementation, a new private `WalletTransactionCommandBoundary` must be
-implemented and independently reviewed. It may reuse the reviewed `WalletInvokeRequest`, exposure,
-window, fail-closed, and fixed-response machinery but may not duplicate or weaken it.
+The private `WalletLifecycleCommandBoundary`, `WalletTransactionCommandBoundary`, authenticated
+envelope store, journal-v3 association, receipt-refresh engine, native confirmation, signing, and
+one-attempt submission/reconciliation implementations have each completed their authorized private
+review tranches. They remain unregistered and unreachable from production Tauri IPC.
 
-That tranche is limited to:
+Atomic integration must compose those exact approved boundaries; it may not recreate their logic in
+wrappers, managed state, frontend code, or an alternate service. In particular:
 
-- exact command-shaped methods for the five transaction commands;
-- exact whole-envelope parsing and bounded public response projection;
-- composition of the already reviewed preview, native confirmation, signing, submission,
-  reconciliation, receipt, and journal modules;
-- bounded matching-wallet restart discovery and pending-state projection through
-  `wallet_list_activity`;
-- proof that activity refresh has an authenticated exact-envelope expectation;
-- fixed error translation and non-emitting diagnostics; and
-- focused generated-wrapper-shaped and adversarial Rust tests.
+- all twelve wrappers share one `WalletExposureAuthority`, one `MainWalletWindowAuthority`, one
+  `WalletRuntimeState`, one custody-path authority, and the existing supervisor;
+- lifecycle and transaction envelopes use the same complete-message parser, exact command-name
+  binding, duplicate-key policy, fail-closed guard, fixed-response construction, and epoch checks;
+- transaction refresh uses the approved local-first receipt path and cannot request Core authority
+  until the matching wallet, journal-v3 record, exact envelope, commitment, and compatibility
+  expectation authenticate;
+- no wrapper may accept a secret, selected path, sender, nonce, fee, Core identity, retry,
+  replacement, signed body, or authority object from React;
+- no wrapper, service, component, or test helper may create a second signing, submission,
+  reconciliation, recovery-selection, or Core-write path; and
+- any change inside an approved private boundary receives focused independent re-review before it
+  can enter the frozen atomic candidate.
 
-It must not add `#[tauri::command]`, production invoke registration, AppManifest entries,
-permissions, capabilities, managed production state, frontend wrappers/forms, true approval flags,
-production Core authority, dependency changes, or Vision-Core changes. A test-only wrapper may be
-used only under the already reviewed dual test/feature gating and must remain absent from the
-production binary.
+The next implementation is not a gradual exposure tranche. It is the separately reviewed atomic
+candidate described below, and it remains blocked until the supported private-loopback Core release
+and exact Desktop compatibility contract are supplied by the separate Core workflow.
 
 ## Required integrated qualification
 
@@ -450,26 +496,56 @@ boundary.
 ## Staged implementation and review sequence
 
 1. Independently review this exact documentation-only design.
-2. Implement and review the private, unregistered transaction command boundary described above.
-3. Correct every finding without registering a production wallet surface.
-4. Through the separate Core workflow, obtain and integrate the supported private-loopback and
-   peer-binding release; do not modify Vision-Core from this Desktop workflow.
-5. Prepare and independently approve the exact atomic registration diff, including commands,
-   AppManifest, permissions, capability, frontend, flags, Core manifest, packaging, and rollback.
-6. Land that diff in one unpublished release-candidate commit, independently review its exact tree,
-   and correct every finding before building qualification artifacts.
-7. Build and sign the final distributable artifact once; freeze and record its complete identity and
-   hashes. Do not distribute it.
-8. Run static ACL, authority-surface, secret-canary, interruption, packaged Windows, and clean-device
-   end-to-end custody, recovery, spending, ambiguity, receipt, and spend-after-restore qualification
-   against that exact artifact using its ordinary production authority.
-9. Independently verify and accept both the evidence and the exact artifact. Any Failed,
-   Inconclusive, changed, or unhashed result rejects the candidate.
-10. Only after final written acceptance, publish the byte-identical qualified artifact and enable
-    the wallet for users. Do not rebuild, re-sign, patch, or reconfigure it after qualification.
+2. Preserve the approved private baseline at commit
+   `653630cf2c5a60ee1f80343c37fd53e91299527c`. Any private-boundary correction receives focused
+   independent review before this sequence continues.
+3. Through the separate Core workflow, obtain an exact supported private-loopback release with the
+   reviewed peer-binding mechanism. In Desktop, add only the exact compatibility contract and
+   independently review its binary, manifest, process-generation, endpoint, fee, status, and
+   rejection semantics. Do not modify Vision-Core from this Desktop workflow.
+4. Prepare the complete atomic exposure delta against the approved private baseline. The delta must
+   contain all twelve wrappers, production handler entries, AppManifest entries, generated narrow
+   permissions, the existing main-window capability entries, shared managed state, frontend
+   services and public UI, documentation, three reviewed approval constants, the production
+   duplicate-key policy, exact Core compatibility entry, packaging, parity tests, and rollback
+   controls together. No partial subset may be committed as an activatable state.
+5. Independently review that unpublished source tree before any wallet qualification. Correct every
+   finding in a new exact tree and repeat source review until there are zero open findings. The tree
+   remains undistributed.
+6. Build and sign the final distributable artifact once from the accepted source tree; freeze its
+   commit, tree, dependency lockfiles, compiler inputs, configuration, signature, complete file-hash
+   manifest, and expected WebView2/runtime identity. Do not publish or install it outside the
+   controlled qualification environment.
+7. Run static ACL, twelve-wrapper transport, authority-surface, secret-canary, interruption,
+   packaged Windows, and clean-device end-to-end custody, recovery, spending, ambiguity, receipt,
+   and spend-after-restore qualification against that exact artifact using its ordinary production
+   authority. No test authority, flag override, alternate manifest, debugger mutation, or bypass is
+   permitted.
+8. Independently verify and accept both the complete primary evidence and the byte-exact artifact.
+   Any Failed, Inconclusive, missing, changed, unhashed, or non-reproducibly classified result rejects
+   the candidate and prohibits distribution.
+9. Only after final written publication authorization, publish the byte-identical qualified
+   artifact and enable the wallet for users. Do not rebuild, re-sign, patch, reconfigure, or change
+   release metadata embedded in the artifact after qualification.
+10. Preserve the approved private baseline and every rejected candidate/evidence set. A later
+    correction begins with a new commit, tree, artifact identity, and all affected reviews and
+    qualifications; it never reuses a prior Passed classification across changed bytes.
 
 Failure at any step returns to the private, unreachable state. No earlier private implementation or
 transport qualification is permission to skip later gates.
+
+## Approval requested by this revision
+
+Independent review is requested only for this reconciled atomic-exposure design. Approval may
+authorize preparation of the complete unpublished atomic candidate only after the separately
+supplied private-loopback Core compatibility contract is available and independently accepted.
+
+This revision does not authorize any current source or runtime exposure. In particular, it does not
+authorize changing `duplicate_key_rejection_proven`, changing an approval constant, adding a Tauri
+command or invoke-handler entry, adding an AppManifest entry, generating or granting a permission,
+changing a capability, adding a frontend invoke or custody form, enabling production Core wallet
+authority, building an enabled artifact, publishing a release, exporting recovery material, or
+modifying Vision-Core.
 
 ## Deliberately deferred features
 

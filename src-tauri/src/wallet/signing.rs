@@ -247,7 +247,8 @@ const fn map_preview_error(error: WalletPreviewError) -> WalletPrivateSigningErr
         | WalletPreviewError::CoreRecovering
         | WalletPreviewError::AccountUnavailable
         | WalletPreviewError::InsufficientBalance
-        | WalletPreviewError::ArithmeticRejected => WalletPrivateSigningError::PreviewUnavailable,
+        | WalletPreviewError::ArithmeticRejected
+        | WalletPreviewError::ActivityUnavailable => WalletPrivateSigningError::PreviewUnavailable,
     }
 }
 

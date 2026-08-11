@@ -318,7 +318,8 @@ fn map_preview_error(error: WalletPreviewError) -> WalletConfirmationError {
         | WalletPreviewError::CoreRecovering
         | WalletPreviewError::AccountUnavailable
         | WalletPreviewError::InsufficientBalance
-        | WalletPreviewError::ArithmeticRejected => WalletConfirmationError::PreviewUnavailable,
+        | WalletPreviewError::ArithmeticRejected
+        | WalletPreviewError::ActivityUnavailable => WalletConfirmationError::PreviewUnavailable,
     }
 }
 

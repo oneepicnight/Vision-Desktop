@@ -1,6 +1,7 @@
 use super::SignedTransferArtifact;
 use crate::wallet::{
     core_client::WalletCoreSubmissionSource,
+    envelope_store::{EnvelopeEntryInput, EnvelopeStore},
     lifecycle::WalletCustodyPathAuthority,
     reconciliation::{ReconciliationRecord, ReconciliationStore},
     runtime::{WalletRuntimeError, WalletSubmissionPermit},
@@ -124,7 +125,30 @@ fn submit_signed_artifact_inner<S: WalletCoreSubmissionSource>(
         .map_err(|_| PrivateSubmissionError::ReconciliationUnavailable)?;
     let store = ReconciliationStore::for_custody(custody)
         .map_err(|_| PrivateSubmissionError::ReconciliationUnavailable)?;
-    let record = ReconciliationRecord::prepared(
+    let envelope_store = EnvelopeStore::for_custody(custody)
+        .map_err(|_| PrivateSubmissionError::ReconciliationUnavailable)?;
+    let compatibility_contract_digest_hex =
+        crate::wallet::submission::compatibility_contract_digest(rejection_policy);
+    let reservation = permit
+        .reserve_reconciliation(&store)
+        .map_err(map_runtime_error)?;
+    let prepared_envelope = permit
+        .publish_prepared_envelope(
+            &envelope_store,
+            EnvelopeEntryInput {
+                wallet_id: &artifact.wallet_id,
+                attempt_id: &hex::encode(attempt_bytes.as_slice()),
+                transaction_id: &artifact.transaction_id,
+                transaction: &artifact.transaction,
+                exact_body: exact_body.as_slice(),
+                signed_body_digest_hex: &signed_body_digest_hex,
+                compatibility_contract_digest_hex: &compatibility_contract_digest_hex,
+                created_at_unix_ms,
+            },
+            &reservation,
+        )
+        .map_err(map_runtime_error)?;
+    let record = ReconciliationRecord::prepared_bound(
         artifact.wallet_id.clone(),
         hex::encode(attempt_bytes.as_slice()),
         artifact.transaction_id.clone(),
@@ -135,18 +159,36 @@ fn submit_signed_artifact_inner<S: WalletCoreSubmissionSource>(
         artifact.transaction.tip,
         artifact.transaction.fee_limit,
         signed_body_digest_hex,
+        prepared_envelope.commitment_hex().to_string(),
+        &reservation,
         hex::encode(artifact.core_identity_fingerprint),
         created_at_unix_ms,
     );
 
     let grant = permit.take_activation_grant().map_err(map_runtime_error)?;
     let (live, write) = grant.split();
-    let prepared = permit
-        .publish_prepared(live, &store, record)
-        .map_err(map_runtime_error)?;
+    let prepared = match permit.publish_prepared(live, &store, record, reservation) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = permit.remove_prewrite_envelope(&envelope_store, prepared_envelope);
+            return Err(map_runtime_error(error));
+        }
+    };
+    if prepared
+        .verify_envelope_binding(&prepared_envelope)
+        .is_err()
+        || permit
+            .verify_prepared_envelope(&envelope_store, &prepared_envelope)
+            .is_err()
+    {
+        return Err(PrivateSubmissionError::ReconciliationUnavailable);
+    }
     if validate_authority(&permit, &artifact, source).is_err() {
         permit
             .resolve_not_attempted(prepared, &store)
+            .map_err(map_runtime_error)?;
+        permit
+            .remove_prewrite_envelope(&envelope_store, prepared_envelope)
             .map_err(map_runtime_error)?;
         permit.complete(()).map_err(map_runtime_error)?;
         return Err(PrivateSubmissionError::RuntimeRevoked);
@@ -155,6 +197,9 @@ fn submit_signed_artifact_inner<S: WalletCoreSubmissionSource>(
         .publish_may_have_been_submitted(prepared, &store)
         .map_err(map_runtime_error)?;
     phase.set(DurableSubmissionPhase::MayHaveBeenSubmitted);
+    let ambiguous_envelope = permit
+        .mark_envelope_ambiguous(&envelope_store, prepared_envelope)
+        .map_err(map_runtime_error)?;
     let write_ready = may_have.combine(write);
     let (may_have, write_once) = write_ready.into_parts();
 
@@ -215,8 +260,11 @@ fn submit_signed_artifact_inner<S: WalletCoreSubmissionSource>(
                     &store,
                     transaction_id,
                     nonce,
-                    crate::wallet::submission::compatibility_contract_digest(rejection_policy),
+                    compatibility_contract_digest_hex,
                 )
+                .map_err(map_runtime_error)?;
+            let accepted_envelope = permit
+                .mark_envelope_accepted(&envelope_store, ambiguous_envelope)
                 .map_err(map_runtime_error)?;
             let evidence = match accepted.evidence() {
                 Ok(evidence) => evidence,
@@ -228,6 +276,18 @@ fn submit_signed_artifact_inner<S: WalletCoreSubmissionSource>(
                         .map_err(map_runtime_error)
                 }
             };
+            if evidence.envelope_commitment_hex() != accepted_envelope.commitment_hex()
+                || evidence.transaction_id() != accepted_envelope.transaction_id()
+                || permit
+                    .verify_accepted_envelope(&envelope_store, &accepted_envelope)
+                    .is_err()
+            {
+                return permit
+                    .complete(PrivateSubmissionResult::AcceptedRecordingPending {
+                        transaction_id: artifact.transaction_id.clone(),
+                    })
+                    .map_err(map_runtime_error);
+            }
             if permit.record_accepted_evidence(custody, &evidence).is_err() {
                 return permit
                     .complete(PrivateSubmissionResult::AcceptedRecordingPending {
@@ -274,6 +334,7 @@ fn submit_signed_artifact_inner<S: WalletCoreSubmissionSource>(
         }
         PrivateSubmissionResponseDisposition::OutcomeUnknown => {
             drop(may_have);
+            drop(ambiguous_envelope);
             complete_with_core_validation(
                 permit,
                 &artifact,
@@ -399,10 +460,7 @@ mod tests {
             PendingTransferConfirmation,
         },
         public_request::WalletTransferPreviewRequest,
-        reconciliation::{
-            publish_accepted_for_test, publish_prepared_for_test, CoreWriteOnce,
-            ReconciliationAuthenticator, ReconciliationRecord, ReconciliationStore,
-        },
+        reconciliation::{CoreWriteOnce, ReconciliationStore},
         runtime::{
             WalletOperationKind, WalletOperationPermit, WalletReconciliationResult,
             WalletRuntimeState,
@@ -1034,28 +1092,36 @@ mod tests {
     }
 
     #[test]
-    fn restart_permit_resolves_prepared_and_completes_accepted_recording_without_write_authority() {
+    fn restart_permit_completes_accepted_recording_without_write_authority() {
         let (runtime, sender) = unlocked_runtime();
         let directory = tempfile::tempdir().unwrap();
         let custody = custody(&directory);
         let journal_path = custody.journal_path().to_path_buf();
-        let store = ReconciliationStore::for_custody(&custody).unwrap();
-        let seed = WalletSeed::for_test(0x41);
-        let authenticator = ReconciliationAuthenticator::new("primary", &seed).unwrap();
 
-        publish_prepared_for_test(&store, &authenticator, reconciliation_record(&sender, "11"))
-            .unwrap();
-        let cleanup = runtime.begin_reconciliation_discovery(MAIN).unwrap();
-        let prepared = cleanup.discover(&custody).unwrap().unwrap();
-        cleanup.resolve_prepared(&custody, prepared).unwrap();
-        cleanup.complete(()).unwrap();
-        assert_eq!(
-            fs_read_record(&directory)["phase"]["kind"],
-            "resolved_not_attempted"
+        let writes = Arc::new(AtomicUsize::new(0));
+        let pending = pending(
+            &runtime,
+            &sender,
+            &"b".repeat(64),
+            writes.clone(),
+            Arc::new(Mutex::new(None)),
+            ResponseMode::Accepted,
         );
-
-        publish_accepted_for_test(&store, &authenticator, reconciliation_record(&sender, "77"))
-            .unwrap();
+        std::fs::create_dir(&journal_path).unwrap();
+        let result = super::super::sign_and_submit_after_native_approval(
+            pending,
+            NativeConfirmationApproval::issue_for_test(),
+            &custody,
+            1_700_000_000_123,
+            &SubmissionRejectionPolicy::production(),
+        )
+        .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
+        assert!(matches!(
+            result,
+            PrivateSubmissionResult::AcceptedRecordingPending { .. }
+        ));
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        std::fs::remove_dir(&journal_path).unwrap();
         let recording = runtime.begin_reconciliation_discovery(MAIN).unwrap();
         let accepted = recording.discover(&custody).unwrap().unwrap();
         recording
@@ -1242,23 +1308,6 @@ mod tests {
             fs_read_record(&directory)["phase"]["kind"],
             "may_have_been_submitted"
         );
-    }
-
-    fn reconciliation_record(sender: &str, attempt_byte: &str) -> ReconciliationRecord {
-        ReconciliationRecord::prepared(
-            "primary".to_string(),
-            attempt_byte.repeat(32),
-            "22".repeat(32),
-            sender.to_string(),
-            "b".repeat(64),
-            "250000000".to_string(),
-            7,
-            0,
-            201,
-            "44".repeat(32),
-            "42".repeat(32),
-            1_700_000_000_123,
-        )
     }
 
     fn fs_read_record(directory: &tempfile::TempDir) -> serde_json::Value {

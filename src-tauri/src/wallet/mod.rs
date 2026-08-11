@@ -11,6 +11,8 @@ mod contract;
 #[cfg(windows)]
 mod core_client;
 mod device_protection;
+#[cfg(windows)]
+mod envelope_store;
 mod journal;
 mod kdf;
 #[cfg(windows)]

@@ -1,5 +1,6 @@
 use super::{
     account::derive_account_identity,
+    envelope_store::PreparedEnvelopeAuthority,
     lifecycle::WalletCustodyPathAuthority,
     runtime::{WalletActivationProof, WalletRuntimeError},
     secrets::WalletSeed,
@@ -19,9 +20,9 @@ use std::{
 };
 
 const RECORD_SCHEMA: &str = "vision-desktop-wallet-submission-reconciliation";
-const RECORD_VERSION: u32 = 1;
+const RECORD_VERSION: u32 = 2;
 const HEAD_SCHEMA: &str = "vision-desktop-wallet-submission-reconciliation-head";
-const HEAD_VERSION: u32 = 1;
+const HEAD_VERSION: u32 = 2;
 const RECORD_FILE: &str = "wallet.submission-reconciliation.json";
 const HEAD_FILE: &str = "wallet.submission-reconciliation.head.json";
 const STAGING_PREFIX: &str = ".wallet-submission-reconciliation-stage-";
@@ -84,6 +85,10 @@ pub(super) struct ReconciliationRecord {
     tip_raw_units: u64,
     fee_limit_raw_units: u64,
     signed_body_digest_hex: String,
+    envelope_commitment_hex: String,
+    parent_head_generation: u64,
+    parent_head_authentication_tag_hex: String,
+    reserved_prepared_generation: u64,
     original_core_identity_fingerprint_hex: String,
     created_at_unix_ms: u64,
     phase: ReconciliationPhase,
@@ -109,6 +114,8 @@ enum ReconciliationHeadState {
         position: ReconciliationPosition,
     },
     Transition {
+        previous_generation: u64,
+        previous_previous_head_tag_hex: String,
         previous: ReconciliationPosition,
         next: ReconciliationPosition,
     },
@@ -135,7 +142,7 @@ pub(super) enum ReconciliationPhaseTag {
 }
 
 enum ExpectedTransition {
-    NewAttempt,
+    NewAttempt(ReconciliationReservation),
     Exact(ReconciliationPhaseTag),
 }
 
@@ -151,6 +158,29 @@ pub(super) struct LoadedReconciliation {
     record: Option<ReconciliationRecord>,
     head_generation: Option<u64>,
     head_authentication_tag: [u8; AUTHENTICATION_BYTES],
+    head_previous_authentication_tag_hex: String,
+}
+
+/// Authenticated predecessor position reserved for exactly one future Prepared record.
+/// Fields remain private so ordinary callers cannot forge a store generation.
+pub(super) struct ReconciliationReservation {
+    parent_generation: u64,
+    parent_authentication_tag: [u8; AUTHENTICATION_BYTES],
+    prepared_generation: u64,
+}
+
+impl ReconciliationReservation {
+    pub(super) const fn parent_generation(&self) -> u64 {
+        self.parent_generation
+    }
+
+    pub(super) fn parent_authentication_tag_hex(&self) -> String {
+        hex::encode(self.parent_authentication_tag)
+    }
+
+    pub(super) const fn prepared_generation(&self) -> u64 {
+        self.prepared_generation
+    }
 }
 
 /// Linear live-attempt capabilities. None implement Clone, Debug, Display, or serialization.
@@ -191,6 +221,7 @@ pub(super) struct RestartReconciliationPermit {
 }
 
 pub(super) struct ReconciliationLookupExpectation {
+    attempt_id: String,
     transaction_id: String,
     sender_address: String,
     recipient_address: String,
@@ -199,9 +230,14 @@ pub(super) struct ReconciliationLookupExpectation {
     tip_raw_units: u64,
     fee_limit_raw_units: u64,
     signed_body_digest_hex: String,
+    envelope_commitment_hex: String,
+    parent_head_generation: u64,
+    parent_head_authentication_tag_hex: String,
+    reserved_prepared_generation: u64,
 }
 
 pub(super) struct AcceptedSubmissionEvidence {
+    attempt_id: String,
     wallet_id: String,
     transaction_id: String,
     sender_address: String,
@@ -210,7 +246,43 @@ pub(super) struct AcceptedSubmissionEvidence {
     nonce: u64,
     tip_raw_units: u64,
     fee_limit_raw_units: u64,
+    envelope_commitment_hex: String,
+    parent_head_generation: u64,
+    parent_head_authentication_tag_hex: String,
+    reserved_prepared_generation: u64,
     submitted_at_unix_ms: u64,
+}
+
+/// Immutable authenticated cross-store binding copied only from a verified
+/// reconciliation record. Ordinary callers cannot construct or alter it.
+pub(super) struct ReconciliationEnvelopeBinding {
+    attempt_id: String,
+    transaction_id: String,
+    commitment_hex: String,
+    parent_generation: u64,
+    parent_tag_hex: String,
+    reserved_prepared_generation: u64,
+}
+
+impl ReconciliationEnvelopeBinding {
+    pub(super) fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+    pub(super) fn transaction_id(&self) -> &str {
+        &self.transaction_id
+    }
+    pub(super) fn commitment_hex(&self) -> &str {
+        &self.commitment_hex
+    }
+    pub(super) const fn parent_generation(&self) -> u64 {
+        self.parent_generation
+    }
+    pub(super) fn parent_tag_hex(&self) -> &str {
+        &self.parent_tag_hex
+    }
+    pub(super) const fn reserved_prepared_generation(&self) -> u64 {
+        self.reserved_prepared_generation
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,6 +340,78 @@ impl ReconciliationStore {
         self.load_authenticated_unlocked(authenticator)
     }
 
+    /// Returns the authenticated current head only when no reconciliation record occupies it.
+    /// This is the sole predecessor proof accepted by pre-Prepared envelope orphan cleanup.
+    pub(super) fn empty_head_reservation(
+        &self,
+        authenticator: &ReconciliationAuthenticator,
+    ) -> Result<Option<ReconciliationReservation>, ReconciliationError> {
+        let _lock = STORE_LOCK
+            .lock()
+            .map_err(|_| ReconciliationError::StorageUnavailable)?;
+        let loaded = self.load_authenticated_unlocked(authenticator)?;
+        if loaded.record.is_some() {
+            return Ok(None);
+        }
+        let Some(parent_generation) = loaded.head_generation else {
+            return Ok(None);
+        };
+        let prepared_generation = parent_generation
+            .checked_add(1)
+            .ok_or(ReconciliationError::InvalidTransition)?;
+        Ok(Some(ReconciliationReservation {
+            parent_generation,
+            parent_authentication_tag: loaded.head_authentication_tag,
+            prepared_generation,
+        }))
+    }
+
+    pub(super) fn reserve_prepared(
+        &self,
+        authenticator: &ReconciliationAuthenticator,
+    ) -> Result<ReconciliationReservation, ReconciliationError> {
+        let _lock = STORE_LOCK
+            .lock()
+            .map_err(|_| ReconciliationError::StorageUnavailable)?;
+        let mut loaded = self.load_authenticated_unlocked(authenticator)?;
+        if loaded.head_generation.is_none() {
+            let mut genesis = ReconciliationHead {
+                schema: HEAD_SCHEMA.to_string(),
+                version: HEAD_VERSION,
+                wallet_id: authenticator.wallet_id.clone(),
+                generation: 0,
+                previous_head_tag_hex: "00".repeat(AUTHENTICATION_BYTES),
+                state: ReconciliationHeadState::Committed {
+                    position: empty_position(),
+                },
+                authentication_tag_hex: String::new(),
+            };
+            authenticate_head(authenticator, &mut genesis)?;
+            persist_json(&self.head_path, &genesis, true, MAX_HEAD_BYTES)?;
+            loaded.head_generation = Some(0);
+            loaded.head_authentication_tag = decode_tag(&genesis.authentication_tag_hex)?;
+            loaded.head_previous_authentication_tag_hex = "00".repeat(AUTHENTICATION_BYTES);
+        }
+        if loaded
+            .record
+            .as_ref()
+            .is_some_and(|record| !record.phase.tag().is_terminal())
+        {
+            return Err(ReconciliationError::InvalidTransition);
+        }
+        let parent_generation = loaded
+            .head_generation
+            .ok_or(ReconciliationError::AuthenticationFailed)?;
+        let prepared_generation = parent_generation
+            .checked_add(1)
+            .ok_or(ReconciliationError::InvalidTransition)?;
+        Ok(ReconciliationReservation {
+            parent_generation,
+            parent_authentication_tag: loaded.head_authentication_tag,
+            prepared_generation,
+        })
+    }
+
     fn transition(
         &self,
         authenticator: &ReconciliationAuthenticator,
@@ -291,12 +435,14 @@ impl ReconciliationStore {
             .map_err(|_| ReconciliationError::StorageUnavailable)?;
         let loaded = self.load_authenticated_unlocked(authenticator)?;
         let current_tag = loaded.record.as_ref().map(|record| record.phase.tag());
-        let expected_matches = match expected {
-            ExpectedTransition::NewAttempt => {
-                current_tag.is_none()
-                    || current_tag.is_some_and(ReconciliationPhaseTag::is_terminal)
+        let expected_matches = match &expected {
+            ExpectedTransition::NewAttempt(reservation) => {
+                (current_tag.is_none()
+                    || current_tag.is_some_and(ReconciliationPhaseTag::is_terminal))
+                    && loaded.head_generation == Some(reservation.parent_generation)
+                    && loaded.head_authentication_tag == reservation.parent_authentication_tag
             }
-            ExpectedTransition::Exact(expected) => current_tag == Some(expected),
+            ExpectedTransition::Exact(expected) => current_tag == Some(*expected),
         };
         if !expected_matches
             || !valid_transition(current_tag, next.phase.tag())
@@ -310,6 +456,16 @@ impl ReconciliationStore {
             .unwrap_or(0)
             .checked_add(1)
             .ok_or(ReconciliationError::InvalidTransition)?;
+        if let ExpectedTransition::NewAttempt(reservation) = &expected {
+            if next_generation != reservation.prepared_generation
+                || next.parent_head_generation != reservation.parent_generation
+                || next.parent_head_authentication_tag_hex
+                    != hex::encode(reservation.parent_authentication_tag)
+                || next.reserved_prepared_generation != reservation.prepared_generation
+            {
+                return Err(ReconciliationError::InvalidTransition);
+            }
+        }
         next.store_generation = next_generation;
         if let Some(current) = loaded.record.as_ref() {
             if !current.phase.tag().is_terminal() && !same_attempt(current, &next) {
@@ -342,6 +498,10 @@ impl ReconciliationStore {
             generation: next_generation,
             previous_head_tag_hex: previous_head_tag_hex.clone(),
             state: ReconciliationHeadState::Transition {
+                previous_generation: loaded
+                    .head_generation
+                    .ok_or(ReconciliationError::AuthenticationFailed)?,
+                previous_previous_head_tag_hex: loaded.head_previous_authentication_tag_hex.clone(),
                 previous: previous_position,
                 next: next_position.clone(),
             },
@@ -349,12 +509,7 @@ impl ReconciliationStore {
         };
         authenticate_head(authenticator, &mut transition)?;
         checkpoint(ReconciliationTransitionCheckpoint::BeforeHeadTransition)?;
-        persist_json(
-            &self.head_path,
-            &transition,
-            loaded.head_generation.is_none(),
-            MAX_HEAD_BYTES,
-        )?;
+        persist_json(&self.head_path, &transition, false, MAX_HEAD_BYTES)?;
         checkpoint(ReconciliationTransitionCheckpoint::HeadTransitionPublished)?;
         persist_bytes(
             &self.record_path,
@@ -381,6 +536,7 @@ impl ReconciliationStore {
             record: Some(next),
             head_generation: Some(next_generation),
             head_authentication_tag: decode_tag(&committed.authentication_tag_hex)?,
+            head_previous_authentication_tag_hex: committed.previous_head_tag_hex,
         })
     }
 
@@ -395,6 +551,7 @@ impl ReconciliationStore {
                 record: None,
                 head_generation: None,
                 head_authentication_tag: [0_u8; AUTHENTICATION_BYTES],
+                head_previous_authentication_tag_hex: "00".repeat(AUTHENTICATION_BYTES),
             }),
             (record_bytes, Some(head_bytes)) => {
                 let record = record_bytes
@@ -417,9 +574,19 @@ impl ReconciliationStore {
                             record,
                             head_generation: Some(head.generation),
                             head_authentication_tag: decode_tag(&head.authentication_tag_hex)?,
+                            head_previous_authentication_tag_hex: head
+                                .previous_head_tag_hex
+                                .clone(),
                         });
                     }
-                    ReconciliationHeadState::Transition { previous, .. } if *previous == actual => {
+                    ReconciliationHeadState::Transition {
+                        previous_generation,
+                        previous_previous_head_tag_hex,
+                        previous,
+                        ..
+                    } if *previous == actual => {
+                        head.generation = *previous_generation;
+                        head.previous_head_tag_hex = previous_previous_head_tag_hex.clone();
                         previous.clone()
                     }
                     ReconciliationHeadState::Transition { next, .. } if *next == actual => {
@@ -437,6 +604,7 @@ impl ReconciliationStore {
                     record,
                     head_generation: Some(head.generation),
                     head_authentication_tag: decode_tag(&head.authentication_tag_hex)?,
+                    head_previous_authentication_tag_hex: head.previous_head_tag_hex.clone(),
                 })
             }
             (Some(_), None) => Err(ReconciliationError::AuthenticationFailed),
@@ -473,13 +641,30 @@ impl SubmissionActivationGrant {
 }
 
 impl LiveReconciliationAuthority {
+    #[cfg(test)]
     pub(super) fn publish_prepared(
         self,
         store: &ReconciliationStore,
         authenticator: &ReconciliationAuthenticator,
-        record: ReconciliationRecord,
+        mut record: ReconciliationRecord,
     ) -> Result<PreparedReconciliationAuthority, ReconciliationError> {
-        let loaded = store.transition(authenticator, ExpectedTransition::NewAttempt, record)?;
+        let reservation = store.reserve_prepared(authenticator)?;
+        record.bind_envelope_for_test(&reservation);
+        self.publish_prepared_reserved(store, authenticator, record, reservation)
+    }
+
+    pub(super) fn publish_prepared_reserved(
+        self,
+        store: &ReconciliationStore,
+        authenticator: &ReconciliationAuthenticator,
+        record: ReconciliationRecord,
+        reservation: ReconciliationReservation,
+    ) -> Result<PreparedReconciliationAuthority, ReconciliationError> {
+        let loaded = store.transition(
+            authenticator,
+            ExpectedTransition::NewAttempt(reservation),
+            record,
+        )?;
         let record = loaded
             .into_record()
             .ok_or(ReconciliationError::InvalidTransition)?;
@@ -488,6 +673,23 @@ impl LiveReconciliationAuthority {
 }
 
 impl PreparedReconciliationAuthority {
+    pub(super) fn verify_envelope_binding(
+        &self,
+        envelope: &PreparedEnvelopeAuthority,
+    ) -> Result<(), ReconciliationError> {
+        if self.record.attempt_id != envelope.attempt_id()
+            || self.record.transaction_id != envelope.transaction_id()
+            || self.record.envelope_commitment_hex != envelope.commitment_hex()
+            || self.record.parent_head_generation != envelope.reconciliation_parent_generation()
+            || self.record.parent_head_authentication_tag_hex
+                != envelope.reconciliation_parent_tag_hex()
+            || self.record.reserved_prepared_generation != envelope.reserved_prepared_generation()
+        {
+            return Err(ReconciliationError::AuthenticationFailed);
+        }
+        Ok(())
+    }
+
     pub(super) fn publish_may_have_been_submitted(
         self,
         store: &ReconciliationStore,
@@ -627,11 +829,8 @@ impl ReconciliationDiscoveryPermit {
         if !store.discover()? {
             return Ok(None);
         }
-        let record = store
-            .load_authenticated(authenticator)?
-            .into_record()
-            .ok_or(ReconciliationError::AuthenticationFailed)?;
-        Ok(Some(RestartReconciliationPermit { record }))
+        let record = store.load_authenticated(authenticator)?.into_record();
+        Ok(record.map(|record| RestartReconciliationPermit { record }))
     }
 }
 
@@ -691,6 +890,10 @@ impl RestartReconciliationPermit {
         self.record.transaction_id.as_str()
     }
 
+    pub(super) fn envelope_binding(&self) -> ReconciliationEnvelopeBinding {
+        binding_for_record(&self.record)
+    }
+
     pub(super) fn resolve_prepared(
         self,
         store: &ReconciliationStore,
@@ -727,6 +930,7 @@ impl RestartReconciliationPermit {
             return Err(ReconciliationError::InvalidTransition);
         }
         let expectation = ReconciliationLookupExpectation {
+            attempt_id: self.record.attempt_id.clone(),
             transaction_id: self.record.transaction_id.clone(),
             sender_address: self.record.sender_address.clone(),
             recipient_address: self.record.recipient_address.clone(),
@@ -735,6 +939,13 @@ impl RestartReconciliationPermit {
             tip_raw_units: self.record.tip_raw_units,
             fee_limit_raw_units: self.record.fee_limit_raw_units,
             signed_body_digest_hex: self.record.signed_body_digest_hex.clone(),
+            envelope_commitment_hex: self.record.envelope_commitment_hex.clone(),
+            parent_head_generation: self.record.parent_head_generation,
+            parent_head_authentication_tag_hex: self
+                .record
+                .parent_head_authentication_tag_hex
+                .clone(),
+            reserved_prepared_generation: self.record.reserved_prepared_generation,
         };
         Ok((self, expectation))
     }
@@ -791,6 +1002,17 @@ impl ReconciliationLookupExpectation {
         &self.signed_body_digest_hex
     }
 
+    pub(super) fn envelope_binding(&self) -> ReconciliationEnvelopeBinding {
+        ReconciliationEnvelopeBinding {
+            attempt_id: self.attempt_id.clone(),
+            transaction_id: self.transaction_id.clone(),
+            commitment_hex: self.envelope_commitment_hex.clone(),
+            parent_generation: self.parent_head_generation,
+            parent_tag_hex: self.parent_head_authentication_tag_hex.clone(),
+            reserved_prepared_generation: self.reserved_prepared_generation,
+        }
+    }
+
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn for_test(
@@ -804,6 +1026,7 @@ impl ReconciliationLookupExpectation {
         signed_body_digest_hex: String,
     ) -> Self {
         Self {
+            attempt_id: "dd".repeat(32),
             transaction_id,
             sender_address,
             recipient_address,
@@ -812,6 +1035,10 @@ impl ReconciliationLookupExpectation {
             tip_raw_units,
             fee_limit_raw_units,
             signed_body_digest_hex,
+            envelope_commitment_hex: "ee".repeat(32),
+            parent_head_generation: 0,
+            parent_head_authentication_tag_hex: "00".repeat(32),
+            reserved_prepared_generation: 1,
         }
     }
 }
@@ -830,7 +1057,7 @@ impl ReconciliationAuthenticator {
 
 impl ReconciliationRecord {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn prepared(
+    pub(super) fn prepared_bound(
         wallet_id: String,
         attempt_id: String,
         transaction_id: String,
@@ -841,6 +1068,8 @@ impl ReconciliationRecord {
         tip_raw_units: u64,
         fee_limit_raw_units: u64,
         signed_body_digest_hex: String,
+        envelope_commitment_hex: String,
+        reservation: &ReconciliationReservation,
         original_core_identity_fingerprint_hex: String,
         created_at_unix_ms: u64,
     ) -> Self {
@@ -858,11 +1087,62 @@ impl ReconciliationRecord {
             tip_raw_units,
             fee_limit_raw_units,
             signed_body_digest_hex,
+            envelope_commitment_hex,
+            parent_head_generation: reservation.parent_generation,
+            parent_head_authentication_tag_hex: hex::encode(reservation.parent_authentication_tag),
+            reserved_prepared_generation: reservation.prepared_generation,
             original_core_identity_fingerprint_hex,
             created_at_unix_ms,
             phase: ReconciliationPhase::Prepared,
             authentication_tag_hex: String::new(),
         }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepared(
+        wallet_id: String,
+        attempt_id: String,
+        transaction_id: String,
+        sender_address: String,
+        recipient_address: String,
+        amount_raw_units: String,
+        nonce: u64,
+        tip_raw_units: u64,
+        fee_limit_raw_units: u64,
+        signed_body_digest_hex: String,
+        original_core_identity_fingerprint_hex: String,
+        created_at_unix_ms: u64,
+    ) -> Self {
+        let reservation = ReconciliationReservation {
+            parent_generation: 0,
+            parent_authentication_tag: [0; AUTHENTICATION_BYTES],
+            prepared_generation: 1,
+        };
+        Self::prepared_bound(
+            wallet_id,
+            attempt_id,
+            transaction_id,
+            sender_address,
+            recipient_address,
+            amount_raw_units,
+            nonce,
+            tip_raw_units,
+            fee_limit_raw_units,
+            signed_body_digest_hex,
+            "ee".repeat(32),
+            &reservation,
+            original_core_identity_fingerprint_hex,
+            created_at_unix_ms,
+        )
+    }
+
+    #[cfg(test)]
+    fn bind_envelope_for_test(&mut self, reservation: &ReconciliationReservation) {
+        self.parent_head_generation = reservation.parent_generation;
+        self.parent_head_authentication_tag_hex =
+            hex::encode(reservation.parent_authentication_tag);
+        self.reserved_prepared_generation = reservation.prepared_generation;
     }
 
     pub(super) fn phase_tag(&self) -> ReconciliationPhaseTag {
@@ -883,6 +1163,7 @@ fn record_to_evidence(
         return Err(ReconciliationError::InvalidTransition);
     }
     Ok(AcceptedSubmissionEvidence {
+        attempt_id: record.attempt_id.clone(),
         wallet_id: record.wallet_id.clone(),
         transaction_id: record.transaction_id.clone(),
         sender_address: record.sender_address.clone(),
@@ -891,8 +1172,23 @@ fn record_to_evidence(
         nonce: record.nonce,
         tip_raw_units: record.tip_raw_units,
         fee_limit_raw_units: record.fee_limit_raw_units,
+        envelope_commitment_hex: record.envelope_commitment_hex.clone(),
+        parent_head_generation: record.parent_head_generation,
+        parent_head_authentication_tag_hex: record.parent_head_authentication_tag_hex.clone(),
+        reserved_prepared_generation: record.reserved_prepared_generation,
         submitted_at_unix_ms: record.created_at_unix_ms,
     })
+}
+
+fn binding_for_record(record: &ReconciliationRecord) -> ReconciliationEnvelopeBinding {
+    ReconciliationEnvelopeBinding {
+        attempt_id: record.attempt_id.clone(),
+        transaction_id: record.transaction_id.clone(),
+        commitment_hex: record.envelope_commitment_hex.clone(),
+        parent_generation: record.parent_head_generation,
+        parent_tag_hex: record.parent_head_authentication_tag_hex.clone(),
+        reserved_prepared_generation: record.reserved_prepared_generation,
+    }
 }
 
 impl ReconciliationPhase {
@@ -944,8 +1240,22 @@ impl AcceptedSubmissionEvidence {
     pub(super) const fn fee_limit_raw_units(&self) -> u64 {
         self.fee_limit_raw_units
     }
+    pub(super) fn envelope_commitment_hex(&self) -> &str {
+        &self.envelope_commitment_hex
+    }
     pub(super) const fn submitted_at_unix_ms(&self) -> u64 {
         self.submitted_at_unix_ms
+    }
+
+    pub(super) fn envelope_binding(&self) -> ReconciliationEnvelopeBinding {
+        ReconciliationEnvelopeBinding {
+            attempt_id: self.attempt_id.clone(),
+            transaction_id: self.transaction_id.clone(),
+            commitment_hex: self.envelope_commitment_hex.clone(),
+            parent_generation: self.parent_head_generation,
+            parent_tag_hex: self.parent_head_authentication_tag_hex.clone(),
+            reserved_prepared_generation: self.reserved_prepared_generation,
+        }
     }
 }
 
@@ -989,6 +1299,10 @@ fn same_attempt(left: &ReconciliationRecord, right: &ReconciliationRecord) -> bo
         && left.tip_raw_units == right.tip_raw_units
         && left.fee_limit_raw_units == right.fee_limit_raw_units
         && left.signed_body_digest_hex == right.signed_body_digest_hex
+        && left.envelope_commitment_hex == right.envelope_commitment_hex
+        && left.parent_head_generation == right.parent_head_generation
+        && left.parent_head_authentication_tag_hex == right.parent_head_authentication_tag_hex
+        && left.reserved_prepared_generation == right.reserved_prepared_generation
         && left.original_core_identity_fingerprint_hex
             == right.original_core_identity_fingerprint_hex
         && left.created_at_unix_ms == right.created_at_unix_ms
@@ -1013,6 +1327,13 @@ fn validate_record(
             .parse::<u128>()
             .is_ok_and(|amount| amount != 0)
         && is_lower_hex(&record.signed_body_digest_hex, 32)
+        && is_lower_hex(&record.envelope_commitment_hex, 32)
+        && is_lower_hex(&record.parent_head_authentication_tag_hex, 32)
+        && record.reserved_prepared_generation
+            == record.parent_head_generation.checked_add(1).unwrap_or(0)
+        && record.store_generation >= record.reserved_prepared_generation
+        && (record.phase.tag() != ReconciliationPhaseTag::Prepared
+            || record.store_generation == record.reserved_prepared_generation)
         && is_lower_hex(&record.original_core_identity_fingerprint_hex, 32)
         && record.store_generation != 0;
     if !valid {
@@ -1148,10 +1469,24 @@ fn verify_head(
     if head.schema != HEAD_SCHEMA
         || head.version != HEAD_VERSION
         || head.wallet_id != authenticator.wallet_id
-        || head.generation == 0
         || !is_tag_or_zero(&head.previous_head_tag_hex)
     {
         return Err(ReconciliationError::AuthenticationFailed);
+    }
+    if let ReconciliationHeadState::Transition {
+        previous_generation,
+        previous_previous_head_tag_hex,
+        previous,
+        next,
+    } = &head.state
+    {
+        if previous_generation.checked_add(1) != Some(head.generation)
+            || !is_tag_or_zero(previous_previous_head_tag_hex)
+            || previous.record_generation != *previous_generation
+            || next.record_generation != head.generation
+        {
+            return Err(ReconciliationError::AuthenticationFailed);
+        }
     }
     let supplied = decode_tag(&head.authentication_tag_hex)?;
     let mut unsigned = head_without_tag(head)?;
@@ -1164,6 +1499,14 @@ fn verify_head(
         &payload,
     );
     if !constant_time_equal(&supplied, &expected) {
+        return Err(ReconciliationError::AuthenticationFailed);
+    }
+    if head.generation == 0
+        && (!matches!(
+            &head.state,
+            ReconciliationHeadState::Committed { position } if *position == empty_position()
+        ) || head.previous_head_tag_hex != "00".repeat(AUTHENTICATION_BYTES))
+    {
         return Err(ReconciliationError::AuthenticationFailed);
     }
     Ok(())
@@ -1515,9 +1858,12 @@ mod tests {
             ReconciliationTransitionCheckpoint::HeadCommitted,
         ] {
             let (vault_path, store, authenticator, record) = fixture();
+            let reservation = store.reserve_prepared(&authenticator).unwrap();
+            let mut record = record;
+            record.bind_envelope_for_test(&reservation);
             let result = store.transition_with_checkpoint(
                 &authenticator,
-                ExpectedTransition::NewAttempt,
+                ExpectedTransition::NewAttempt(reservation),
                 record,
                 |observed| {
                     if observed == checkpoint {

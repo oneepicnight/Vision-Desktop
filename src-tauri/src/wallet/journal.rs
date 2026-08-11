@@ -31,7 +31,7 @@ use std::{
 };
 
 const JOURNAL_SCHEMA: &str = "vision-desktop-wallet-activity";
-const JOURNAL_VERSION: u32 = 2;
+const JOURNAL_VERSION: u32 = 3;
 const JOURNAL_AUTHENTICATION_DOMAIN: &[u8] = b"vision-desktop-wallet-activity-authentication-v1";
 const JOURNAL_KEY_DERIVATION_CONTEXT: &str =
     "com.vision.desktop.wallet-activity-journal-authentication-key.v1";
@@ -51,9 +51,11 @@ const JOURNAL_HEAD_SUFFIX: &str = ".head.json";
 
 static JOURNAL_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub(in crate::wallet) struct WalletActivityRecord {
     pub tx_id: String,
+    pub envelope_commitment_hex: String,
     pub sender_address: String,
     pub recipient_address: String,
     pub amount_raw_units: String,
@@ -65,7 +67,8 @@ pub(in crate::wallet) struct WalletActivityRecord {
     pub observation: WalletReceiptObservation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub(in crate::wallet) struct WalletActivityJournal {
     wallet_id: String,
     records: Vec<WalletActivityRecord>,
@@ -116,6 +119,17 @@ impl WalletActivityJournal {
 
     pub(in crate::wallet) fn records(&self) -> &[WalletActivityRecord] {
         &self.records
+    }
+
+    pub(in crate::wallet) fn contains_transaction_or_commitment(
+        &self,
+        transaction_id: &str,
+        envelope_commitment_hex: &str,
+    ) -> bool {
+        self.records.iter().any(|record| {
+            record.tx_id == transaction_id
+                || record.envelope_commitment_hex == envelope_commitment_hex
+        })
     }
 
     #[cfg(test)]
@@ -257,6 +271,7 @@ enum JournalEventData {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct SubmittedEvent {
+    envelope_commitment_hex: String,
     sender_address: String,
     recipient_address: String,
     amount_raw_units: String,
@@ -340,7 +355,8 @@ pub(in crate::wallet) fn append_accepted_evidence(
         return Err(WalletJournalError::SubmissionMismatch);
     }
     validate_tx_id(evidence.transaction_id())?;
-    if !is_lowercase_hex_32_bytes(evidence.recipient_address())
+    if !is_lowercase_hex_32_bytes(evidence.envelope_commitment_hex())
+        || !is_lowercase_hex_32_bytes(evidence.recipient_address())
         || evidence.recipient_address() == evidence.sender_address()
         || evidence
             .amount_raw_units()
@@ -353,6 +369,7 @@ pub(in crate::wallet) fn append_accepted_evidence(
     let loaded = load_journal_unlocked(path, authenticator)?;
     let mut journal = loaded.journal;
     let submitted = SubmittedEvent {
+        envelope_commitment_hex: evidence.envelope_commitment_hex().to_string(),
         sender_address: evidence.sender_address().to_string(),
         recipient_address: evidence.recipient_address().to_string(),
         amount_raw_units: evidence.amount_raw_units().to_string(),
@@ -366,6 +383,7 @@ pub(in crate::wallet) fn append_accepted_evidence(
         .find(|record| record.tx_id == evidence.transaction_id())
     {
         let exact = existing.sender_address == submitted.sender_address
+            && existing.envelope_commitment_hex == submitted.envelope_commitment_hex
             && existing.recipient_address == submitted.recipient_address
             && existing.amount_raw_units == submitted.amount_raw_units
             && existing.nonce == submitted.nonce
@@ -496,6 +514,7 @@ fn accepted_submission(
     Ok((
         tx_id.clone(),
         SubmittedEvent {
+            envelope_commitment_hex: "ee".repeat(32),
             sender_address: transaction.sender_pubkey.clone(),
             recipient_address: args.to,
             amount_raw_units: args.amount.to_string(),
@@ -860,15 +879,15 @@ fn apply_event(
     match &event.event {
         JournalEventData::Submitted(submitted) => {
             validate_submitted_event(submitted)?;
-            if journal
-                .records
-                .iter()
-                .any(|record| record.tx_id == event.tx_id)
-            {
+            if journal.records.iter().any(|record| {
+                record.tx_id == event.tx_id
+                    || record.envelope_commitment_hex == submitted.envelope_commitment_hex
+            }) {
                 return Err(WalletJournalError::DuplicateTransaction);
             }
             journal.records.push(WalletActivityRecord {
                 tx_id: event.tx_id.clone(),
+                envelope_commitment_hex: submitted.envelope_commitment_hex.clone(),
                 sender_address: submitted.sender_address.clone(),
                 recipient_address: submitted.recipient_address.clone(),
                 amount_raw_units: submitted.amount_raw_units.clone(),
@@ -899,7 +918,8 @@ fn apply_event(
 }
 
 fn validate_submitted_event(event: &SubmittedEvent) -> Result<(), WalletJournalError> {
-    if !is_lowercase_hex_32_bytes(&event.sender_address)
+    if !is_lowercase_hex_32_bytes(&event.envelope_commitment_hex)
+        || !is_lowercase_hex_32_bytes(&event.sender_address)
         || !is_lowercase_hex_32_bytes(&event.recipient_address)
         || event.sender_address == event.recipient_address
     {
@@ -1460,7 +1480,7 @@ mod tests {
         let (transaction, outcome) = accepted_transaction();
         append_accepted_submission(&path, &authenticator(), &transaction, &outcome, 100).unwrap();
         let stored = fs::read_to_string(&path).unwrap();
-        let changed = stored.replacen("\"version\":2", "\"version\":2,\"secret\":\"x\"", 1);
+        let changed = stored.replacen("\"version\":3", "\"version\":3,\"secret\":\"x\"", 1);
         fs::write(&path, changed).unwrap();
         storage_security::protect_file(&path).unwrap();
         assert_eq!(

@@ -19,6 +19,7 @@ use super::{
         WalletCoreClientError, WalletCoreReadClient, WalletCoreReadSource,
         SUPPORTED_WALLET_CORE_CONTRACT,
     },
+    lifecycle::WalletCustodyPathAuthority,
     public_request::WalletTransferPreviewRequest,
     runtime::{
         WalletOperationKind, WalletRuntimeError, WalletRuntimeState, WalletSigningPermit,
@@ -160,6 +161,7 @@ pub(in crate::wallet) enum WalletPreviewError {
     InsufficientBalance,
     ArithmeticRejected,
     RuntimeUnavailable,
+    ActivityUnavailable,
 }
 
 impl WalletPreviewError {
@@ -176,6 +178,7 @@ impl WalletPreviewError {
             Self::InsufficientBalance => "insufficient_balance",
             Self::ArithmeticRejected => "wallet_amount_arithmetic_rejected",
             Self::RuntimeUnavailable => "wallet_runtime_unavailable",
+            Self::ActivityUnavailable => "wallet_activity_unavailable",
         }
     }
 }
@@ -252,13 +255,14 @@ impl<'a> WalletTransactionPreviewEngine<'a> {
         supervisor: &'a SupervisorState,
         owner_window: &str,
         request: WalletTransferPreviewRequest,
+        custody: &WalletCustodyPathAuthority,
     ) -> Result<PreparedTransferPreview, WalletPreviewError> {
         let permit = self
             .runtime
             .begin_operation(owner_window, WalletOperationKind::PreparePreview)
             .map_err(map_runtime_error)?;
         let client = WalletCoreReadClient::from_supervisor(supervisor).map_err(map_core_error)?;
-        prepare_with_source(&permit, request, &client)
+        prepare_with_source_and_custody(&permit, request, &client, custody)
     }
 
     pub(in crate::wallet) fn consume(
@@ -365,6 +369,24 @@ fn prepare_with_source(
     request: WalletTransferPreviewRequest,
     source: &impl WalletCoreReadSource,
 ) -> Result<PreparedTransferPreview, WalletPreviewError> {
+    prepare_with_source_inner(permit, request, source, None)
+}
+
+fn prepare_with_source_and_custody(
+    permit: &super::runtime::WalletOperationPermit<'_>,
+    request: WalletTransferPreviewRequest,
+    source: &impl WalletCoreReadSource,
+    custody: &WalletCustodyPathAuthority,
+) -> Result<PreparedTransferPreview, WalletPreviewError> {
+    prepare_with_source_inner(permit, request, source, Some(custody))
+}
+
+fn prepare_with_source_inner(
+    permit: &super::runtime::WalletOperationPermit<'_>,
+    request: WalletTransferPreviewRequest,
+    source: &impl WalletCoreReadSource,
+    custody: Option<&WalletCustodyPathAuthority>,
+) -> Result<PreparedTransferPreview, WalletPreviewError> {
     let account = permit.current_public_account().map_err(map_runtime_error)?;
     let (recipient, amount) = request.into_parts();
     let amount_raw_units =
@@ -416,6 +438,11 @@ fn prepare_with_source(
             .map_err(map_transaction_error)?;
     let transaction_id =
         canonical_transaction_id(&unsigned_transaction).map_err(map_transaction_error)?;
+    if let Some(custody) = custody {
+        permit
+            .ensure_no_envelope_collision(custody, &transaction_id)
+            .map_err(|_| WalletPreviewError::ActivityUnavailable)?;
+    }
     let amount_display = format_vision_amount(amount_raw_units);
     let charged_fee_display = format_vision_amount(u128::from(charged_fee_raw_units));
     let fee_limit_display = format_vision_amount(u128::from(draft.fee_limit_raw_units()));

@@ -319,7 +319,12 @@ impl WalletTransactionCommandBoundary {
     ) -> Result<Response, TransactionBoundaryError> {
         self.ensure_spending_unblocked(window.owner_label())?;
         let preview = WalletTransactionPreviewEngine::new(&self.runtime)
-            .prepare(&self.supervisor, window.owner_label(), request)
+            .prepare(
+                &self.supervisor,
+                window.owner_label(),
+                request,
+                self.adapters.custody_path_authority(),
+            )
             .map_err(TransactionBoundaryError::Preview)?;
         serialize_response(&project_preview(&preview))
     }
@@ -1058,6 +1063,7 @@ mod tests {
         let records = (0_u64..105)
             .map(|nonce| WalletActivityRecord {
                 tx_id: format!("{nonce:064x}"),
+                envelope_commitment_hex: "ee".repeat(32),
                 sender_address: "11".repeat(32),
                 recipient_address: "22".repeat(32),
                 amount_raw_units: "1".to_string(),
@@ -1139,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_recording_pending_completes_once_without_core_access() {
+    fn accepted_recording_pending_without_its_authenticated_envelope_stays_pending() {
         let directory = tempfile::tempdir().unwrap();
         let (_runtime, boundary, authority, seed, sender) = unlocked_boundary(directory.path());
         let custody = boundary.adapters.custody_path_authority();
@@ -1156,9 +1162,15 @@ mod tests {
             let value = response_value(expect_response(
                 boundary.execute_envelope(WalletTransactionEnvelope::ListActivity, &authority),
             ));
-            assert!(value["pending_reconciliation"].is_null());
-            assert_eq!(value["records"].as_array().unwrap().len(), 1);
-            assert_eq!(value["records"][0]["transaction_id"], "22".repeat(32));
+            assert_eq!(
+                value["pending_reconciliation"]["state"],
+                "accepted_recording_pending"
+            );
+            assert_eq!(
+                value["pending_reconciliation"]["transaction_id"],
+                "22".repeat(32)
+            );
+            assert!(value["records"].as_array().unwrap().is_empty());
         }
 
         assert!(matches!(

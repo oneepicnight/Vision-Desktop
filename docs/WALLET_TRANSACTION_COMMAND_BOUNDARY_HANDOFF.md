@@ -89,7 +89,8 @@ identifier-only Core lookup or infer acceptance from nonce movement.
 
 This is an intentional activation blocker, not a successful refresh implementation. Atomic wallet
 activation remains prohibited until a separately reviewed storage extension retains or reconstructs
-an authenticated exact-envelope expectation.
+an authenticated exact-envelope expectation. The proposed extension is now specified, but not
+implemented or approved, in `WALLET_AUTHENTICATED_ENVELOPE_STORAGE_DESIGN.md`.
 
 ## Adversarial evidence
 

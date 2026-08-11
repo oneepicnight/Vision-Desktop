@@ -237,7 +237,11 @@ through the single attempt. The digest is calculated over those exact bytes usin
 BLAKE3 construction. The body is never reconstructed between durable recording and transport.
 
 The body and signature never enter the journal, reconciliation record, logs, errors, support
-packages, crash text, command line, reducer, WebView, or developer tools.
+packages, crash text, command line, reducer, WebView, or developer tools. A separately encrypted,
+authenticated Rust-only exact-envelope store is the only proposed retention exception. Its design,
+ordering, and authority limits are specified in
+`WALLET_AUTHENTICATED_ENVELOPE_STORAGE_DESIGN.md`; it remains unimplemented and unapproved by this
+document.
 
 ## Durable pre-write reconciliation record
 

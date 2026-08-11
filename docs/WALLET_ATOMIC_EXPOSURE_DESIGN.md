@@ -207,7 +207,9 @@ cannot be proven from authenticated local state, the command fails closed; trans
 nonce movement, or a Core `NotFound` result is insufficient. The private transaction-boundary
 tranche must prove that the current storage schema supports this invariant. If it does not, this
 command and therefore atomic activation remain blocked pending a separately reviewed storage
-extension.
+extension. `WALLET_AUTHENTICATED_ENVELOPE_STORAGE_DESIGN.md` defines the proposed encrypted,
+authenticated storage and private read-only refresh extension. That document is design-only and
+does not remove this activation blocker.
 
 ## Fixed transaction errors
 

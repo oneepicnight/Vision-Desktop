@@ -162,6 +162,13 @@ pub(in crate::wallet) struct WalletReconciliationPermit<'a> {
     armed: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::wallet) enum WalletReconciliationResult {
+    Unresolved,
+    ResolvedRecorded,
+    AcceptedRecordingPending,
+}
+
 pub(in crate::wallet) struct WalletActivationProof {
     scope: WalletActivationScope,
 }
@@ -1684,7 +1691,7 @@ impl WalletReconciliationPermit<'_> {
         custody: &WalletCustodyPathAuthority,
         restart: RestartReconciliationPermit,
         source: &impl WalletCoreSubmissionSource,
-    ) -> Result<bool, WalletRuntimeError> {
+    ) -> Result<WalletReconciliationResult, WalletRuntimeError> {
         self.run_fail_closed(|| self.reconcile_ambiguous_acceptance_inner(custody, restart, source))
     }
 
@@ -1693,7 +1700,7 @@ impl WalletReconciliationPermit<'_> {
         custody: &WalletCustodyPathAuthority,
         restart: RestartReconciliationPermit,
         source: &impl WalletCoreSubmissionSource,
-    ) -> Result<bool, WalletRuntimeError> {
+    ) -> Result<WalletReconciliationResult, WalletRuntimeError> {
         self.ensure_current()?;
         let store = ReconciliationStore::for_custody(custody)
             .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
@@ -1711,38 +1718,66 @@ impl WalletReconciliationPermit<'_> {
         let second_fingerprint = source
             .validated_identity_fingerprint()
             .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
-        self.ensure_current()?;
         if second_fingerprint != fingerprint {
             return Err(WalletRuntimeError::ReconciliationUnavailable);
         }
         let Some(proof) = proof else {
-            return Ok(false);
+            self.ensure_current()?;
+            return Ok(WalletReconciliationResult::Unresolved);
         };
-        let mut inner = self.permit.state.lock_inner()?;
+        if self.ensure_current().is_err() {
+            return Ok(WalletReconciliationResult::AcceptedRecordingPending);
+        }
+        let mut inner = match self.permit.state.lock_inner() {
+            Ok(inner) => inner,
+            Err(_) => return Ok(WalletReconciliationResult::AcceptedRecordingPending),
+        };
         let result = inner.session.with_seed(|wallet_id, seed| {
             if wallet_id != self.wallet_id {
                 return Err(ReconciliationError::AuthenticationFailed);
             }
             let reconciliation_authenticator = ReconciliationAuthenticator::new(wallet_id, seed)?;
-            let accepted = restart.publish_reconciled_acceptance(
+            let accepted = match restart.publish_reconciled_acceptance(
                 &store,
                 &reconciliation_authenticator,
                 proof,
                 compatibility_contract_digest(&SubmissionRejectionPolicy::production()),
-            )?;
-            let evidence = accepted.evidence()?;
-            let journal_authenticator = WalletJournalAuthenticator::new(wallet_id, seed)
-                .map_err(|_| ReconciliationError::StorageUnavailable)?;
-            append_accepted_evidence(custody.journal_path(), &journal_authenticator, &evidence)
-                .map_err(|_| ReconciliationError::StorageUnavailable)?;
-            accepted.resolve_recorded(&store, &reconciliation_authenticator)
+            ) {
+                Ok(accepted) => accepted,
+                Err(_) => return Ok(WalletReconciliationResult::AcceptedRecordingPending),
+            };
+            let evidence = match accepted.evidence() {
+                Ok(evidence) => evidence,
+                Err(_) => return Ok(WalletReconciliationResult::AcceptedRecordingPending),
+            };
+            let journal_authenticator = match WalletJournalAuthenticator::new(wallet_id, seed) {
+                Ok(authenticator) => authenticator,
+                Err(_) => return Ok(WalletReconciliationResult::AcceptedRecordingPending),
+            };
+            if append_accepted_evidence(custody.journal_path(), &journal_authenticator, &evidence)
+                .is_err()
+            {
+                return Ok(WalletReconciliationResult::AcceptedRecordingPending);
+            }
+            if accepted
+                .resolve_recorded(&store, &reconciliation_authenticator)
+                .is_err()
+            {
+                return Ok(WalletReconciliationResult::AcceptedRecordingPending);
+            }
+            Ok(WalletReconciliationResult::ResolvedRecorded)
         });
-        if !matches!(result, Ok(Ok(()))) {
-            return Err(WalletRuntimeError::ReconciliationUnavailable);
-        }
+        let result = match result {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) | Err(_) => WalletReconciliationResult::AcceptedRecordingPending,
+        };
         drop(inner);
-        self.ensure_current()?;
-        Ok(true)
+        if self.ensure_current().is_err()
+            && matches!(result, WalletReconciliationResult::Unresolved)
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(result)
     }
 
     fn run_fail_closed<T>(

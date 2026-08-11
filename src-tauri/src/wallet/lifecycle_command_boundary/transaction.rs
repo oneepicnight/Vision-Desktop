@@ -4,7 +4,7 @@
 //! permission, capability, frontend caller, or production activation shortcut.
 
 use super::{
-    deserialize_request, fixed_invoke_error, BoundaryFailClosedGuard, MainWalletWindowAuthority,
+    fixed_invoke_error, BoundaryFailClosedGuard, MainWalletWindowAuthority,
     WalletExposureAuthority, WalletInvokeRequest, WholeEnvelopeTransportPolicy,
 };
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
             WalletReceiptPresentation,
         },
         reconciliation::ReconciliationPhaseTag,
-        runtime::{WalletRuntimeError, WalletRuntimeState},
+        runtime::{WalletReconciliationResult, WalletRuntimeError, WalletRuntimeState},
         signing::PrivateSubmissionResult,
         transaction_confirmation::{
             NativeTransactionConfirmationCeremony, WalletConfirmationError,
@@ -28,11 +28,11 @@ use crate::{
         },
     },
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value};
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard, TryLockError},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{
@@ -70,14 +70,10 @@ enum WalletTransactionEnvelope {
     Refresh(TransactionIdRequest),
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PreviewHandleRequest {
     preview_handle: String,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct TransactionIdRequest {
     transaction_id: String,
 }
@@ -186,6 +182,11 @@ struct ActivityDiscovery {
     pending: Option<PendingReconciliationResponse>,
 }
 
+struct TransactionExecution {
+    response: Response,
+    durable_submission_outcome: bool,
+}
+
 impl WalletTransactionCommandBoundary {
     pub(in crate::wallet) fn new_private(
         runtime: Arc<WalletRuntimeState>,
@@ -239,19 +240,19 @@ impl WalletTransactionCommandBoundary {
                     &self.runtime,
                 )
                 .map_err(map_shared_error)?;
-                let _linear = self.operation_gate.lock().map_err(|_| {
-                    TransactionBoundaryError::Runtime(WalletRuntimeError::RuntimeUnavailable)
-                })?;
+                let _linear = self.acquire_operation_gate()?;
                 exposure.validate(&self.runtime).map_err(map_shared_error)?;
                 window
                     .validate(self.expected_main_hwnd, &self.runtime)
                     .map_err(map_shared_error)?;
-                let response = self.execute_envelope(envelope, &window)?;
-                window
-                    .validate(self.expected_main_hwnd, &self.runtime)
-                    .map_err(map_shared_error)?;
-                exposure.validate(&self.runtime).map_err(map_shared_error)?;
-                Ok(response)
+                let execution = self.execute_envelope(envelope, &window)?;
+                if !execution.durable_submission_outcome {
+                    window
+                        .validate(self.expected_main_hwnd, &self.runtime)
+                        .map_err(map_shared_error)?;
+                    exposure.validate(&self.runtime).map_err(map_shared_error)?;
+                }
+                Ok(execution.response)
             })();
             result.map_err(|error: TransactionBoundaryError| fixed_invoke_error(error.code()))
         }));
@@ -272,25 +273,42 @@ impl WalletTransactionCommandBoundary {
         }
     }
 
+    fn acquire_operation_gate(&self) -> Result<MutexGuard<'_, ()>, TransactionBoundaryError> {
+        match self.operation_gate.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(TryLockError::WouldBlock) => Err(TransactionBoundaryError::Runtime(
+                WalletRuntimeError::OperationInProgress,
+            )),
+            Err(TryLockError::Poisoned(_)) => Err(TransactionBoundaryError::Runtime(
+                WalletRuntimeError::RuntimeUnavailable,
+            )),
+        }
+    }
+
     fn execute_envelope(
         &self,
         envelope: WalletTransactionEnvelope,
         window: &MainWalletWindowAuthority,
-    ) -> Result<Response, TransactionBoundaryError> {
+    ) -> Result<TransactionExecution, TransactionBoundaryError> {
         match envelope {
-            WalletTransactionEnvelope::Prepare(request) => {
-                self.prepare_transfer_preview(window, request)
+            WalletTransactionEnvelope::Prepare(request) => self
+                .prepare_transfer_preview(window, request)
+                .map(ordinary_execution),
+            WalletTransactionEnvelope::Cancel(request) => self
+                .cancel_transfer_preview(window, request)
+                .map(ordinary_execution),
+            WalletTransactionEnvelope::ConfirmAndSubmit(request) => self
+                .confirm_and_submit_transfer(window, request)
+                .map(|response| TransactionExecution {
+                    response,
+                    durable_submission_outcome: true,
+                }),
+            WalletTransactionEnvelope::ListActivity => {
+                self.list_activity(window).map(ordinary_execution)
             }
-            WalletTransactionEnvelope::Cancel(request) => {
-                self.cancel_transfer_preview(window, request)
-            }
-            WalletTransactionEnvelope::ConfirmAndSubmit(request) => {
-                self.confirm_and_submit_transfer(window, request)
-            }
-            WalletTransactionEnvelope::ListActivity => self.list_activity(window),
-            WalletTransactionEnvelope::Refresh(request) => {
-                self.refresh_transaction_observation(window, request)
-            }
+            WalletTransactionEnvelope::Refresh(request) => self
+                .refresh_transaction_observation(window, request)
+                .map(ordinary_execution),
         }
     }
 
@@ -400,17 +418,26 @@ impl WalletTransactionCommandBoundary {
                     .resolve_prepared(custody, restart)
                     .map_err(|_| TransactionBoundaryError::ActivityUnavailable)?,
                 ReconciliationPhaseTag::MayHaveBeenSubmitted => {
-                    let reconciled = WalletCoreReadClient::from_supervisor(&self.supervisor)
-                        .ok()
+                    let result = WalletCoreReadClient::from_supervisor(&self.supervisor)
+                        .map_err(|_| TransactionBoundaryError::ActivityUnavailable)
                         .and_then(|source| {
                             permit
                                 .reconcile_ambiguous_acceptance(custody, restart, &source)
-                                .ok()
-                        })
-                        .unwrap_or(false);
-                    if !reconciled {
-                        pending =
-                            Some(PendingReconciliationResponse::OutcomeUnknown { transaction_id });
+                                .map_err(|_| TransactionBoundaryError::ActivityUnavailable)
+                        });
+                    match result {
+                        Ok(WalletReconciliationResult::ResolvedRecorded) => {}
+                        Ok(WalletReconciliationResult::AcceptedRecordingPending) => {
+                            pending =
+                                Some(PendingReconciliationResponse::AcceptedRecordingPending {
+                                    transaction_id,
+                                });
+                        }
+                        Ok(WalletReconciliationResult::Unresolved) | Err(_) => {
+                            pending = Some(PendingReconciliationResponse::OutcomeUnknown {
+                                transaction_id,
+                            });
+                        }
                     }
                 }
                 ReconciliationPhaseTag::AcceptedRecordingPending => {
@@ -439,6 +466,13 @@ impl WalletTransactionCommandBoundary {
     }
 }
 
+fn ordinary_execution(response: Response) -> TransactionExecution {
+    TransactionExecution {
+        response,
+        durable_submission_outcome: false,
+    }
+}
+
 fn parse_transaction_envelope(
     request: WalletInvokeRequest<'_>,
 ) -> Result<WalletTransactionEnvelope, TransactionBoundaryError> {
@@ -449,21 +483,26 @@ fn parse_transaction_envelope(
         return Err(TransactionBoundaryError::InvalidRequest);
     }
     match request.declared_command {
-        PREPARE_TRANSFER_PREVIEW => deserialize_request(object)
-            .map(WalletTransactionEnvelope::Prepare)
-            .map_err(map_shared_error),
+        PREPARE_TRANSFER_PREVIEW => {
+            parse_preview_request(object).map(WalletTransactionEnvelope::Prepare)
+        }
         CANCEL_TRANSFER_PREVIEW => parse_handle(object).map(WalletTransactionEnvelope::Cancel),
         CONFIRM_AND_SUBMIT_TRANSFER => {
             parse_handle(object).map(WalletTransactionEnvelope::ConfirmAndSubmit)
         }
         LIST_ACTIVITY if object.is_empty() => Ok(WalletTransactionEnvelope::ListActivity),
         REFRESH_TRANSACTION_OBSERVATION => {
-            let request: TransactionIdRequest =
-                deserialize_request(object).map_err(map_shared_error)?;
-            if !is_lower_hex_32(request.transaction_id.as_str()) {
+            let request = exact_request_object(object, &["transaction_id"])?;
+            let transaction_id = request
+                .get("transaction_id")
+                .and_then(Value::as_str)
+                .ok_or(TransactionBoundaryError::InvalidRequest)?;
+            if !is_lower_hex_32(transaction_id) {
                 return Err(TransactionBoundaryError::InvalidRequest);
             }
-            Ok(WalletTransactionEnvelope::Refresh(request))
+            Ok(WalletTransactionEnvelope::Refresh(TransactionIdRequest {
+                transaction_id: transaction_id.to_owned(),
+            }))
         }
         _ => Err(TransactionBoundaryError::InvalidRequest),
     }
@@ -472,10 +511,53 @@ fn parse_transaction_envelope(
 fn parse_handle(
     object: &Map<String, Value>,
 ) -> Result<PreviewHandleRequest, TransactionBoundaryError> {
-    let request: PreviewHandleRequest = deserialize_request(object).map_err(map_shared_error)?;
-    if request.preview_handle.is_empty()
-        || request.preview_handle.len() > MAX_PREVIEW_HANDLE_BYTES
-        || !request.preview_handle.is_ascii()
+    let request = exact_request_object(object, &["preview_handle"])?;
+    let preview_handle = request
+        .get("preview_handle")
+        .and_then(Value::as_str)
+        .ok_or(TransactionBoundaryError::InvalidRequest)?;
+    if preview_handle.is_empty()
+        || preview_handle.len() > MAX_PREVIEW_HANDLE_BYTES
+        || !preview_handle.is_ascii()
+    {
+        return Err(TransactionBoundaryError::InvalidRequest);
+    }
+    Ok(PreviewHandleRequest {
+        preview_handle: preview_handle.to_owned(),
+    })
+}
+
+fn parse_preview_request(
+    object: &Map<String, Value>,
+) -> Result<WalletTransferPreviewRequest, TransactionBoundaryError> {
+    let request = exact_request_object(object, &["recipient", "amount"])?;
+    let recipient = request
+        .get("recipient")
+        .and_then(Value::as_str)
+        .ok_or(TransactionBoundaryError::InvalidRequest)?;
+    let amount = request
+        .get("amount")
+        .and_then(Value::as_str)
+        .ok_or(TransactionBoundaryError::InvalidRequest)?;
+    WalletTransferPreviewRequest::from_borrowed(recipient, amount)
+        .map_err(|_| TransactionBoundaryError::InvalidRequest)
+}
+
+fn exact_request_object<'a>(
+    object: &'a Map<String, Value>,
+    expected_fields: &[&str],
+) -> Result<&'a Map<String, Value>, TransactionBoundaryError> {
+    if object.len() != 1 {
+        return Err(TransactionBoundaryError::InvalidRequest);
+    }
+    let request = object
+        .get("request")
+        .and_then(Value::as_object)
+        .ok_or(TransactionBoundaryError::InvalidRequest)?;
+    if request.len() != expected_fields.len()
+        || expected_fields
+            .iter()
+            .any(|field| !request.contains_key(*field))
     {
         return Err(TransactionBoundaryError::InvalidRequest);
     }
@@ -655,6 +737,7 @@ mod tests {
         vault::EncryptedWalletVault,
     };
     use std::path::Path;
+    use std::{sync::mpsc, thread, time::Duration};
     use tauri::ipc::IpcResponse;
 
     const TEST_HWND: isize = 0x1234;
@@ -737,9 +820,9 @@ mod tests {
         response.body().unwrap().deserialize().unwrap()
     }
 
-    fn expect_response(result: Result<Response, TransactionBoundaryError>) -> Response {
+    fn expect_response(result: Result<TransactionExecution, TransactionBoundaryError>) -> Response {
         match result {
-            Ok(response) => response,
+            Ok(execution) => execution.response,
             Err(_) => panic!("transaction boundary unexpectedly failed"),
         }
     }
@@ -818,6 +901,94 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn oversized_and_nested_values_are_rejected_before_owned_request_construction() {
+        let oversized = "a".repeat(1024 * 1024);
+        let cases = [
+            (
+                PREPARE_TRANSFER_PREVIEW,
+                json(serde_json::json!({
+                    "request": {"recipient": oversized, "amount": "1"}
+                })),
+            ),
+            (
+                PREPARE_TRANSFER_PREVIEW,
+                json(serde_json::json!({
+                    "request": {"recipient": "11".repeat(32), "amount": oversized}
+                })),
+            ),
+            (
+                CANCEL_TRANSFER_PREVIEW,
+                json(serde_json::json!({"request":{"preview_handle":oversized}})),
+            ),
+            (
+                REFRESH_TRANSACTION_OBSERVATION,
+                json(serde_json::json!({"request":{"transaction_id":oversized}})),
+            ),
+            (
+                CANCEL_TRANSFER_PREVIEW,
+                json(serde_json::json!({
+                    "request":{"preview_handle":{"nested":oversized}}
+                })),
+            ),
+        ];
+        for (command, body) in &cases {
+            assert!(matches!(
+                parse_transaction_envelope(request(command, body)),
+                Err(TransactionBoundaryError::InvalidRequest)
+            ));
+        }
+
+        let source = include_str!("transaction.rs");
+        let parser = source
+            .split("fn project_preview")
+            .next()
+            .expect("parser source");
+        assert!(!parser.contains("deserialize_request"));
+        assert!(!parser.contains("value.clone()"));
+    }
+
+    #[test]
+    fn concurrent_and_reordered_operations_fail_without_queuing() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_, boundary, _, _, _) = unlocked_boundary(directory.path());
+        let boundary = Arc::new(boundary);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first = Arc::clone(&boundary);
+        let owner = thread::spawn(move || {
+            let Ok(_guard) = first.acquire_operation_gate() else {
+                panic!("first operation did not acquire the gate");
+            };
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let contender = Arc::clone(&boundary);
+        let rejected = thread::spawn(move || {
+            let result = contender.acquire_operation_gate();
+            result_tx
+                .send(matches!(
+                    result,
+                    Err(TransactionBoundaryError::Runtime(
+                        WalletRuntimeError::OperationInProgress
+                    ))
+                ))
+                .unwrap();
+        });
+        assert!(result_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        contender_join(rejected);
+        release_tx.send(()).unwrap();
+        contender_join(owner);
+        assert!(boundary.acquire_operation_gate().is_ok());
+    }
+
+    fn contender_join(handle: thread::JoinHandle<()>) {
+        assert!(handle.join().is_ok());
     }
 
     #[test]

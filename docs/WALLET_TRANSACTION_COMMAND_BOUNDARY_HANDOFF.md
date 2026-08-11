@@ -26,15 +26,18 @@ signing, submission, or transaction authority to Tauri or React.
 
 They reuse the reviewed complete `WalletInvokeRequest`, `WalletExposureAuthority`,
 `MainWalletWindowAuthority`, duplicate-key policy, fail-closed guard, and fixed-response machinery.
-There is no second exposure authority or state store. One private linear mutex prevents concurrent
-transaction-boundary operations and closes the check-to-operation race around durable
-reconciliation discovery.
+There is no second exposure authority or state store. One private linear mutex uses non-blocking
+acquisition: a concurrent request receives `wallet_operation_in_progress` immediately and cannot
+queue behind native confirmation, Core I/O, or reconciliation work. This also closes the
+check-to-operation race around durable reconciliation discovery.
 
 Every envelope requires the exact command name and exact top-level object. Raw bodies, non-objects,
 unknown or mismatched commands, extra or wrong-case fields, secret-like fields, non-ASCII or
 oversized handles, and noncanonical transaction identifiers fail closed. Protocol-sized integers
 are projected as canonical decimal strings. Preview responses omit the unsigned transaction,
 canonical argument bytes, Core fingerprint, process identity, signature, and signed body.
+Transaction request objects are inspected by reference for exact shape, type, and length before
+the boundary allocates any owned field; the shared deep-clone deserializer is not used.
 
 ## Native confirmation, signing, and one-attempt submission
 
@@ -49,6 +52,10 @@ states: accepted, accepted-recording-pending, outcome-unknown, and reviewed defi
 An authority failure before the write is no longer misclassified as ambiguity. Once exact Core
 acceptance is proven, journal or reconciliation completion failure returns
 `accepted_recording_pending`; it never degrades known acceptance into `outcome_unknown`.
+Submission propagation is phase-aware across ordinary errors, authority revocation, and caught
+panics: pre-write failures remain fixed errors, every post-`MayHaveBeenSubmitted` unproven result is
+`outcome_unknown`, and proven acceptance remains `accepted_recording_pending` or `accepted`.
+Durable public outcomes are not replaced by a later boundary-authority validation error.
 
 ## Durable discovery and spending interlock
 
@@ -62,6 +69,8 @@ the canonical reconciliation store and activity journal. It:
   available;
 - completes `AcceptedRecordingPending` through journal-only authority without Core access;
 - preserves `accepted_recording_pending` when journal recording remains unavailable;
+- returns a typed reconciliation result so exact accepted lookup followed by journal failure cannot
+  be flattened into ambiguity;
 - returns at most 100 authenticated records, newest first, with `history_complete: false`; and
 - blocks both preview creation and confirm-and-submit while any authenticated nonterminal record
   remains.
@@ -100,14 +109,19 @@ The new focused tests cover:
 - journal failure preserving known acceptance rather than ambiguity; and
 - fail-closed refresh when exact signed-envelope storage is unavailable.
 
-The existing submission matrix was extended to prove that proven Core acceptance plus journal
-failure produces durable `accepted_recording_pending` and exactly one network write.
+The boundary suite additionally proves that one-megabyte strings and nested non-string values are
+rejected before owned request construction, and that concurrent/reordered operations fail
+immediately without later queued execution. The submission matrix proves that post-write panic and
+lifecycle revocation preserve `outcome_unknown`, while already recorded acceptance remains
+`accepted`. It also covers both live accepted-response journal failure and the required
+`MayHaveBeenSubmitted` to exact accepted lookup to journal failure path; both produce durable
+`accepted_recording_pending`, and neither performs a second network write.
 
 ## Validation
 
 - Rust formatting: passed.
 - Strict Clippy, all targets, warnings denied: passed.
-- Rust tests: 305 passed, 0 failed, 4 operator-only ignored.
+- Rust tests: 308 passed, 0 failed, 4 operator-only ignored.
 - Tauri authority tests: 7 passed.
 - WebView isolation tests: 2 passed.
 - Frontend typecheck: passed.

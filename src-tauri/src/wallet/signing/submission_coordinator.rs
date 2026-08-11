@@ -11,6 +11,8 @@ use crate::wallet::{
     transaction::canonical_transaction_id,
 };
 use serde::Deserialize;
+use std::cell::Cell;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use zeroize::Zeroizing;
 
 const MAX_SIGNED_BODY_BYTES: usize = 64 * 1024;
@@ -38,13 +40,73 @@ struct CashTransferArgs {
     amount: u128,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DurableSubmissionPhase {
+    PreWrite,
+    MayHaveBeenSubmitted,
+    AcceptedRecordingPending,
+    Accepted,
+    Rejected,
+}
+
 pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
+    permit: WalletSubmissionPermit<'_>,
+    artifact: SignedTransferArtifact,
+    source: &S,
+    custody: &WalletCustodyPathAuthority,
+    created_at_unix_ms: u64,
+    rejection_policy: &SubmissionRejectionPolicy,
+) -> Result<PrivateSubmissionResult, PrivateSubmissionError> {
+    let phase = Cell::new(DurableSubmissionPhase::PreWrite);
+    let transaction_id = artifact.transaction_id.clone();
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        submit_signed_artifact_inner(
+            permit,
+            artifact,
+            source,
+            custody,
+            created_at_unix_ms,
+            rejection_policy,
+            &phase,
+        )
+    }));
+    match attempt {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(error)) => durable_result(phase.get(), transaction_id).ok_or(error),
+        Err(_) => durable_result(phase.get(), transaction_id)
+            .ok_or(PrivateSubmissionError::RuntimeRevoked),
+    }
+}
+
+fn durable_result(
+    phase: DurableSubmissionPhase,
+    transaction_id: String,
+) -> Option<PrivateSubmissionResult> {
+    match phase {
+        DurableSubmissionPhase::PreWrite => None,
+        DurableSubmissionPhase::MayHaveBeenSubmitted => {
+            Some(PrivateSubmissionResult::OutcomeUnknown { transaction_id })
+        }
+        DurableSubmissionPhase::AcceptedRecordingPending => {
+            Some(PrivateSubmissionResult::AcceptedRecordingPending { transaction_id })
+        }
+        DurableSubmissionPhase::Accepted => {
+            Some(PrivateSubmissionResult::Accepted { transaction_id })
+        }
+        DurableSubmissionPhase::Rejected => {
+            Some(PrivateSubmissionResult::Rejected { transaction_id })
+        }
+    }
+}
+
+fn submit_signed_artifact_inner<S: WalletCoreSubmissionSource>(
     mut permit: WalletSubmissionPermit<'_>,
     artifact: SignedTransferArtifact,
     source: &S,
     custody: &WalletCustodyPathAuthority,
     created_at_unix_ms: u64,
     rejection_policy: &SubmissionRejectionPolicy,
+    phase: &Cell<DurableSubmissionPhase>,
 ) -> Result<PrivateSubmissionResult, PrivateSubmissionError> {
     validate_authority(&permit, &artifact, source)?;
     let exact_body = exact_signed_body(&permit, &artifact)?;
@@ -92,6 +154,7 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
     let may_have = permit
         .publish_may_have_been_submitted(prepared, &store)
         .map_err(map_runtime_error)?;
+    phase.set(DurableSubmissionPhase::MayHaveBeenSubmitted);
     let write_ready = may_have.combine(write);
     let (may_have, write_once) = write_ready.into_parts();
 
@@ -145,6 +208,7 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
             transaction_id,
             nonce,
         } => {
+            phase.set(DurableSubmissionPhase::AcceptedRecordingPending);
             let accepted = permit
                 .publish_accepted(
                     may_have,
@@ -178,6 +242,7 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
                     })
                     .map_err(map_runtime_error);
             }
+            phase.set(DurableSubmissionPhase::Accepted);
             validate_authority(&permit, &artifact, source)?;
             permit
                 .complete(PrivateSubmissionResult::Accepted {
@@ -190,6 +255,7 @@ pub(super) fn submit_signed_artifact<S: WalletCoreSubmissionSource>(
             code,
             allowlist_digest_hex,
         } => {
+            phase.set(DurableSubmissionPhase::Rejected);
             permit
                 .resolve_rejected(
                     may_have,
@@ -337,7 +403,10 @@ mod tests {
             publish_accepted_for_test, publish_prepared_for_test, CoreWriteOnce,
             ReconciliationAuthenticator, ReconciliationRecord, ReconciliationStore,
         },
-        runtime::{WalletOperationKind, WalletOperationPermit, WalletRuntimeState},
+        runtime::{
+            WalletOperationKind, WalletOperationPermit, WalletReconciliationResult,
+            WalletRuntimeState,
+        },
         secrets::{WalletPassword, WalletSeed},
         submission::SubmissionRejectionPolicy,
         transaction::VisionTransaction,
@@ -715,9 +784,12 @@ mod tests {
                     revoke_on_identity_call: None,
                     lookup_body,
                 };
-                assert!(reconciliation
-                    .reconcile_ambiguous_acceptance(&custody, restart, &source)
-                    .unwrap());
+                assert!(matches!(
+                    reconciliation
+                        .reconcile_ambiguous_acceptance(&custody, restart, &source)
+                        .unwrap(),
+                    WalletReconciliationResult::ResolvedRecorded
+                ));
                 reconciliation.complete(()).unwrap();
                 assert!(journal_path.exists());
                 assert_eq!(
@@ -726,6 +798,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn reconciled_exact_acceptance_with_journal_failure_stays_accepted_recording_pending() {
+        let (runtime, sender) = unlocked_runtime();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let lookup_body = Arc::new(Mutex::new(None));
+        let pending = pending(
+            &runtime,
+            &sender,
+            &"b".repeat(64),
+            writes.clone(),
+            lookup_body.clone(),
+            ResponseMode::AcceptedResponseLost,
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let custody = custody(&directory);
+        let result = super::super::sign_and_submit_after_native_approval(
+            pending,
+            NativeConfirmationApproval::issue_for_test(),
+            &custody,
+            1_700_000_000_123,
+            &SubmissionRejectionPolicy::production(),
+        )
+        .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
+        assert!(matches!(
+            result,
+            PrivateSubmissionResult::OutcomeUnknown { .. }
+        ));
+        assert_eq!(
+            fs_read_record(&directory)["phase"]["kind"],
+            "may_have_been_submitted"
+        );
+        std::fs::create_dir(custody.journal_path()).unwrap();
+
+        let reconciliation = runtime.begin_reconciliation_discovery(MAIN).unwrap();
+        let restart = reconciliation.discover(&custody).unwrap().unwrap();
+        let source = FakeSubmissionCore {
+            address: sender,
+            writes: writes.clone(),
+            mode: ResponseMode::AcceptedResponseLost,
+            fingerprint: [0x43; 32],
+            identity_calls: Arc::new(AtomicUsize::new(0)),
+            revoke_on_identity_call: None,
+            lookup_body,
+        };
+        assert!(matches!(
+            reconciliation
+                .reconcile_ambiguous_acceptance(&custody, restart, &source)
+                .unwrap(),
+            WalletReconciliationResult::AcceptedRecordingPending
+        ));
+        reconciliation.complete(()).unwrap();
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fs_read_record(&directory)["phase"]["kind"],
+            "accepted_recording_pending"
+        );
     }
 
     #[test]
@@ -888,9 +1018,12 @@ mod tests {
             revoke_on_identity_call: None,
             lookup_body,
         };
-        assert!(!reconciliation
-            .reconcile_ambiguous_acceptance(&custody, restart, &source)
-            .unwrap());
+        assert!(matches!(
+            reconciliation
+                .reconcile_ambiguous_acceptance(&custody, restart, &source)
+                .unwrap(),
+            WalletReconciliationResult::Unresolved
+        ));
         reconciliation.complete(()).unwrap();
         assert_eq!(writes.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -937,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn panic_after_durable_ambiguity_is_contained_and_revokes_the_wallet_session() {
+    fn panic_after_durable_ambiguity_returns_outcome_unknown_and_revokes_the_wallet_session() {
         let (runtime, sender) = unlocked_runtime();
         let writes = Arc::new(AtomicUsize::new(0));
         let pending = pending(
@@ -959,7 +1092,7 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(crate::wallet::signing::WalletPrivateSigningError::RuntimeRevoked)
+            Ok(PrivateSubmissionResult::OutcomeUnknown { .. })
         ));
         assert_eq!(writes.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -1010,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_revocation_at_each_submission_transition_suppresses_result_and_preserves_phase() {
+    fn lifecycle_revocation_reports_the_authenticated_durable_phase() {
         for (identity_call, expected_writes, expected_phase) in [
             (9, 0, "prepared"),
             (10, 0, "may_have_been_submitted"),
@@ -1037,10 +1170,21 @@ mod tests {
                 1_700_000_000_123,
                 &SubmissionRejectionPolicy::production(),
             );
-            assert!(matches!(
-                result,
-                Err(crate::wallet::signing::WalletPrivateSigningError::RuntimeRevoked)
-            ));
+            match expected_phase {
+                "prepared" => assert!(matches!(
+                    result,
+                    Err(crate::wallet::signing::WalletPrivateSigningError::RuntimeRevoked)
+                )),
+                "may_have_been_submitted" => assert!(matches!(
+                    result,
+                    Ok(PrivateSubmissionResult::OutcomeUnknown { .. })
+                )),
+                "resolved_recorded" => assert!(matches!(
+                    result,
+                    Ok(PrivateSubmissionResult::Accepted { .. })
+                )),
+                _ => panic!("unexpected durable phase"),
+            }
             assert_eq!(writes.load(Ordering::SeqCst), expected_writes);
             assert_eq!(fs_read_record(&directory)["phase"]["kind"], expected_phase);
             assert!(runtime.lifecycle_status(true).unwrap().locked);

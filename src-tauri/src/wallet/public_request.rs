@@ -106,6 +106,17 @@ impl<'de> Deserialize<'de> for RecoverySelectionHandle {
 pub(in crate::wallet) struct TransferAddress(String);
 
 impl TransferAddress {
+    pub(in crate::wallet) fn from_borrowed(value: &str) -> Result<Self, PublicRequestError> {
+        if value.len() != TRANSFER_ADDRESS_BYTES
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(PublicRequestError::InvalidRequest);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
     pub(in crate::wallet) fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -135,6 +146,18 @@ impl<'de> Deserialize<'de> for TransferAddress {
 pub(in crate::wallet) struct TransferAmount(String);
 
 impl TransferAmount {
+    pub(in crate::wallet) fn from_borrowed(value: &str) -> Result<Self, PublicRequestError> {
+        if value.is_empty()
+            || value.len() > MAX_TRANSFER_AMOUNT_BYTES
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        {
+            return Err(PublicRequestError::InvalidRequest);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
     pub(in crate::wallet) fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -164,6 +187,16 @@ pub(in crate::wallet) struct WalletTransferPreviewRequest {
 }
 
 impl WalletTransferPreviewRequest {
+    pub(in crate::wallet) fn from_borrowed(
+        recipient: &str,
+        amount: &str,
+    ) -> Result<Self, PublicRequestError> {
+        Ok(Self {
+            recipient: TransferAddress::from_borrowed(recipient)?,
+            amount: TransferAmount::from_borrowed(amount)?,
+        })
+    }
+
     pub(in crate::wallet) fn into_parts(self) -> (TransferAddress, TransferAmount) {
         (self.recipient, self.amount)
     }

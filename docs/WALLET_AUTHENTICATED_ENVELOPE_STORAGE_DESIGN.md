@@ -3,6 +3,15 @@
 Date: 2026-08-10
 Status: design only; no implementation or exposure approval
 Reviewed baseline: `b108d54a88f658219ec5ab6fce5a07bbf316ce0f`
+Corrective revision: 2026-08-11
+Correction target: M-01 and M-02 from the independent review of
+`a20d98154b55727856eed8180544eb559b3d3451`
+
+The correction freezes an immutable commitment independent of retention/container state, binds it to
+an authenticated reconciliation parent and reserved `Prepared` generation in both directions, and
+adds permanent transaction-identifier uniqueness plus an authenticated journal v3 commitment
+association. Finding closure remains subject to independent re-review.
+
 
 ## Purpose
 
@@ -99,19 +108,24 @@ plaintext container has an exact versioned schema with unknown fields denied:
 - wallet identifier;
 - store generation;
 - previous committed head authentication tag;
-- an ordered, unique set of envelope entries.
+- entries sorted lexicographically by decoded 32-byte attempt identifier, subject to the permanent
+  uniqueness invariants below.
 
-Each entry contains only:
+Each entry contains one immutable identity section:
 
-- random submission attempt identifier;
+- random 32-byte submission attempt identifier, encoded as 64 lowercase hexadecimal characters;
 - canonical transaction identifier;
 - exact signed `VisionTransaction`;
 - exact JSON request body bytes encoded as lowercase hexadecimal;
 - domain-separated digest of those exact body bytes;
 - compatibility-contract digest;
-- reconciliation generation and phase binding present when the entry was published;
-- non-authoritative creation time; and
-- retention state: `prepared`, `ambiguous`, or `accepted`.
+- authenticated reconciliation parent-head generation and tag;
+- reserved next `Prepared` generation;
+- immutable envelope commitment; and
+- non-authoritative creation time.
+
+The entry also contains one mutable retention state: `prepared`, `ambiguous`, or `accepted`.
+Retention state and encrypted-container position are not part of entry identity or its commitment.
 
 The exact body must equal `serde_json::to_vec(&transaction)` byte for byte. On every load, Rust must
 recompute and compare:
@@ -126,6 +140,140 @@ recompute and compare:
 
 Semantically equivalent JSON, reordered fields, re-encoded arguments, a different signature with
 the same unsigned identifier, or a valid transaction belonging to another wallet must fail closed.
+
+## Immutable envelope commitment
+
+The immutable entry is committed with BLAKE3 derive-key mode using the exact context:
+
+`com.vision.desktop.wallet-signed-envelope-commitment.v1`
+
+The commitment input is a frozen binary encoding in this exact order:
+
+1. four-byte big-endian commitment version `1`;
+2. two-byte big-endian wallet-identifier byte length, followed by 1 through 64 validated ASCII bytes
+   limited to alphanumeric, hyphen, and underscore;
+3. decoded 32-byte attempt identifier;
+4. decoded 32-byte canonical transaction identifier;
+5. four-byte big-endian exact-body length, followed by the exact JSON body bytes;
+6. decoded 32-byte existing signed-body digest;
+7. decoded 32-byte compatibility-contract digest;
+8. eight-byte big-endian authenticated reconciliation parent-head generation;
+9. decoded 32-byte parent-head authentication tag; and
+10. eight-byte big-endian reserved next `Prepared` generation.
+
+Every integer is unsigned. Every fixed hexadecimal field is decoded before commitment. The wallet
+identifier and body length are validated before allocation. No optional field, platform string,
+serializer output other than the already retained exact body, or map iteration order enters this
+encoding.
+
+The 32-byte result is stored as exactly 64 lowercase hexadecimal characters. The commitment excludes:
+
+- mutable retention state;
+- encrypted-container generation, order, nonce, ciphertext, head, and staging identity;
+- creation or observation time; and
+- reconciliation phases after the reserved `Prepared` generation.
+
+Changing retention state or republishing the encrypted container therefore cannot change the
+commitment. Changing any transaction byte, signature byte, identity, compatibility contract, or
+original reconciliation reservation must change it.
+
+## Reconciliation reservation and two-way binding
+
+Before envelope publication, the seed-authenticated reconciliation store must have an authenticated
+committed head. The revised reconciliation format creates and verifies an authenticated genesis head
+at generation zero before the first attempt; an absent optional head is no longer a valid starting
+state for this extension.
+
+While holding the existing transaction-wide exclusion, Rust must:
+
+1. authenticate the current committed reconciliation head and capture its generation and exact tag;
+2. reserve `current_generation.checked_add(1)` as the only valid next `Prepared` generation;
+3. construct and publish the envelope commitment bound to that parent and reservation;
+4. read back, decrypt, and verify the envelope entry and envelope head;
+5. publish reconciliation `Prepared` only as the reserved generation, with the same attempt
+   identifier, transaction identifier, signed-body digest, and envelope commitment; and
+6. read back both stores and prove the cross-reference in both directions before continuing.
+
+The reconciliation record stores the immutable envelope commitment, not a digest of the mutable
+entry or encrypted container. The envelope entry stores the authenticated parent-head position and
+reserved `Prepared` generation, not a phase observed after publication.
+Every reconciliation phase for that attempt retains the same parent-head position, reserved
+`Prepared` generation, and envelope commitment as immutable authenticated fields. Phase transitions
+may change only the reviewed phase payload; they cannot rewrite the cross-store binding.
+
+Recovery accepts only these cross-store cases:
+
+- If the reconciliation head still equals the entry's authenticated parent and the reserved
+  `Prepared` record does not exist, the entry is a proven pre-write orphan. It may be removed only
+  through the reviewed no-Core orphan-cleanup authority.
+- If an authenticated reconciliation head transition targets the reserved `Prepared` generation,
+  recovery must first complete or roll back that existing reconciliation transition under its
+  reviewed rules. The envelope may not be removed while the result is uncertain.
+- If reconciliation is at the reserved `Prepared` generation or a later phase for that same
+  attempt, its stored commitment must equal the envelope commitment and the envelope's parent and
+  reservation must match the authenticated predecessor transition.
+- A nonterminal reconciliation record with a missing or mismatched envelope blocks spending and
+  reconciliation. An envelope claiming a reservation occupied by another attempt also fails closed.
+
+After `ResolvedRecorded` and later attempts advance the reconciliation head, the authenticated
+journal commitment described below becomes the durable historical association. The original
+parent/reservation fields remain immutable evidence but are not rewritten to the newer head.
+
+## Entry identity, uniqueness, and collision policy
+
+The primary entry identity is the decoded 32-byte attempt identifier. Entries are stored in strictly
+increasing bytewise attempt-identifier order. The authenticated plaintext must reject:
+
+- a repeated or out-of-order attempt identifier;
+- a repeated immutable envelope commitment; or
+- a repeated canonical transaction identifier among any retained entries.
+
+The transaction-identifier rule is permanent for accepted entries. The store permits at most one
+`prepared` or `ambiguous` entry because the reconciliation store permits only one nonterminal
+attempt. No transition replaces an entry's immutable section. `ambiguous` and `accepted` entries can
+never be overwritten or automatically deleted.
+
+A proven `ResolvedNotAttempted` entry may be removed only after both stores authenticate the exact
+terminal transition. A future `ResolvedRejected` entry follows the same rule only if the separately
+reviewed non-mutating rejection allowlist authorizes that result. Cleanup must finish and read back
+before another attempt with the same transaction identifier can begin.
+
+After constructing the unsigned transaction identifier, preview preparation must authenticate the
+store and reject a collision before native confirmation. The same check is repeated after signing and
+immediately before envelope publication. A collision with an unresolved attempt returns
+`wallet_reconciliation_pending`; a collision with accepted history or an inconsistent authenticated
+store returns `wallet_activity_unavailable`. Neither path reaches confirmation, seed signing, or a
+network write.
+
+This rule covers distinct attempt identifiers and distinct valid signatures that share one unsigned
+transaction identifier. They cannot coexist. If an accepted envelope for that identifier exists, no
+later signature or attempt may replace it.
+
+## Durable journal association
+
+The storage implementation requires journal schema version 3. Its authenticated `Submitted` event
+adds exactly one internal field:
+
+- `envelope_commitment_hex`: the immutable 64-character lowercase envelope commitment.
+
+The journal event authentication chain and independent head cover this field. The internal
+`WalletActivityRecord` retains it, but the existing public activity projection omits it. No body,
+signature, attempt identifier, reconciliation position, or store path enters the journal or IPC.
+
+`AcceptedSubmissionEvidence` must bind and consume the same commitment carried by the authenticated
+reconciliation record and accepted envelope entry. Journal append must verify all three before
+publication. Read-back must prove the journal transaction identifier, public fields, and commitment
+match the accepted entry before reconciliation may reach `ResolvedRecorded`.
+
+Receipt refresh selects an activity record by transaction identifier, reads its authenticated
+commitment, and requires exactly one accepted envelope with both that identifier and commitment.
+Identifier-only association is forbidden. A different commitment, missing entry, duplicate entry, or
+valid alternative signature fails closed without changing the journal.
+
+Journal version 2 does not contain this association and cannot qualify atomic wallet activation or
+receipt refresh. Because custody commands remain unregistered, no automatic v2-to-v3 migration is
+authorized. Version 3 activation requires a fresh empty journal or a separately designed,
+independently reviewed migration.
 
 ## Confidentiality and authentication
 
@@ -234,7 +382,8 @@ The private submission sequence must become:
 2. Construct an envelope entry in zeroizing memory.
 3. Encrypt, publish, read back, decrypt, and verify the entry and head.
 4. Consume `PreparedEnvelopeAuthority` while publishing reconciliation `Prepared`, binding the
-   attempt identifier, exact body digest, envelope-store generation, and envelope-entry digest.
+   attempt identifier, exact body digest, immutable envelope commitment, authenticated parent-head
+   position, and reserved `Prepared` generation.
 5. Revalidate all runtime and Core authorities.
 6. Publish reconciliation `MayHaveBeenSubmitted` and only then release the one existing Core-write
    capability for the one network attempt.
@@ -244,6 +393,7 @@ The private submission sequence must become:
    `AcceptedRecordingPending` is committed.
 9. Retain the accepted entry after journal append and `ResolvedRecorded` so later receipt refresh can
    prove exact-envelope equality.
+
 The reconciliation phase is authoritative for whether a write may have occurred. Envelope retention
 state is a conservative storage label, never submission or retry authority. If a crash leaves
 reconciliation at `MayHaveBeenSubmitted` while the envelope still says `prepared`, restart recovery
@@ -251,7 +401,6 @@ must treat the effective state as ambiguous and durably advance the envelope lab
 wallet operation. If reconciliation proves acceptance while the envelope label lags, recovery must
 treat it as accepted and may only repair the label or complete the authenticated journal transition.
 A lagging envelope label can never downgrade ambiguity or acceptance.
-
 
 If step 3 fails, no reconciliation `Prepared` record and no network write authority may be produced.
 
@@ -269,7 +418,9 @@ unavailability after `MayHaveBeenSubmitted` preserves `outcome_unknown` and the 
 Store unavailability after acceptance preserves `accepted_recording_pending` or the authenticated
 journal record; it never downgrades acceptance or permits resubmission.
 
-The reconciliation schema must be versioned to bind the envelope-store generation and entry digest.
+The reconciliation schema must be versioned to bind the immutable envelope commitment,
+authenticated parent-head position, and reserved `Prepared` generation. The journal schema must be
+versioned to bind that same commitment to accepted activity.
 Older internal schemas cannot be silently accepted or upgraded. Because wallet commands remain
 unregistered and no production custody data exists for this format, the first implementation may
 require an empty store, but that assumption must be proven again before activation.
@@ -284,7 +435,8 @@ implements only its private Rust path. The operation must:
 2. Acquire the transaction-wide gate without blocking.
 3. Require the matching wallet to be unlocked and issue one purpose-specific refresh operation.
 4. Authenticate the journal and require exactly one local activity record for the identifier.
-5. Authenticate and decrypt the envelope store and require exactly one matching accepted entry.
+5. Authenticate and decrypt the envelope store and require exactly one accepted entry matching both
+   the journal transaction identifier and journal envelope commitment.
 6. Revalidate the stored transaction, body, digest, signature, public fields, wallet account,
    journal record, and compatibility contract.
 7. Obtain a fresh supervisor-issued `CoreConnectionAuthority` for a supported private-loopback Core.
@@ -412,11 +564,20 @@ The private storage implementation must deterministically cover:
 - mutation of every `VisionTransaction` field, argument byte, signature byte, exact-body byte,
   transaction identifier, compatibility digest, attempt identifier, reconciliation generation, and
   journal field;
-- a valid alternative signature sharing the same unsigned transaction identifier;
+- multiple retained attempt identifiers, duplicate attempt identifiers, duplicate commitments,
+  out-of-order entries, and duplicate transaction identifiers;
+- multiple valid signatures sharing one unsigned transaction identifier, including collision
+  rejection before confirmation, signing, and network access;
 - reparse points, hard links, path swaps, non-regular files, ACL drift, sibling-prefix paths, and
   cross-session contention;
 - interruption at every head transition, container write, flush, publication, read-back,
   reconciliation bind, acceptance transition, journal append, and cleanup checkpoint;
+- both directions of the envelope-parent/reserved-generation to reconciliation-record binding,
+  including mismatched parent tags, occupied reservations, interrupted `Prepared` transitions, and
+  phase changes that try to rewrite the commitment;
+- journal transaction identifier and commitment association, including right identifier/wrong
+  commitment, right commitment/wrong identifier, missing accepted entry, duplicate accepted entries,
+  and later unrelated attempts leaving historical associations unchanged;
 - orphan-before-Prepared cleanup and refusal to remove ambiguous or accepted entries;
 - store-full refusal before confirmation, signing, or network write;
 - concurrent and reordered calls returning immediately without queued execution;

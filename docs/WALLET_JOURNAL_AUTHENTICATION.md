@@ -105,6 +105,31 @@ interrupted first write publishes no partial journal. Additional tests prove tha
 handle blocks replacement, publication remains tied to the staging handle, reparse-point journal
 files fail closed, and alternate data stream paths are rejected.
 
+## Proposed version 3 acceptance association
+
+`WALLET_AUTHENTICATED_ENVELOPE_STORAGE_DESIGN.md` requires a future internal journal schema version 3
+before receipt refresh can be implemented. Version 3 adds one field to each authenticated
+`Submitted` event and internal activity record:
+
+- `envelope_commitment_hex`: exactly 64 lowercase hexadecimal characters.
+
+The event chain and independent journal head authenticate this field. It is omitted from the public
+activity projection and cannot be supplied by React. It contains no signed body, signature, attempt
+identifier, reconciliation position, or path.
+
+The only constructor is the linear `AcceptedSubmissionEvidence` capability after it proves the same
+immutable commitment in the accepted envelope entry and authenticated reconciliation record. Journal
+read-back must verify the transaction identifier, all public transfer fields, and commitment before
+reconciliation reaches `ResolvedRecorded`.
+
+Receipt refresh must select the exact envelope by both authenticated journal transaction identifier
+and commitment. Identifier-only lookup is prohibited. Duplicate identifiers, duplicate commitments,
+a different valid signature, or a missing commitment fail closed.
+
+This section is design-only. The current implementation remains version 2. Version 2 cannot qualify
+atomic activation or receipt refresh, and no automatic migration is authorized while custody
+commands remain unregistered.
+
 ## Deliberate limitations
 
 Authentication and the independent head detect modification, reordering, deletion, and replacement

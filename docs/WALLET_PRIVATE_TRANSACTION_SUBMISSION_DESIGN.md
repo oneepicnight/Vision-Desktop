@@ -255,13 +255,17 @@ The record contains only:
 - canonical sender and recipient public addresses;
 - exact decimal amount in raw units, nonce, tip in raw units, and fee limit in raw units;
 - digest of the exact signed request body;
+- immutable exact-envelope commitment;
+- authenticated reconciliation parent-head generation and tag;
+- reserved next `Prepared` generation;
 - original Core compatibility and generation fingerprint;
 - non-authoritative creation time for operator display; and
 - one exact phase.
 
 These public transfer fields are retained because the existing authenticated journal needs them to
 finish recording after an accepted response and a crash. They must exactly match the native-approved
-intent, signed artifact, canonical transaction identifier, and envelope digest before publication.
+intent, signed artifact, canonical transaction identifier, signed-body digest, and immutable
+envelope commitment before publication.
 The record contains no signed body, signature, seed, password, recovery credential, activation
 proof, session handle, Core port, PID, filesystem path, or retry instruction.
 
@@ -277,7 +281,8 @@ The phases are:
    - An exact accepted response or exact matching point lookup was proven, but authenticated local
      activity recording has not yet completed. The authenticated phase binds the matching
      transaction identifier and nonce, the exact `accept` decision with no replacement, the signed
-     body digest, and the compatibility-contract digest; it stores no raw response.
+     body digest, immutable envelope commitment, and compatibility-contract digest; it stores no raw
+     response.
 
 The protected head also records one terminal state: `ResolvedNotAttempted`, `ResolvedRejected`, or
 `ResolvedRecorded`. A terminal transition increments a monotonic store generation, authenticates the
@@ -528,8 +533,9 @@ After exact acceptance:
    Core availability.
 3. Derive the journal authenticator through the existing purpose-specific seed boundary.
 4. Append the exact accepted public metadata carried by the evidence capability to the authenticated
-   journal. Ordinary callers cannot construct accepted metadata or call a transaction-shaped
-   journal append path.
+   journal together with the immutable envelope commitment. The internal journal schema authenticates
+   the commitment but never projects it to IPC. Ordinary callers cannot construct accepted metadata
+   or call a transaction-shaped journal append path.
 5. Read back and verify the journal and protected head.
 6. Commit `ResolvedRecorded` to the reconciliation head and remove only safely replaceable staging
    material.
@@ -539,14 +545,14 @@ If journal persistence fails, acceptance remains authoritative and the reconcili
 must never contact `POST /transactions`.
 
 If an identical journal record already exists after interruption, Rust treats recording as complete
-only after verifying every public field and authenticated chain/head position. A duplicate identifier
-with different metadata fails closed.
+only after verifying every public field, the immutable envelope commitment, and authenticated
+chain/head position. A duplicate identifier with different metadata or commitment fails closed.
 
 The `AcceptedSubmissionEvidence` capability is linear, has no unrestricted formatting, cloning, or
 serialization, and is consumed by journal recording. It binds the wallet, attempt, exact accepted
-response, public transfer metadata, unsigned identifier, and signed-envelope digest. Neither a raw
-`VisionTransaction` nor a caller-constructed `WalletSubmissionOutcome` is sufficient journal-write
-authority after this tranche.
+response, public transfer metadata, unsigned identifier, signed-envelope digest, and immutable
+envelope commitment. Neither a raw `VisionTransaction` nor a caller-constructed
+`WalletSubmissionOutcome` is sufficient journal-write authority after this tranche.
 
 Rejected and malformed requests are not added to accepted activity. The journal remains incomplete
 local display history and never supplies balances, nonces, fees, signing authority, submission

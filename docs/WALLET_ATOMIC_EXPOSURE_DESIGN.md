@@ -210,6 +210,9 @@ command and therefore atomic activation remain blocked pending a separately revi
 extension. `WALLET_AUTHENTICATED_ENVELOPE_STORAGE_DESIGN.md` defines the proposed encrypted,
 authenticated storage and private read-only refresh extension. That document is design-only and
 does not remove this activation blocker.
+The proposed extension also requires an internal journal version 3 acceptance event that
+authenticates the immutable envelope commitment while omitting it from IPC. Identifier-only journal
+association remains insufficient.
 
 ## Fixed transaction errors
 

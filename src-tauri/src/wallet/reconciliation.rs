@@ -1243,6 +1243,38 @@ impl AcceptedSubmissionEvidence {
         }
     }
 
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn for_receipt_refresh_test(
+        wallet_id: String,
+        transaction_id: String,
+        sender_address: String,
+        recipient_address: String,
+        amount_raw_units: String,
+        nonce: u64,
+        tip_raw_units: u64,
+        fee_limit_raw_units: u64,
+        envelope_commitment_hex: String,
+        submitted_at_unix_ms: u64,
+    ) -> Self {
+        Self {
+            attempt_id: "aa".repeat(32),
+            wallet_id,
+            transaction_id,
+            sender_address,
+            recipient_address,
+            amount_raw_units,
+            nonce,
+            tip_raw_units,
+            fee_limit_raw_units,
+            envelope_commitment_hex,
+            parent_head_generation: 0,
+            parent_head_authentication_tag_hex: "00".repeat(32),
+            reserved_prepared_generation: 1,
+            submitted_at_unix_ms,
+        }
+    }
+
     pub(super) fn wallet_id(&self) -> &str {
         &self.wallet_id
     }

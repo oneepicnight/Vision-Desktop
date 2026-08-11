@@ -90,17 +90,19 @@ pub(super) struct WalletCoreHttpResponse {
     pub body: Zeroizing<Vec<u8>>,
 }
 
-pub(super) trait WalletCoreSubmissionSource: WalletCoreReadSource {
+pub(super) trait WalletCoreReceiptSource: WalletCoreReadSource {
+    fn transaction_lookup(
+        &self,
+        transaction_id: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError>;
+}
+
+pub(super) trait WalletCoreSubmissionSource: WalletCoreReceiptSource {
     fn submit_once(
         &self,
         authority: CoreWriteOnce,
         exact_body: &[u8],
     ) -> Result<WalletCoreHttpResponse, WalletCoreClientError>;
-
-    fn transaction_lookup(
-        &self,
-        transaction_id: &str,
-    ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError>;
 }
 
 #[derive(Deserialize)]
@@ -237,6 +239,16 @@ impl WalletCoreReadSource for WalletCoreReadClient<'_> {
     }
 }
 
+impl WalletCoreReceiptSource for WalletCoreReadClient<'_> {
+    fn transaction_lookup(
+        &self,
+        transaction_id: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError> {
+        validate_address(transaction_id)?;
+        read_bytes(&self.authority, &format!("/transaction/{transaction_id}"))
+    }
+}
+
 impl WalletCoreSubmissionSource for WalletCoreReadClient<'_> {
     fn submit_once(
         &self,
@@ -244,14 +256,6 @@ impl WalletCoreSubmissionSource for WalletCoreReadClient<'_> {
         exact_body: &[u8],
     ) -> Result<WalletCoreHttpResponse, WalletCoreClientError> {
         submit_json_once_with(&self.authority, authority, exact_body)
-    }
-
-    fn transaction_lookup(
-        &self,
-        transaction_id: &str,
-    ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError> {
-        validate_address(transaction_id)?;
-        read_bytes(&self.authority, &format!("/transaction/{transaction_id}"))
     }
 }
 

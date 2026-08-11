@@ -82,6 +82,22 @@ pub(super) struct AcceptedEnvelopeAuthority {
     commitment_hex: String,
 }
 
+/// One authenticated accepted envelope retained solely for a bounded read-only receipt refresh.
+///
+/// It carries no signing, submission, Core-write, retry, or recovery authority and deliberately
+/// implements neither cloning, formatting, nor serialization.
+pub(super) struct EnvelopeRefreshAuthority {
+    wallet_id: String,
+    store_generation: u64,
+    attempt_id: String,
+    transaction_id: String,
+    commitment_hex: String,
+    transaction: VisionTransaction,
+    signed_body_digest_hex: String,
+    compatibility_contract_digest_hex: String,
+    created_at_unix_ms: u64,
+}
+
 /// Proof that one exact Prepared envelope occupies an otherwise empty authenticated
 /// reconciliation reservation. It grants cleanup only; it carries no Core or signing authority.
 pub(super) struct PreparedOrphanAuthority {
@@ -391,6 +407,82 @@ impl EnvelopeStore {
         }
         if entries.len() >= self.entry_limit {
             return Err(EnvelopeStoreError::StoreFull);
+        }
+        Ok(())
+    }
+
+    pub(super) fn prepare_receipt_refresh(
+        &self,
+        authenticator: &EnvelopeStoreAuthenticator,
+        transaction_id: &str,
+        commitment_hex: &str,
+    ) -> Result<EnvelopeRefreshAuthority, EnvelopeStoreError> {
+        if !is_lower_hex(transaction_id, 32) || !is_lower_hex(commitment_hex, 32) {
+            return Err(EnvelopeStoreError::InvalidRequest);
+        }
+        let _lock = lock_store()?;
+        let loaded = self.load_authenticated_unlocked(authenticator)?;
+        let container = loaded
+            .container
+            .as_ref()
+            .ok_or(EnvelopeStoreError::AuthenticationFailed)?;
+        let mut matches = container.entries.iter().filter(|entry| {
+            entry.transaction_id == transaction_id
+                && entry.envelope_commitment_hex == commitment_hex
+                && entry.retention_state == RetentionState::Accepted
+        });
+        let entry = matches
+            .next()
+            .ok_or(EnvelopeStoreError::AuthenticationFailed)?;
+        if matches.next().is_some() {
+            return Err(EnvelopeStoreError::AuthenticationFailed);
+        }
+        Ok(EnvelopeRefreshAuthority {
+            wallet_id: authenticator.wallet_id.clone(),
+            store_generation: loaded.head.generation,
+            attempt_id: entry.attempt_id.clone(),
+            transaction_id: entry.transaction_id.clone(),
+            commitment_hex: entry.envelope_commitment_hex.clone(),
+            transaction: entry.transaction.clone(),
+            signed_body_digest_hex: entry.signed_body_digest_hex.clone(),
+            compatibility_contract_digest_hex: entry.compatibility_contract_digest_hex.clone(),
+            created_at_unix_ms: entry.created_at_unix_ms,
+        })
+    }
+
+    pub(super) fn verify_receipt_refresh(
+        &self,
+        authenticator: &EnvelopeStoreAuthenticator,
+        authority: &EnvelopeRefreshAuthority,
+    ) -> Result<(), EnvelopeStoreError> {
+        let _lock = lock_store()?;
+        let loaded = self.load_authenticated_unlocked(authenticator)?;
+        if authority.wallet_id != authenticator.wallet_id
+            || loaded.head.generation != authority.store_generation
+        {
+            return Err(EnvelopeStoreError::AuthenticationFailed);
+        }
+        let container = loaded
+            .container
+            .as_ref()
+            .ok_or(EnvelopeStoreError::AuthenticationFailed)?;
+        let mut matches = container.entries.iter().filter(|entry| {
+            entry.attempt_id == authority.attempt_id
+                && entry.transaction_id == authority.transaction_id
+                && entry.envelope_commitment_hex == authority.commitment_hex
+                && entry.retention_state == RetentionState::Accepted
+        });
+        let entry = matches
+            .next()
+            .ok_or(EnvelopeStoreError::AuthenticationFailed)?;
+        if matches.next().is_some()
+            || entry.transaction != authority.transaction
+            || entry.signed_body_digest_hex != authority.signed_body_digest_hex
+            || entry.compatibility_contract_digest_hex
+                != authority.compatibility_contract_digest_hex
+            || entry.created_at_unix_ms != authority.created_at_unix_ms
+        {
+            return Err(EnvelopeStoreError::AuthenticationFailed);
         }
         Ok(())
     }
@@ -1830,6 +1922,32 @@ impl AcceptedEnvelopeAuthority {
     }
     pub(super) fn commitment_hex(&self) -> &str {
         &self.commitment_hex
+    }
+}
+
+impl EnvelopeRefreshAuthority {
+    pub(super) fn transaction_id(&self) -> &str {
+        &self.transaction_id
+    }
+
+    pub(super) fn commitment_hex(&self) -> &str {
+        &self.commitment_hex
+    }
+
+    pub(super) fn transaction(&self) -> &VisionTransaction {
+        &self.transaction
+    }
+
+    pub(super) fn signed_body_digest_hex(&self) -> &str {
+        &self.signed_body_digest_hex
+    }
+
+    pub(super) fn compatibility_contract_digest_hex(&self) -> &str {
+        &self.compatibility_contract_digest_hex
+    }
+
+    pub(super) const fn created_at_unix_ms(&self) -> u64 {
+        self.created_at_unix_ms
     }
 }
 

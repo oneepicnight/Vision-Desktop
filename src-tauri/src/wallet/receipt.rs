@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "receipt observation remains internal until wallet submission is approved"
-    )
-)]
-
 use super::{
     reconciliation::ReconciliationLookupExpectation,
     transaction::{canonical_transaction_id, verify_signed_transaction, VisionTransaction},

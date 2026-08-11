@@ -28,6 +28,8 @@ mod preview;
 mod public_request;
 mod receipt;
 #[cfg(windows)]
+mod receipt_refresh;
+#[cfg(windows)]
 mod reconciliation;
 mod recovery;
 #[cfg(windows)]

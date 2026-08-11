@@ -51,6 +51,16 @@ const JOURNAL_HEAD_SUFFIX: &str = ".head.json";
 
 static JOURNAL_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_RECEIPT_APPEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn fail_next_receipt_append_for_test() {
+    FAIL_NEXT_RECEIPT_APPEND.set(true);
+}
+
 #[cfg_attr(test, derive(Debug))]
 #[derive(Clone, PartialEq, Eq)]
 pub(in crate::wallet) struct WalletActivityRecord {
@@ -444,6 +454,10 @@ pub(in crate::wallet) fn append_receipt_observation(
     let _guard = JOURNAL_WRITE_LOCK
         .lock()
         .map_err(|_| WalletJournalError::StorageUnavailable)?;
+    #[cfg(test)]
+    if FAIL_NEXT_RECEIPT_APPEND.replace(false) {
+        return Err(WalletJournalError::StorageUnavailable);
+    }
     validate_tx_id(tx_id)?;
     validate_observation(observation)?;
     let loaded = load_journal_unlocked(path, authenticator)?;

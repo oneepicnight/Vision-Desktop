@@ -612,6 +612,28 @@ submission, replacement, recovery export, or raw envelope projection.
 No stage may set `duplicate_key_rejection_proven` or any security approval flag, register a command,
 grant a permission, add a frontend invoke, relax the Core manifest, or modify Vision-Core.
 
+## Private receipt-refresh implementation status
+
+The staged private receipt-refresh tranche is now implemented for independent review. The
+implementation remains unregistered and production-inert. It:
+
+- issues one linear runtime `Refresh` permit only for the unlocked matching wallet and main-window
+  owner;
+- authenticates exactly one journal-v3 record and its exact accepted encrypted-envelope
+  commitment before any Core read;
+- revalidates the immutable envelope, journal association, compatibility digest, operation
+  generation, revocation epoch, owner, wallet identity, and active Core fingerprint;
+- uses a read-only Core trait that exposes status and one exact transaction lookup but cannot carry
+  `CoreWriteOnce` or call submission;
+- parses and verifies the complete signed envelope returned by Core before classifying the receipt;
+- records only authenticated public observations, with read-back verification; and
+- preserves an identical observation without journal growth or a fabricated observation time.
+
+The implementation has no Tauri registration, permission, capability, frontend invoke, enabled
+approval constant, production Core manifest change, signing authority, submission authority, retry,
+replacement, recovery export, or Vision-Core change. Independent implementation review remains
+mandatory before this tranche may be incorporated into any frozen atomic-exposure candidate.
+
 ## Approval requested
 
 Independent review is requested only for the design of:

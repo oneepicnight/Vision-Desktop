@@ -16,8 +16,11 @@ use crate::{
         preview::{PreparedTransferPreview, WalletPreviewError, WalletTransactionPreviewEngine},
         public_request::WalletTransferPreviewRequest,
         receipt::{
-            receipt_presentation, WalletReceiptConfidence, WalletReceiptObservation,
-            WalletReceiptPresentation,
+            receipt_presentation, WalletReceiptChange, WalletReceiptConfidence,
+            WalletReceiptObservation, WalletReceiptPresentation,
+        },
+        receipt_refresh::{
+            PrivateReceiptRefreshResult, WalletReceiptRefreshEngine, WalletReceiptRefreshError,
         },
         reconciliation::ReconciliationPhaseTag,
         runtime::{WalletReconciliationResult, WalletRuntimeError, WalletRuntimeState},
@@ -85,6 +88,7 @@ enum TransactionBoundaryError {
     Runtime(WalletRuntimeError),
     Preview(WalletPreviewError),
     Confirmation(WalletConfirmationError),
+    Refresh(WalletReceiptRefreshError),
     ReconciliationPending,
     ActivityUnavailable,
     TransactionUnknown,
@@ -145,6 +149,12 @@ struct ActivityResponse {
     records: Vec<PublicActivityRecord>,
     history_complete: bool,
     pending_reconciliation: Option<PendingReconciliationResponse>,
+}
+
+#[derive(Serialize)]
+struct ReceiptRefreshResponse {
+    record: PublicActivityRecord,
+    change: &'static str,
 }
 
 #[derive(Serialize)]
@@ -374,21 +384,16 @@ impl WalletTransactionCommandBoundary {
         window: &MainWalletWindowAuthority,
         request: TransactionIdRequest,
     ) -> Result<Response, TransactionBoundaryError> {
-        let discovered = self.discover_activity(window.owner_label())?;
-        if !discovered
-            .journal
-            .as_ref()
-            .map(WalletActivityJournal::records)
-            .unwrap_or_default()
-            .iter()
-            .any(|record| record.tx_id == request.transaction_id)
-        {
-            return Err(TransactionBoundaryError::TransactionUnknown);
-        }
-        // Journal v3 and private encrypted envelope storage now retain the required authenticated
-        // association, but the separately reviewed read-only refresh coordinator is not yet
-        // implemented. Keep this command shape fail-closed until that tranche is approved.
-        Err(TransactionBoundaryError::TransactionUnknown)
+        let refreshed = WalletReceiptRefreshEngine::new(&self.runtime)
+            .refresh(
+                &self.supervisor,
+                window.owner_label(),
+                self.adapters.custody_path_authority(),
+                request.transaction_id.as_str(),
+                now_unix_ms()?,
+            )
+            .map_err(TransactionBoundaryError::Refresh)?;
+        serialize_response(&project_receipt_refresh(refreshed))
     }
 
     fn ensure_spending_unblocked(
@@ -649,6 +654,20 @@ fn project_activity_record(record: &WalletActivityRecord) -> PublicActivityRecor
     }
 }
 
+fn project_receipt_refresh(result: PrivateReceiptRefreshResult) -> ReceiptRefreshResponse {
+    ReceiptRefreshResponse {
+        record: project_activity_record(&result.record),
+        change: match result.change {
+            WalletReceiptChange::FirstObservation => "first_observation",
+            WalletReceiptChange::Unchanged => "unchanged",
+            WalletReceiptChange::PendingToMined => "pending_to_mined",
+            WalletReceiptChange::ConfirmationsAdvanced => "confirmations_advanced",
+            WalletReceiptChange::Reorganized => "reorganized",
+            WalletReceiptChange::ObservationLost => "observation_lost",
+        },
+    }
+}
+
 fn project_observation(observation: &WalletReceiptObservation) -> PublicObservation {
     match receipt_presentation(observation) {
         WalletReceiptPresentation::NotObserved => PublicObservation::NotObserved,
@@ -719,6 +738,24 @@ impl TransactionBoundaryError {
             },
             Self::Preview(error) => error.code(),
             Self::Confirmation(error) => error.code(),
+            Self::Refresh(error) => match error {
+                WalletReceiptRefreshError::Runtime(runtime) => match runtime {
+                    WalletRuntimeError::InvalidWindow => "invalid_window",
+                    WalletRuntimeError::ActivationUnavailable => "wallet_activation_unavailable",
+                    WalletRuntimeError::OperationInProgress => "wallet_operation_in_progress",
+                    WalletRuntimeError::InvalidRequest => "invalid_request",
+                    WalletRuntimeError::ReconciliationUnavailable => "wallet_activity_unavailable",
+                    _ => "wallet_runtime_unavailable",
+                },
+                WalletReceiptRefreshError::TransactionUnknown => "wallet_transaction_unknown",
+                WalletReceiptRefreshError::ActivityUnavailable => "wallet_activity_unavailable",
+                WalletReceiptRefreshError::CoreCompatibilityUnavailable => {
+                    "wallet_core_compatibility_unavailable"
+                }
+                WalletReceiptRefreshError::CoreUnavailable => "wallet_core_unavailable",
+                WalletReceiptRefreshError::CoreRecovering => "wallet_core_recovering",
+                WalletReceiptRefreshError::CoreResponseRejected => "wallet_core_response_rejected",
+            },
             Self::ReconciliationPending => "wallet_reconciliation_pending",
             Self::ActivityUnavailable => "wallet_activity_unavailable",
             Self::TransactionUnknown => "wallet_transaction_unknown",
@@ -1173,15 +1210,16 @@ mod tests {
             assert!(value["records"].as_array().unwrap().is_empty());
         }
 
-        assert!(matches!(
-            boundary.execute_envelope(
-                WalletTransactionEnvelope::Refresh(TransactionIdRequest {
-                    transaction_id: "22".repeat(32),
-                }),
-                &authority,
-            ),
-            Err(TransactionBoundaryError::TransactionUnknown)
-        ));
+        let refresh = boundary.execute_envelope(
+            WalletTransactionEnvelope::Refresh(TransactionIdRequest {
+                transaction_id: "22".repeat(32),
+            }),
+            &authority,
+        );
+        match refresh {
+            Err(error) => assert_eq!(error.code(), "wallet_core_compatibility_unavailable"),
+            Ok(_) => panic!("refresh unexpectedly succeeded without an authenticated envelope"),
+        }
     }
 
     #[test]

@@ -453,7 +453,7 @@ mod tests {
         account::derive_account_identity,
         core_client::{
             WalletCoreAccountSnapshot, WalletCoreClientError, WalletCoreHttpResponse,
-            WalletCoreReadSource, WalletCoreStatus,
+            WalletCoreReadSource, WalletCoreReceiptSource, WalletCoreStatus,
         },
         journal::{append_accepted_submission, WalletJournalAuthenticator},
         lifecycle::WalletCustodyPathAuthority,
@@ -552,6 +552,23 @@ mod tests {
         }
     }
 
+    impl WalletCoreReceiptSource for FakeSubmissionCore {
+        fn transaction_lookup(
+            &self,
+            _transaction_id: &str,
+        ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError> {
+            if matches!(self.mode, ResponseMode::PanicDuringLookup) {
+                panic!("injected restart reconciliation lookup panic");
+            }
+            self.lookup_body
+                .lock()
+                .unwrap()
+                .clone()
+                .map(Zeroizing::new)
+                .ok_or(WalletCoreClientError::TransportFailed)
+        }
+    }
+
     impl WalletCoreSubmissionSource for FakeSubmissionCore {
         fn submit_once(
             &self,
@@ -625,21 +642,6 @@ mod tests {
                 status: if code.is_some() { 422 } else { 200 },
                 body: Zeroizing::new(serde_json::to_vec(&body).unwrap()),
             })
-        }
-
-        fn transaction_lookup(
-            &self,
-            _transaction_id: &str,
-        ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError> {
-            if matches!(self.mode, ResponseMode::PanicDuringLookup) {
-                panic!("injected restart reconciliation lookup panic");
-            }
-            self.lookup_body
-                .lock()
-                .unwrap()
-                .clone()
-                .map(Zeroizing::new)
-                .ok_or(WalletCoreClientError::TransportFailed)
         }
     }
 

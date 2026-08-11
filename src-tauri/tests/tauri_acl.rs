@@ -709,20 +709,21 @@ fn wallet_sensitive_authority_requires_runtime_activation_proof() {
         runtime_source
             .match_indices("self.require_activation(")
             .count(),
-        3
+        4
     );
     assert!(runtime_source.contains("pub(in crate::wallet) struct WalletActivationProof"));
     assert_eq!(
         runtime_source
             .match_indices("activation_proof: WalletActivationProof {")
             .count(),
-        4
+        5
     );
     assert!(runtime_source.contains("pub(in crate::wallet) fn promote_to_signing("));
     assert!(runtime_source.contains("if matches!("));
     assert!(runtime_source.contains("WalletOperationKind::Sign"));
     assert!(runtime_source.contains("WalletOperationKind::Submit"));
     assert!(runtime_source.contains("WalletOperationKind::Reconcile"));
+    assert!(runtime_source.contains("WalletOperationKind::Refresh"));
     assert!(runtime_source.contains("return Err(WalletRuntimeError::InvalidRequest)"));
     assert!(runtime_source.contains("scope: WalletActivationScope"));
     assert!(runtime_source.contains("pub(in crate::wallet) fn require_signing"));

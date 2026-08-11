@@ -487,10 +487,10 @@ impl WalletRuntimeState {
         require_main_window(owner_window)?;
         self.require_activation(WalletActivationScope::Reconciliation)?;
         let mut inner = self.lock_inner()?;
-        if self.revocation_is_pending()
-            || inner.active_operation.is_some()
-            || inner.pending_path_selection.is_some()
-        {
+        if self.revocation_is_pending() {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        if inner.active_operation.is_some() || inner.pending_path_selection.is_some() {
             return Err(WalletRuntimeError::OperationInProgress);
         }
         let wallet_id = inner
@@ -3254,7 +3254,13 @@ mod tests {
     #[test]
     fn pending_revocation_rejects_new_authority() {
         let runtime = Arc::new(WalletRuntimeState::for_test());
+        let validated_boundary_epoch = runtime.capture_boundary_epoch().unwrap();
         runtime.pending_revocations.store(1, Ordering::Release);
+
+        assert_eq!(
+            runtime.validate_boundary_epoch(validated_boundary_epoch),
+            Err(WalletRuntimeError::RuntimeUnavailable)
+        );
 
         assert_eq!(
             runtime
@@ -3266,6 +3272,10 @@ mod tests {
             runtime
                 .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination,)
                 .err(),
+            Some(WalletRuntimeError::RuntimeUnavailable)
+        );
+        assert_eq!(
+            runtime.begin_receipt_refresh(MAIN_WINDOW_LABEL).err(),
             Some(WalletRuntimeError::RuntimeUnavailable)
         );
 

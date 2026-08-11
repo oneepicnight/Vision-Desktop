@@ -1217,7 +1217,7 @@ mod tests {
             &authority,
         );
         match refresh {
-            Err(error) => assert_eq!(error.code(), "wallet_core_compatibility_unavailable"),
+            Err(error) => assert_eq!(error.code(), "wallet_transaction_unknown"),
             Ok(_) => panic!("refresh unexpectedly succeeded without an authenticated envelope"),
         }
     }

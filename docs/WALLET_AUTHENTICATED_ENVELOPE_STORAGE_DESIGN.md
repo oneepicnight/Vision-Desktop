@@ -620,7 +620,7 @@ implementation remains unregistered and production-inert. It:
 - issues one linear runtime `Refresh` permit only for the unlocked matching wallet and main-window
   owner;
 - authenticates exactly one journal-v3 record and its exact accepted encrypted-envelope
-  commitment before any Core read;
+  commitment before requesting supervisor-issued Core authority or performing any Core read;
 - revalidates the immutable envelope, journal association, compatibility digest, operation
   generation, revocation epoch, owner, wallet identity, and active Core fingerprint;
 - uses a read-only Core trait that exposes status and one exact transaction lookup but cannot carry

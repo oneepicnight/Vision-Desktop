@@ -8,7 +8,9 @@ use super::{
     receipt::{
         classify_receipt_change, parse_exact_signed_receipt_observation, WalletReceiptChange,
     },
-    runtime::{WalletRuntimeError, WalletRuntimeState},
+    runtime::{
+        PreparedReceiptRefresh, WalletReceiptRefreshPermit, WalletRuntimeError, WalletRuntimeState,
+    },
 };
 use crate::supervisor::SupervisorState;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -36,6 +38,33 @@ pub(in crate::wallet) struct WalletReceiptRefreshEngine<'runtime> {
     runtime: &'runtime WalletRuntimeState,
 }
 
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReceiptRefreshCheckpoint {
+    BeforePermit,
+    PermitAcquired,
+    LocalEligibilityAuthenticated,
+    CoreAuthorityIssued,
+    InitialIdentityValidated,
+    StatusRead,
+    StatusIdentityValidated,
+    LookupRead,
+    LookupIdentityValidated,
+    ReceiptParsed,
+    FinalIdentityValidated,
+    BeforeJournalWrite,
+    JournalRecorded,
+    BeforeComplete,
+}
+
+trait ReceiptRefreshObserver {
+    fn checkpoint(&self, _checkpoint: ReceiptRefreshCheckpoint) {}
+}
+
+struct ProductionReceiptRefreshObserver;
+
+impl ReceiptRefreshObserver for ProductionReceiptRefreshObserver {}
+
 impl<'runtime> WalletReceiptRefreshEngine<'runtime> {
     pub(in crate::wallet) const fn new(runtime: &'runtime WalletRuntimeState) -> Self {
         Self { runtime }
@@ -49,16 +78,17 @@ impl<'runtime> WalletReceiptRefreshEngine<'runtime> {
         transaction_id: &str,
         observed_at_unix_ms: u64,
     ) -> Result<PrivateReceiptRefreshResult, WalletReceiptRefreshError> {
-        let source = WalletCoreReadClient::from_supervisor(supervisor).map_err(map_core_error)?;
-        self.refresh_with_source(
+        self.refresh_with_factory_and_observer(
             owner_window,
             custody,
             transaction_id,
             observed_at_unix_ms,
-            &source,
+            || WalletCoreReadClient::from_supervisor(supervisor),
+            &ProductionReceiptRefreshObserver,
         )
     }
 
+    #[cfg(test)]
     fn refresh_with_source(
         &self,
         owner_window: &str,
@@ -67,15 +97,27 @@ impl<'runtime> WalletReceiptRefreshEngine<'runtime> {
         observed_at_unix_ms: u64,
         source: &impl WalletCoreReceiptSource,
     ) -> Result<PrivateReceiptRefreshResult, WalletReceiptRefreshError> {
-        let attempt = catch_unwind(AssertUnwindSafe(|| {
-            self.refresh_with_source_inner(
-                owner_window,
+        self.run_contained(|| {
+            let observer = ProductionReceiptRefreshObserver;
+            let (permit, prepared) =
+                self.prepare_local(owner_window, custody, transaction_id, &observer)?;
+            observer.checkpoint(ReceiptRefreshCheckpoint::CoreAuthorityIssued);
+            self.refresh_prepared(
+                permit,
+                prepared,
                 custody,
-                transaction_id,
                 observed_at_unix_ms,
                 source,
+                &observer,
             )
-        }));
+        })
+    }
+
+    fn run_contained(
+        &self,
+        operation: impl FnOnce() -> Result<PrivateReceiptRefreshResult, WalletReceiptRefreshError>,
+    ) -> Result<PrivateReceiptRefreshResult, WalletReceiptRefreshError> {
+        let attempt = catch_unwind(AssertUnwindSafe(operation));
         match attempt {
             Ok(result) => result,
             Err(_) => {
@@ -87,28 +129,44 @@ impl<'runtime> WalletReceiptRefreshEngine<'runtime> {
         }
     }
 
-    fn refresh_with_source_inner(
-        &self,
+    fn prepare_local<'a>(
+        &'a self,
         owner_window: &str,
         custody: &WalletCustodyPathAuthority,
         transaction_id: &str,
-        observed_at_unix_ms: u64,
-        source: &impl WalletCoreReceiptSource,
-    ) -> Result<PrivateReceiptRefreshResult, WalletReceiptRefreshError> {
+        observer: &impl ReceiptRefreshObserver,
+    ) -> Result<(WalletReceiptRefreshPermit<'a>, PreparedReceiptRefresh), WalletReceiptRefreshError>
+    {
+        observer.checkpoint(ReceiptRefreshCheckpoint::BeforePermit);
         let permit = self
             .runtime
             .begin_receipt_refresh(owner_window)
             .map_err(map_runtime_error)?;
+        observer.checkpoint(ReceiptRefreshCheckpoint::PermitAcquired);
         let prepared = permit
             .prepare(custody, transaction_id)
             .map_err(map_runtime_error)?
             .ok_or(WalletReceiptRefreshError::TransactionUnknown)?;
         permit.ensure_current().map_err(map_runtime_error)?;
+        observer.checkpoint(ReceiptRefreshCheckpoint::LocalEligibilityAuthenticated);
+        Ok((permit, prepared))
+    }
 
+    fn refresh_prepared(
+        &self,
+        permit: WalletReceiptRefreshPermit<'_>,
+        prepared: PreparedReceiptRefresh,
+        custody: &WalletCustodyPathAuthority,
+        observed_at_unix_ms: u64,
+        source: &impl WalletCoreReceiptSource,
+        observer: &impl ReceiptRefreshObserver,
+    ) -> Result<PrivateReceiptRefreshResult, WalletReceiptRefreshError> {
         let initial_fingerprint = source
             .validated_identity_fingerprint()
             .map_err(map_core_error)?;
+        observer.checkpoint(ReceiptRefreshCheckpoint::InitialIdentityValidated);
         let status = source.status().map_err(map_core_error)?;
+        observer.checkpoint(ReceiptRefreshCheckpoint::StatusRead);
         permit.ensure_current().map_err(map_runtime_error)?;
         let status_fingerprint = source
             .validated_identity_fingerprint()
@@ -119,10 +177,12 @@ impl<'runtime> WalletReceiptRefreshEngine<'runtime> {
         if status.recovery_state != NORMAL_RECOVERY_STATE {
             return Err(WalletReceiptRefreshError::CoreRecovering);
         }
+        observer.checkpoint(ReceiptRefreshCheckpoint::StatusIdentityValidated);
 
         let body = source
             .transaction_lookup(prepared.transaction_id())
             .map_err(map_core_error)?;
+        observer.checkpoint(ReceiptRefreshCheckpoint::LookupRead);
         permit.ensure_current().map_err(map_runtime_error)?;
         let lookup_fingerprint = source
             .validated_identity_fingerprint()
@@ -130,6 +190,7 @@ impl<'runtime> WalletReceiptRefreshEngine<'runtime> {
         if lookup_fingerprint != initial_fingerprint {
             return Err(WalletReceiptRefreshError::CoreUnavailable);
         }
+        observer.checkpoint(ReceiptRefreshCheckpoint::LookupIdentityValidated);
         let observation = parse_exact_signed_receipt_observation(
             body.as_slice(),
             prepared.transaction(),
@@ -137,6 +198,7 @@ impl<'runtime> WalletReceiptRefreshEngine<'runtime> {
             status.canonical_tip_height,
         )
         .map_err(|_| WalletReceiptRefreshError::CoreResponseRejected)?;
+        observer.checkpoint(ReceiptRefreshCheckpoint::ReceiptParsed);
         permit.ensure_current().map_err(map_runtime_error)?;
         let final_fingerprint = source
             .validated_identity_fingerprint()
@@ -144,14 +206,46 @@ impl<'runtime> WalletReceiptRefreshEngine<'runtime> {
         if final_fingerprint != initial_fingerprint {
             return Err(WalletReceiptRefreshError::CoreUnavailable);
         }
+        observer.checkpoint(ReceiptRefreshCheckpoint::FinalIdentityValidated);
         let change = classify_receipt_change(Some(prepared.previous_observation()), &observation);
         permit.ensure_current().map_err(map_runtime_error)?;
+        observer.checkpoint(ReceiptRefreshCheckpoint::BeforeJournalWrite);
         let record = permit
             .record_observation(custody, prepared, &observation, observed_at_unix_ms)
             .map_err(map_runtime_error)?;
+        observer.checkpoint(ReceiptRefreshCheckpoint::JournalRecorded);
+        observer.checkpoint(ReceiptRefreshCheckpoint::BeforeComplete);
         permit
             .complete(PrivateReceiptRefreshResult { record, change })
             .map_err(map_runtime_error)
+    }
+
+    fn refresh_with_factory_and_observer<S>(
+        &self,
+        owner_window: &str,
+        custody: &WalletCustodyPathAuthority,
+        transaction_id: &str,
+        observed_at_unix_ms: u64,
+        source_factory: impl FnOnce() -> Result<S, WalletCoreClientError>,
+        observer: &impl ReceiptRefreshObserver,
+    ) -> Result<PrivateReceiptRefreshResult, WalletReceiptRefreshError>
+    where
+        S: WalletCoreReceiptSource,
+    {
+        self.run_contained(|| {
+            let (permit, prepared) =
+                self.prepare_local(owner_window, custody, transaction_id, observer)?;
+            let source = source_factory().map_err(map_core_error)?;
+            observer.checkpoint(ReceiptRefreshCheckpoint::CoreAuthorityIssued);
+            self.refresh_prepared(
+                permit,
+                prepared,
+                custody,
+                observed_at_unix_ms,
+                &source,
+                observer,
+            )
+        })
     }
 }
 
@@ -239,6 +333,34 @@ mod tests {
         revocation_runtime: RefCell<Option<Arc<WalletRuntimeState>>>,
         recovery_state: RefCell<String>,
         tip_height: Cell<u64>,
+        identity_error_at: Cell<Option<usize>>,
+        status_error: Cell<bool>,
+        lookup_error: Cell<bool>,
+    }
+
+    struct PanicObserver {
+        checkpoint: ReceiptRefreshCheckpoint,
+    }
+
+    struct ActionObserver {
+        checkpoint: ReceiptRefreshCheckpoint,
+        action: RefCell<Option<Box<dyn FnOnce()>>>,
+    }
+
+    impl ReceiptRefreshObserver for PanicObserver {
+        fn checkpoint(&self, checkpoint: ReceiptRefreshCheckpoint) {
+            assert_ne!(checkpoint, self.checkpoint, "injected refresh-stage panic");
+        }
+    }
+
+    impl ReceiptRefreshObserver for ActionObserver {
+        fn checkpoint(&self, checkpoint: ReceiptRefreshCheckpoint) {
+            if checkpoint == self.checkpoint {
+                if let Some(action) = self.action.borrow_mut().take() {
+                    action();
+                }
+            }
+        }
     }
 
     impl FakeReceiptSource {
@@ -255,6 +377,9 @@ mod tests {
                 revocation_runtime: RefCell::new(None),
                 recovery_state: RefCell::new("normal".to_string()),
                 tip_height: Cell::new(100),
+                identity_error_at: Cell::new(None),
+                status_error: Cell::new(false),
+                lookup_error: Cell::new(false),
             }
         }
 
@@ -283,6 +408,9 @@ mod tests {
 
         fn status(&self) -> Result<WalletCoreStatus, WalletCoreClientError> {
             assert!(!self.panic_on_status.get(), "injected status panic");
+            if self.status_error.get() {
+                return Err(WalletCoreClientError::CoreUnavailable);
+            }
             if self.revoke_on_status.get() {
                 self.revoke_now();
             }
@@ -298,6 +426,9 @@ mod tests {
         fn validated_identity_fingerprint(&self) -> Result<[u8; 32], WalletCoreClientError> {
             let call = self.identity_calls.get() + 1;
             self.identity_calls.set(call);
+            if self.identity_error_at.get() == Some(call) {
+                return Err(WalletCoreClientError::CoreIdentityChanged);
+            }
             if self.revoke_on_identity_call.get() == Some(call) {
                 self.revoke_now();
             }
@@ -315,6 +446,9 @@ mod tests {
             _transaction_id: &str,
         ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError> {
             self.lookup_calls.set(self.lookup_calls.get() + 1);
+            if self.lookup_error.get() {
+                return Err(WalletCoreClientError::TransportFailed);
+            }
             if self.revoke_on_lookup.get() {
                 self.revoke_now();
             }
@@ -739,6 +873,334 @@ mod tests {
             fixture.record().observation,
             WalletReceiptObservation::NotFound
         );
+    }
+
+    #[test]
+    fn local_eligibility_failures_never_request_core_authority() {
+        fn pending_source() -> FakeReceiptSource {
+            FakeReceiptSource::new(Vec::new())
+        }
+
+        let fixture = Fixture::new();
+        let calls = Cell::new(0);
+        let result = WalletReceiptRefreshEngine::new(&fixture.runtime)
+            .refresh_with_factory_and_observer(
+                MAIN,
+                &fixture.custody,
+                &"ff".repeat(32),
+                SUBMITTED_AT + 1,
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(pending_source())
+                },
+                &ProductionReceiptRefreshObserver,
+            );
+        assert_eq!(
+            result.err(),
+            Some(WalletReceiptRefreshError::TransactionUnknown)
+        );
+        assert_eq!(calls.get(), 0);
+        drop(fixture);
+
+        let fixture = Fixture::new();
+        for name in [
+            "wallet.signed-envelopes.v1.enc",
+            "wallet.signed-envelopes.v1.head.json",
+        ] {
+            fs::remove_file(fixture._directory.path().join(name)).unwrap();
+        }
+        let calls = Cell::new(0);
+        let result = WalletReceiptRefreshEngine::new(&fixture.runtime)
+            .refresh_with_factory_and_observer(
+                MAIN,
+                &fixture.custody,
+                &fixture.transaction_id,
+                SUBMITTED_AT + 2,
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(pending_source())
+                },
+                &ProductionReceiptRefreshObserver,
+            );
+        assert_eq!(
+            result.err(),
+            Some(WalletReceiptRefreshError::ActivityUnavailable)
+        );
+        assert_eq!(calls.get(), 0);
+        drop(fixture);
+
+        let fixture = Fixture::new();
+        fs::write(
+            fixture
+                ._directory
+                .path()
+                .join("wallet.signed-envelopes.v1.enc"),
+            b"{}",
+        )
+        .unwrap();
+        let calls = Cell::new(0);
+        let result = WalletReceiptRefreshEngine::new(&fixture.runtime)
+            .refresh_with_factory_and_observer(
+                MAIN,
+                &fixture.custody,
+                &fixture.transaction_id,
+                SUBMITTED_AT + 3,
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(pending_source())
+                },
+                &ProductionReceiptRefreshObserver,
+            );
+        assert_eq!(
+            result.err(),
+            Some(WalletReceiptRefreshError::ActivityUnavailable)
+        );
+        assert_eq!(calls.get(), 0);
+        drop(fixture);
+
+        let fixture = Fixture::new();
+        fs::write(fixture.custody.journal_path(), b"{}").unwrap();
+        let calls = Cell::new(0);
+        let result = WalletReceiptRefreshEngine::new(&fixture.runtime)
+            .refresh_with_factory_and_observer(
+                MAIN,
+                &fixture.custody,
+                &fixture.transaction_id,
+                SUBMITTED_AT + 4,
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(pending_source())
+                },
+                &ProductionReceiptRefreshObserver,
+            );
+        assert_eq!(
+            result.err(),
+            Some(WalletReceiptRefreshError::ActivityUnavailable)
+        );
+        assert_eq!(calls.get(), 0);
+        drop(fixture);
+
+        let fixture = Fixture::new();
+        let held = fixture.runtime.begin_receipt_refresh(MAIN).unwrap();
+        let calls = Cell::new(0);
+        let result = WalletReceiptRefreshEngine::new(&fixture.runtime)
+            .refresh_with_factory_and_observer(
+                MAIN,
+                &fixture.custody,
+                &fixture.transaction_id,
+                SUBMITTED_AT + 5,
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(pending_source())
+                },
+                &ProductionReceiptRefreshObserver,
+            );
+        assert_eq!(
+            result.err(),
+            Some(WalletReceiptRefreshError::Runtime(
+                WalletRuntimeError::OperationInProgress
+            ))
+        );
+        assert_eq!(calls.get(), 0);
+        drop(held);
+    }
+
+    #[test]
+    fn every_refresh_stage_panic_is_contained_and_revokes_authority() {
+        for checkpoint in [
+            ReceiptRefreshCheckpoint::BeforePermit,
+            ReceiptRefreshCheckpoint::PermitAcquired,
+            ReceiptRefreshCheckpoint::LocalEligibilityAuthenticated,
+            ReceiptRefreshCheckpoint::CoreAuthorityIssued,
+            ReceiptRefreshCheckpoint::InitialIdentityValidated,
+            ReceiptRefreshCheckpoint::StatusRead,
+            ReceiptRefreshCheckpoint::StatusIdentityValidated,
+            ReceiptRefreshCheckpoint::LookupRead,
+            ReceiptRefreshCheckpoint::LookupIdentityValidated,
+            ReceiptRefreshCheckpoint::ReceiptParsed,
+            ReceiptRefreshCheckpoint::FinalIdentityValidated,
+            ReceiptRefreshCheckpoint::BeforeJournalWrite,
+            ReceiptRefreshCheckpoint::JournalRecorded,
+            ReceiptRefreshCheckpoint::BeforeComplete,
+        ] {
+            let fixture = Fixture::new();
+            let body = lookup_body(
+                &fixture.transaction,
+                &fixture.transaction_id,
+                &WalletReceiptObservation::Pending,
+            );
+            let result = WalletReceiptRefreshEngine::new(&fixture.runtime)
+                .refresh_with_factory_and_observer(
+                    MAIN,
+                    &fixture.custody,
+                    &fixture.transaction_id,
+                    SUBMITTED_AT + 1,
+                    || Ok(FakeReceiptSource::new(body)),
+                    &PanicObserver { checkpoint },
+                );
+            assert_eq!(
+                result.err(),
+                Some(WalletReceiptRefreshError::Runtime(
+                    WalletRuntimeError::RuntimeUnavailable
+                )),
+                "checkpoint: {checkpoint:?}"
+            );
+            assert_eq!(
+                fixture.runtime.begin_receipt_refresh(MAIN).err(),
+                Some(WalletRuntimeError::RuntimeUnavailable),
+                "checkpoint: {checkpoint:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_core_read_checkpoint_rejects_stop_restart_or_generation_change() {
+        enum Failure {
+            InitialIdentity,
+            Status,
+            StatusIdentity,
+            Lookup,
+            LookupIdentity,
+            FinalIdentity,
+        }
+        for failure in [
+            Failure::InitialIdentity,
+            Failure::Status,
+            Failure::StatusIdentity,
+            Failure::Lookup,
+            Failure::LookupIdentity,
+            Failure::FinalIdentity,
+        ] {
+            let fixture = Fixture::new();
+            let source = FakeReceiptSource::new(lookup_body(
+                &fixture.transaction,
+                &fixture.transaction_id,
+                &WalletReceiptObservation::Pending,
+            ));
+            match failure {
+                Failure::InitialIdentity => source.identity_error_at.set(Some(1)),
+                Failure::Status => source.status_error.set(true),
+                Failure::StatusIdentity => source.change_identity_at.set(Some(2)),
+                Failure::Lookup => source.lookup_error.set(true),
+                Failure::LookupIdentity => source.change_identity_at.set(Some(3)),
+                Failure::FinalIdentity => source.change_identity_at.set(Some(4)),
+            }
+            assert!(matches!(
+                fixture.refresh(&source, SUBMITTED_AT + 1),
+                Err(WalletReceiptRefreshError::CoreUnavailable)
+                    | Err(WalletReceiptRefreshError::CoreCompatibilityUnavailable)
+            ));
+            assert_eq!(
+                fixture.record().observation,
+                WalletReceiptObservation::NotFound
+            );
+        }
+    }
+
+    #[test]
+    fn authenticated_store_mutation_between_prepare_and_record_fails_closed() {
+        for target in ["journal", "envelope"] {
+            let fixture = Fixture::new();
+            let body = lookup_body(
+                &fixture.transaction,
+                &fixture.transaction_id,
+                &WalletReceiptObservation::Pending,
+            );
+            let path = if target == "journal" {
+                fixture.custody.journal_path().to_path_buf()
+            } else {
+                fixture
+                    ._directory
+                    .path()
+                    .join("wallet.signed-envelopes.v1.enc")
+            };
+            let observer = ActionObserver {
+                checkpoint: ReceiptRefreshCheckpoint::BeforeJournalWrite,
+                action: RefCell::new(Some(Box::new(move || {
+                    fs::write(path, b"{}").unwrap();
+                }))),
+            };
+            let result = WalletReceiptRefreshEngine::new(&fixture.runtime)
+                .refresh_with_factory_and_observer(
+                    MAIN,
+                    &fixture.custody,
+                    &fixture.transaction_id,
+                    SUBMITTED_AT + 1,
+                    || Ok(FakeReceiptSource::new(body)),
+                    &observer,
+                );
+            assert_eq!(
+                result.err(),
+                Some(WalletReceiptRefreshError::ActivityUnavailable),
+                "target: {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_lifecycle_paths_revoke_an_active_refresh() {
+        enum Event {
+            MainWindowDestroyed,
+            WalletLock,
+            Sleep,
+            Shutdown,
+        }
+        for event in [
+            Event::MainWindowDestroyed,
+            Event::WalletLock,
+            Event::Sleep,
+            Event::Shutdown,
+        ] {
+            let fixture = Fixture::new();
+            let body = lookup_body(
+                &fixture.transaction,
+                &fixture.transaction_id,
+                &WalletReceiptObservation::Pending,
+            );
+            let runtime = Arc::clone(&fixture.runtime);
+            let vault_path = fixture.custody.vault_path().to_path_buf();
+            let observer = ActionObserver {
+                checkpoint: ReceiptRefreshCheckpoint::LookupRead,
+                action: RefCell::new(Some(Box::new(move || match event {
+                    Event::MainWindowDestroyed => runtime.invalidate_all().unwrap(),
+                    Event::WalletLock => {
+                        crate::wallet::lifecycle::WalletLifecycleAdapters::for_test(
+                            Arc::clone(&runtime),
+                            &vault_path,
+                        )
+                        .lock()
+                        .unwrap();
+                    }
+                    Event::Sleep => {
+                        crate::wallet::windows_lifecycle::dispatch_native_security_event_for_test(
+                            Arc::clone(&runtime),
+                            crate::wallet::windows_lifecycle::WalletNativeSecurityEventForTest::Sleep,
+                        );
+                    }
+                    Event::Shutdown => {
+                        crate::wallet::windows_lifecycle::dispatch_native_security_event_for_test(
+                            Arc::clone(&runtime),
+                            crate::wallet::windows_lifecycle::WalletNativeSecurityEventForTest::Shutdown,
+                        );
+                    }
+                }))),
+            };
+            let result = WalletReceiptRefreshEngine::new(&fixture.runtime)
+                .refresh_with_factory_and_observer(
+                    MAIN,
+                    &fixture.custody,
+                    &fixture.transaction_id,
+                    SUBMITTED_AT + 1,
+                    || Ok(FakeReceiptSource::new(body)),
+                    &observer,
+                );
+            assert_eq!(
+                result.err(),
+                Some(WalletReceiptRefreshError::Runtime(
+                    WalletRuntimeError::RuntimeUnavailable
+                ))
+            );
+        }
     }
 
     #[test]

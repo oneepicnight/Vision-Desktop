@@ -170,6 +170,36 @@ impl Drop for WindowsWalletLifecycle {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(in crate::wallet) enum WalletNativeSecurityEventForTest {
+    Sleep,
+    Shutdown,
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn dispatch_native_security_event_for_test(
+    runtime: Arc<WalletRuntimeState>,
+    event: WalletNativeSecurityEventForTest,
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+    static NEXT_CLASS: AtomicU64 = AtomicU64::new(1);
+    let class_name = wide_null(&format!(
+        "{CLASS_PREFIX}.receipt-refresh.{}.{}",
+        std::process::id(),
+        NEXT_CLASS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let lifecycle = WindowsWalletLifecycle::register_with_class(runtime, class_name).unwrap();
+    let (message, wparam) = match event {
+        WalletNativeSecurityEventForTest::Sleep => (WM_POWERBROADCAST, PBT_APMSUSPEND as usize),
+        WalletNativeSecurityEventForTest::Shutdown => (WM_QUERYENDSESSION, 0),
+    };
+    // SAFETY: the lifecycle owner retains this exact live hidden window for the synchronous call.
+    unsafe { SendMessageW(lifecycle.window(), message, wparam, 0) };
+}
+
 unsafe extern "system" fn lifecycle_window_proc(
     window: HWND,
     message: u32,

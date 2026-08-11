@@ -440,7 +440,7 @@ fn prepare_with_source_inner(
         canonical_transaction_id(&unsigned_transaction).map_err(map_transaction_error)?;
     if let Some(custody) = custody {
         permit
-            .ensure_no_envelope_collision(custody, &transaction_id)
+            .ensure_envelope_store_accepts_transaction(custody, &transaction_id)
             .map_err(|_| WalletPreviewError::ActivityUnavailable)?;
     }
     let amount_display = format_vision_amount(amount_raw_units);
@@ -578,8 +578,10 @@ mod tests {
     use crate::wallet::{
         account::derive_account_identity,
         core_client::{WalletCoreAccountSnapshot, WalletCoreStatus},
+        envelope_store::{EnvelopeEntryInput, EnvelopeStore, EnvelopeStoreAuthenticator},
         journal::{append_accepted_submission, WalletJournalAuthenticator},
         lifecycle::WalletCustodyPathAuthority,
+        reconciliation::{ReconciliationAuthenticator, ReconciliationStore},
         secrets::{WalletPassword, WalletSeed},
         submission::WalletSubmissionOutcome,
         transaction::{canonical_transaction_id, sign_cash_transfer_for_test, CashTransferDraft},
@@ -1013,6 +1015,73 @@ mod tests {
             prepare_with_source_and_custody(
                 &permit,
                 request(&recipient, "1"),
+                &source(&sender),
+                &custody,
+            )
+            .err(),
+            Some(WalletPreviewError::ActivityUnavailable)
+        );
+    }
+
+    #[test]
+    fn real_preview_path_rejects_a_full_authenticated_store_before_installing_a_handle() {
+        let seed = WalletSeed::for_test(33);
+        let (runtime, sender) = unlocked_runtime(33);
+        let directory = tempfile::tempdir().unwrap();
+        crate::wallet::storage_security::protect_directory(directory.path()).unwrap();
+        let custody = WalletCustodyPathAuthority::issue_for_test_with_envelope_limit(
+            &directory.path().join("wallet.vault.json"),
+            1,
+        );
+        let stored_transaction = sign_cash_transfer_for_test(
+            &seed,
+            &CashTransferDraft {
+                nonce: 1,
+                recipient: "c".repeat(64),
+                amount_raw_units: 7,
+                tip_raw_units: 0,
+                fee_limit_raw_units: 201,
+            },
+        )
+        .unwrap();
+        let exact_body = serde_json::to_vec(&stored_transaction).unwrap();
+        let transaction_id = canonical_transaction_id(&stored_transaction).unwrap();
+        let mut digest =
+            blake3::Hasher::new_derive_key("com.vision.desktop.wallet-signed-envelope-digest.v1");
+        digest.update(&exact_body);
+        let body_digest = digest.finalize().to_hex();
+        let store = EnvelopeStore::for_custody(&custody).unwrap();
+        let authenticator = EnvelopeStoreAuthenticator::new("primary", &seed).unwrap();
+        let reconciliation = ReconciliationStore::for_custody(&custody).unwrap();
+        let reconciliation_authenticator =
+            ReconciliationAuthenticator::new("primary", &seed).unwrap();
+        let reservation = reconciliation
+            .reserve_prepared(&reconciliation_authenticator)
+            .unwrap();
+        store
+            .publish_prepared(
+                &authenticator,
+                EnvelopeEntryInput {
+                    wallet_id: "primary",
+                    attempt_id: &"11".repeat(32),
+                    transaction_id: &transaction_id,
+                    transaction: &stored_transaction,
+                    exact_body: &exact_body,
+                    signed_body_digest_hex: body_digest.as_str(),
+                    compatibility_contract_digest_hex: &"33".repeat(32),
+                    created_at_unix_ms: 1,
+                },
+                &reservation,
+            )
+            .unwrap();
+
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+            .unwrap();
+        assert_eq!(
+            prepare_with_source_and_custody(
+                &permit,
+                request(&"d".repeat(64), "1"),
                 &source(&sender),
                 &custody,
             )

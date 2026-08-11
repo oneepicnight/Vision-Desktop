@@ -58,6 +58,8 @@ const WALLET_ACTIVITY_FILE: &str = "wallet.activity.json";
 pub(in crate::wallet) struct WalletCustodyPathAuthority {
     vault_path: PathBuf,
     journal_path: PathBuf,
+    #[cfg(test)]
+    envelope_entry_limit: usize,
 }
 
 impl WalletCustodyPathAuthority {
@@ -74,6 +76,8 @@ impl WalletCustodyPathAuthority {
         Ok(Self {
             vault_path,
             journal_path: directory.join(WALLET_ACTIVITY_FILE),
+            #[cfg(test)]
+            envelope_entry_limit: usize::MAX,
         })
     }
 
@@ -88,6 +92,21 @@ impl WalletCustodyPathAuthority {
     #[cfg(test)]
     pub(in crate::wallet) fn issue_for_test(vault_path: &Path) -> Self {
         Self::issue(vault_path.to_path_buf()).expect("test custody path must be canonical")
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn issue_for_test_with_envelope_limit(
+        vault_path: &Path,
+        envelope_entry_limit: usize,
+    ) -> Self {
+        let mut authority = Self::issue_for_test(vault_path);
+        authority.envelope_entry_limit = envelope_entry_limit;
+        authority
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) const fn envelope_entry_limit_for_test(&self) -> usize {
+        self.envelope_entry_limit
     }
 }
 

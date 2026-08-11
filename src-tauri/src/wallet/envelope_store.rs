@@ -17,8 +17,9 @@ use once_cell::sync::Lazy;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use std::{
+    ffi::OsString,
     fs,
-    io::{Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
@@ -50,6 +51,7 @@ static STORE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 pub(super) struct EnvelopeStore {
     container_path: PathBuf,
     head_path: PathBuf,
+    entry_limit: usize,
 }
 
 pub(super) struct EnvelopeStoreAuthenticator {
@@ -121,9 +123,20 @@ enum RetentionState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EnvelopePublicationCheckpoint {
     BeforeHeadTransition,
+    HeadTransitionPersistence(PersistenceCheckpoint),
     HeadTransitionPublished,
+    ContainerPersistence(PersistenceCheckpoint),
     ContainerPublished,
+    CommittedHeadPersistence(PersistenceCheckpoint),
     HeadCommitted,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersistenceCheckpoint {
+    StagingWritten,
+    StagingFlushed,
+    Published,
+    ReadBackVerified,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -266,6 +279,16 @@ impl EnvelopeStore {
         Ok(Self {
             container_path: directory.join(STORE_FILE),
             head_path: directory.join(HEAD_FILE),
+            entry_limit: {
+                #[cfg(test)]
+                {
+                    custody.envelope_entry_limit_for_test().min(MAX_ENTRIES)
+                }
+                #[cfg(not(test))]
+                {
+                    MAX_ENTRIES
+                }
+            },
         })
     }
 
@@ -292,7 +315,7 @@ impl EnvelopeStore {
             .as_mut()
             .map(|container| std::mem::take(&mut container.entries))
             .unwrap_or_default();
-        if entries.len() >= MAX_ENTRIES {
+        if entries.len() >= self.entry_limit {
             return Err(EnvelopeStoreError::StoreFull);
         }
         entries.push(entry);
@@ -314,6 +337,7 @@ impl EnvelopeStore {
         Ok(authority)
     }
 
+    #[cfg(test)]
     pub(super) fn contains_transaction_id(
         &self,
         authenticator: &EnvelopeStoreAuthenticator,
@@ -336,6 +360,39 @@ impl EnvelopeStore {
                 .iter()
                 .any(|entry| entry.transaction_id == transaction_id)
         }))
+    }
+
+    pub(super) fn ensure_can_accept_transaction_id(
+        &self,
+        authenticator: &EnvelopeStoreAuthenticator,
+        transaction_id: &str,
+    ) -> Result<(), EnvelopeStoreError> {
+        if !is_lower_hex(transaction_id, 32) {
+            return Err(EnvelopeStoreError::InvalidRequest);
+        }
+        let _lock = lock_store()?;
+        validate_store_directory_health(&self.container_path)?;
+        if !self.container_path.try_exists().unwrap_or(true)
+            && !self.head_path.try_exists().unwrap_or(true)
+        {
+            return Ok(());
+        }
+        let loaded = self.load_authenticated_unlocked(authenticator)?;
+        let entries = loaded
+            .container
+            .as_ref()
+            .map(|container| container.entries.as_slice())
+            .unwrap_or_default();
+        if entries
+            .iter()
+            .any(|entry| entry.transaction_id == transaction_id)
+        {
+            return Err(EnvelopeStoreError::Collision);
+        }
+        if entries.len() >= self.entry_limit {
+            return Err(EnvelopeStoreError::StoreFull);
+        }
+        Ok(())
     }
 
     pub(super) fn ensure_ambiguous_binding(
@@ -788,13 +845,28 @@ impl EnvelopeStore {
         };
         authenticate_head(authenticator, &mut transition)?;
         observe(EnvelopePublicationCheckpoint::BeforeHeadTransition)?;
-        persist_json(&self.head_path, &transition, false, MAX_HEAD_BYTES)?;
+        persist_json_with_observer(
+            &self.head_path,
+            &transition,
+            false,
+            MAX_HEAD_BYTES,
+            |checkpoint| {
+                observe(EnvelopePublicationCheckpoint::HeadTransitionPersistence(
+                    checkpoint,
+                ))
+            },
+        )?;
         observe(EnvelopePublicationCheckpoint::HeadTransitionPublished)?;
-        persist_bytes(
+        persist_bytes_with_observer(
             &self.container_path,
             &encoded_wrapper,
             current_head.generation == 0,
             MAX_CONTAINER_BYTES,
+            |checkpoint| {
+                observe(EnvelopePublicationCheckpoint::ContainerPersistence(
+                    checkpoint,
+                ))
+            },
         )?;
         observe(EnvelopePublicationCheckpoint::ContainerPublished)?;
         let mut committed = EnvelopeHead {
@@ -809,7 +881,17 @@ impl EnvelopeStore {
             authentication_tag_hex: String::new(),
         };
         authenticate_head(authenticator, &mut committed)?;
-        persist_json(&self.head_path, &committed, false, MAX_HEAD_BYTES)?;
+        persist_json_with_observer(
+            &self.head_path,
+            &committed,
+            false,
+            MAX_HEAD_BYTES,
+            |checkpoint| {
+                observe(EnvelopePublicationCheckpoint::CommittedHeadPersistence(
+                    checkpoint,
+                ))
+            },
+        )?;
         observe(EnvelopePublicationCheckpoint::HeadCommitted)?;
         Ok(())
     }
@@ -1256,6 +1338,185 @@ mod tests {
             assert_eq!(recovered.container.is_some(), published);
             fs::remove_dir_all(directory).unwrap();
         }
+    }
+
+    fn granular_publication_checkpoints() -> [EnvelopePublicationCheckpoint; 12] {
+        use PersistenceCheckpoint::{Published, ReadBackVerified, StagingFlushed, StagingWritten};
+        [
+            EnvelopePublicationCheckpoint::HeadTransitionPersistence(StagingWritten),
+            EnvelopePublicationCheckpoint::HeadTransitionPersistence(StagingFlushed),
+            EnvelopePublicationCheckpoint::HeadTransitionPersistence(Published),
+            EnvelopePublicationCheckpoint::HeadTransitionPersistence(ReadBackVerified),
+            EnvelopePublicationCheckpoint::ContainerPersistence(StagingWritten),
+            EnvelopePublicationCheckpoint::ContainerPersistence(StagingFlushed),
+            EnvelopePublicationCheckpoint::ContainerPersistence(Published),
+            EnvelopePublicationCheckpoint::ContainerPersistence(ReadBackVerified),
+            EnvelopePublicationCheckpoint::CommittedHeadPersistence(StagingWritten),
+            EnvelopePublicationCheckpoint::CommittedHeadPersistence(StagingFlushed),
+            EnvelopePublicationCheckpoint::CommittedHeadPersistence(Published),
+            EnvelopePublicationCheckpoint::CommittedHeadPersistence(ReadBackVerified),
+        ]
+    }
+
+    fn checkpoint_leaves_staging(checkpoint: EnvelopePublicationCheckpoint) -> bool {
+        matches!(
+            checkpoint,
+            EnvelopePublicationCheckpoint::HeadTransitionPersistence(
+                PersistenceCheckpoint::StagingWritten | PersistenceCheckpoint::StagingFlushed
+            ) | EnvelopePublicationCheckpoint::ContainerPersistence(
+                PersistenceCheckpoint::StagingWritten | PersistenceCheckpoint::StagingFlushed
+            ) | EnvelopePublicationCheckpoint::CommittedHeadPersistence(
+                PersistenceCheckpoint::StagingWritten | PersistenceCheckpoint::StagingFlushed
+            )
+        )
+    }
+
+    fn checkpoint_has_new_container(checkpoint: EnvelopePublicationCheckpoint) -> bool {
+        matches!(
+            checkpoint,
+            EnvelopePublicationCheckpoint::ContainerPersistence(
+                PersistenceCheckpoint::Published | PersistenceCheckpoint::ReadBackVerified
+            ) | EnvelopePublicationCheckpoint::CommittedHeadPersistence(_)
+        )
+    }
+
+    fn remove_staging_files(directory: &Path) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(STAGING_PREFIX)
+            {
+                fs::remove_file(entry.path()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn every_atomic_persistence_boundary_recovers_only_an_exact_old_or_new_state() {
+        for checkpoint in granular_publication_checkpoints() {
+            let (directory, custody, seed, transaction) = fixture();
+            let (store, authenticator, _prepared) = publish_fixture(&custody, &seed, &transaction);
+            let mut loaded = store.load_authenticated_unlocked(&authenticator).unwrap();
+            let mut entries = std::mem::take(&mut loaded.container.as_mut().unwrap().entries);
+            entries[0].retention_state = RetentionState::Ambiguous;
+            assert_eq!(
+                store
+                    .publish_container_with_observer(
+                        &authenticator,
+                        &loaded.head,
+                        entries,
+                        |observed| {
+                            if observed == checkpoint {
+                                Err(EnvelopeStoreError::StorageUnavailable)
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .err(),
+                Some(EnvelopeStoreError::StorageUnavailable)
+            );
+            if checkpoint_leaves_staging(checkpoint) {
+                assert_eq!(
+                    store.load_authenticated_unlocked(&authenticator).err(),
+                    Some(EnvelopeStoreError::StorageUnavailable)
+                );
+                remove_staging_files(&directory);
+            }
+            let recovered = store.load_authenticated_unlocked(&authenticator).unwrap();
+            let expected = if checkpoint_has_new_container(checkpoint) {
+                RetentionState::Ambiguous
+            } else {
+                RetentionState::Prepared
+            };
+            assert_eq!(
+                recovered.container.unwrap().entries[0].retention_state,
+                expected
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn first_publication_at_every_atomic_boundary_is_absent_or_complete() {
+        for checkpoint in granular_publication_checkpoints() {
+            let (directory, custody, seed, transaction) = fixture();
+            let store = EnvelopeStore::for_custody(&custody).unwrap();
+            let authenticator = EnvelopeStoreAuthenticator::new("primary", &seed).unwrap();
+            let reconciliation = ReconciliationStore::for_custody(&custody).unwrap();
+            let reconciliation_authenticator =
+                ReconciliationAuthenticator::new("primary", &seed).unwrap();
+            let reservation = reconciliation
+                .reserve_prepared(&reconciliation_authenticator)
+                .unwrap();
+            let loaded = store.load_or_create_genesis(&authenticator).unwrap();
+            let body =
+                serialize_sensitive(&transaction, EnvelopeStoreError::InvalidRequest).unwrap();
+            let transaction_id = canonical_transaction_id(&transaction).unwrap();
+            let body_digest = digest_hex(BODY_DIGEST_CONTEXT, body.as_slice());
+            let entry = build_entry(
+                &authenticator,
+                EnvelopeEntryInput {
+                    wallet_id: "primary",
+                    attempt_id: &"11".repeat(32),
+                    transaction_id: &transaction_id,
+                    transaction: &transaction,
+                    exact_body: body.as_slice(),
+                    signed_body_digest_hex: &body_digest,
+                    compatibility_contract_digest_hex: &"33".repeat(32),
+                    created_at_unix_ms: 1,
+                },
+                &reservation,
+            )
+            .unwrap();
+            assert_eq!(
+                store
+                    .publish_container_with_observer(
+                        &authenticator,
+                        &loaded.head,
+                        vec![entry],
+                        |observed| {
+                            if observed == checkpoint {
+                                Err(EnvelopeStoreError::StorageUnavailable)
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .err(),
+                Some(EnvelopeStoreError::StorageUnavailable)
+            );
+            if checkpoint_leaves_staging(checkpoint) {
+                assert_eq!(
+                    store.load_authenticated_unlocked(&authenticator).err(),
+                    Some(EnvelopeStoreError::StorageUnavailable)
+                );
+                remove_staging_files(&directory);
+            }
+            let recovered = store.load_authenticated_unlocked(&authenticator).unwrap();
+            assert_eq!(
+                recovered.container.is_some(),
+                checkpoint_has_new_container(checkpoint)
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn directory_enumeration_errors_are_never_treated_as_healthy() {
+        assert_eq!(
+            contains_staging_entry(vec![
+                Ok(OsString::from("wallet.vault.json")),
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected enumeration failure",
+                )),
+            ])
+            .err(),
+            Some(EnvelopeStoreError::StorageUnavailable)
+        );
     }
 
     #[test]
@@ -2108,15 +2369,26 @@ fn persist_json<T: Serialize>(
     create_new: bool,
     maximum: usize,
 ) -> Result<(), EnvelopeStoreError> {
-    let bytes = serde_json::to_vec(value).map_err(|_| EnvelopeStoreError::InvalidRequest)?;
-    persist_bytes(path, &bytes, create_new, maximum)
+    persist_json_with_observer(path, value, create_new, maximum, |_| Ok(()))
 }
 
-fn persist_bytes(
+fn persist_json_with_observer<T: Serialize>(
+    path: &Path,
+    value: &T,
+    create_new: bool,
+    maximum: usize,
+    observe: impl FnMut(PersistenceCheckpoint) -> Result<(), EnvelopeStoreError>,
+) -> Result<(), EnvelopeStoreError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| EnvelopeStoreError::InvalidRequest)?;
+    persist_bytes_with_observer(path, &bytes, create_new, maximum, observe)
+}
+
+fn persist_bytes_with_observer(
     path: &Path,
     bytes: &[u8],
     create_new: bool,
     maximum: usize,
+    mut observe: impl FnMut(PersistenceCheckpoint) -> Result<(), EnvelopeStoreError>,
 ) -> Result<(), EnvelopeStoreError> {
     if bytes.is_empty() || bytes.len() > maximum {
         return Err(EnvelopeStoreError::StoreFull);
@@ -2137,20 +2409,61 @@ fn persist_bytes(
         .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
     staging
         .write_all(bytes)
-        .and_then(|_| staging.sync_all())
         .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
+    observe(PersistenceCheckpoint::StagingWritten)?;
+    staging
+        .sync_all()
+        .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
+    observe(PersistenceCheckpoint::StagingFlushed)?;
     storage_security::verify_open_file(&staging)
         .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
     if create_new {
-        publish_open_file(&staging, path).map_err(|_| EnvelopeStoreError::StorageUnavailable)
+        publish_open_file(&staging, path).map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
     } else {
         let existing =
             open_existing_file(path).map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
         storage_security::verify_open_file(&existing)
             .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
         drop(existing);
-        replace_with_open_file(&staging, path).map_err(|_| EnvelopeStoreError::StorageUnavailable)
+        replace_with_open_file(&staging, path)
+            .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
     }
+    observe(PersistenceCheckpoint::Published)?;
+    verify_published_bytes(&staging, bytes, maximum)?;
+    observe(PersistenceCheckpoint::ReadBackVerified)?;
+    Ok(())
+}
+
+fn verify_published_bytes(
+    published: &fs::File,
+    expected: &[u8],
+    maximum: usize,
+) -> Result<(), EnvelopeStoreError> {
+    storage_security::verify_open_file(published)
+        .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
+    let size = usize::try_from(
+        published
+            .metadata()
+            .map_err(|_| EnvelopeStoreError::StorageUnavailable)?
+            .len(),
+    )
+    .map_err(|_| EnvelopeStoreError::StoreFull)?;
+    if size != expected.len() || size == 0 || size > maximum {
+        return Err(EnvelopeStoreError::StorageUnavailable);
+    }
+    let mut file = published
+        .try_clone()
+        .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
+    let mut observed = Vec::with_capacity(size);
+    file.take(maximum as u64 + 1)
+        .read_to_end(&mut observed)
+        .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
+    if !constant_time_equal(&observed, expected) {
+        return Err(EnvelopeStoreError::StorageUnavailable);
+    }
+    Ok(())
 }
 
 fn read_protected(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, EnvelopeStoreError> {
@@ -2194,17 +2507,23 @@ fn validate_store_directory_health(path: &Path) -> Result<(), EnvelopeStoreError
         .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
     storage_security::verify_directory(parent)
         .map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
-    if fs::read_dir(parent)
+    let entries = fs::read_dir(parent)
         .map_err(|_| EnvelopeStoreError::StorageUnavailable)?
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(STAGING_PREFIX)
-        })
-    {
+        .map(|entry| entry.map(|entry| entry.file_name()));
+    if contains_staging_entry(entries)? {
         return Err(EnvelopeStoreError::StorageUnavailable);
     }
     Ok(())
+}
+
+fn contains_staging_entry(
+    entries: impl IntoIterator<Item = io::Result<OsString>>,
+) -> Result<bool, EnvelopeStoreError> {
+    for entry in entries {
+        let file_name = entry.map_err(|_| EnvelopeStoreError::StorageUnavailable)?;
+        if file_name.to_string_lossy().starts_with(STAGING_PREFIX) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

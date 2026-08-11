@@ -1033,7 +1033,7 @@ impl<'a> WalletOperationPermit<'a> {
         Ok(account)
     }
 
-    pub(in crate::wallet) fn ensure_no_envelope_collision(
+    pub(in crate::wallet) fn ensure_envelope_store_accepts_transaction(
         &self,
         custody: &WalletCustodyPathAuthority,
         transaction_id: &str,
@@ -1048,14 +1048,14 @@ impl<'a> WalletOperationPermit<'a> {
         let result = inner.session.with_seed(|wallet_id, seed| {
             let envelope_authenticator =
                 EnvelopeStoreAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
-            let envelope_collision = store
-                .contains_transaction_id(&envelope_authenticator, transaction_id)
+            store
+                .ensure_can_accept_transaction_id(&envelope_authenticator, transaction_id)
                 .map_err(|_| ())?;
             let journal_authenticator =
                 WalletJournalAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
             let journal = load_activity_journal(custody.journal_path(), &journal_authenticator)
                 .map_err(|_| ())?;
-            Ok::<bool, ()>(envelope_collision || journal.contains_transaction_id(transaction_id))
+            Ok::<bool, ()>(journal.contains_transaction_id(transaction_id))
         });
         if !self.is_current(&inner)
             || self.state.revocation_is_pending()
@@ -1437,9 +1437,7 @@ impl WalletSubmissionPermit<'_> {
         reservation: &ReconciliationReservation,
     ) -> Result<PreparedEnvelopeAuthority, WalletRuntimeError> {
         self.with_envelope_and_journal_auth(|authenticator, journal_authenticator| {
-            if store.contains_transaction_id(authenticator, input.transaction_id)? {
-                return Err(super::envelope_store::EnvelopeStoreError::Collision);
-            }
+            store.ensure_can_accept_transaction_id(authenticator, input.transaction_id)?;
             let journal = load_activity_journal(custody.journal_path(), journal_authenticator)
                 .map_err(|_| super::envelope_store::EnvelopeStoreError::AuthenticationFailed)?;
             if journal.contains_transaction_id(input.transaction_id) {

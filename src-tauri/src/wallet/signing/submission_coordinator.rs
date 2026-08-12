@@ -1228,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_not_found_nonce_movement_and_elapsed_polls_never_retry() {
+    fn repeated_not_found_after_observed_nonce_movement_never_retries() {
         let (runtime, sender) = unlocked_runtime();
         let writes = Arc::new(AtomicUsize::new(0));
         let lookup_body = Arc::new(Mutex::new(None));
@@ -1282,10 +1282,12 @@ mod tests {
             account_nonce: Arc::new(AtomicU64::new(99)),
             request_ledger: request_ledger.clone(),
         };
+        let advanced_account = source.account_snapshot(&source.address).unwrap();
+        assert_eq!(advanced_account.nonce, 99);
 
-        // Repeated polls stand in for arbitrarily long elapsed time. Only authenticated,
-        // read-only exact-envelope lookup is permitted after the single write attempt.
-        for _elapsed_poll_ms in [1_u64, 60_000, 86_400_000] {
+        // Canonical nonce movement cannot resolve an ambiguous signed envelope. Only
+        // authenticated, read-only exact-envelope lookup is permitted after the write attempt.
+        for _ in 0..3 {
             let reconciliation = runtime.begin_reconciliation_discovery(MAIN).unwrap();
             let restart = reconciliation.discover(&custody).unwrap().unwrap();
             assert!(matches!(

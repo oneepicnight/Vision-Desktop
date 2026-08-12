@@ -280,30 +280,34 @@ mod tests {
     use super::*;
     use crate::wallet::{
         account::derive_account_identity,
-        core_client::{WalletCoreAccountSnapshot, WalletCoreReadSource, WalletCoreStatus},
-        envelope_store::{EnvelopeEntryInput, EnvelopeStore, EnvelopeStoreAuthenticator},
+        core_client::{
+            WalletCoreAccountSnapshot, WalletCoreHttpResponse, WalletCoreReadSource,
+            WalletCoreStatus, WalletCoreSubmissionSource,
+        },
         journal::{
-            append_accepted_evidence, fail_next_receipt_append_for_test, load_activity_journal,
-            WalletJournalAuthenticator,
+            fail_next_receipt_append_for_test, load_activity_journal, WalletJournalAuthenticator,
         },
+        preview::{bind_consumed_preview_for_test, prepare_with_source_for_test},
+        public_request::WalletTransferPreviewRequest,
         receipt::WalletReceiptObservation,
-        reconciliation::{
-            AcceptedSubmissionEvidence, ReconciliationAuthenticator, ReconciliationStore,
-        },
+        reconciliation::CoreWriteOnce,
+        runtime::WalletOperationKind,
         secrets::{WalletPassword, WalletSeed},
+        signing::sign_and_submit_after_native_approval,
         storage_security,
-        submission::{compatibility_contract_digest, SubmissionRejectionPolicy},
+        submission::SubmissionRejectionPolicy,
         test_request_ledger::TestRequestLedger,
-        transaction::{
-            canonical_transaction_id, sign_cash_transfer_for_test, CashTransferDraft,
-            VisionTransaction,
-        },
+        transaction::{canonical_transaction_id, VisionTransaction},
+        transaction_confirmation::NativeConfirmationApproval,
         vault::EncryptedWalletVault,
     };
     use std::{
         cell::{Cell, RefCell},
         fs,
-        sync::{Arc, LazyLock, Mutex, MutexGuard},
+        sync::{
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+            Arc, LazyLock, Mutex, MutexGuard,
+        },
     };
     use zeroize::Zeroizing;
 
@@ -320,6 +324,18 @@ mod tests {
         seed: WalletSeed,
         transaction: VisionTransaction,
         transaction_id: String,
+        request_ledger: TestRequestLedger,
+        core: EndToEndCore,
+    }
+
+    #[derive(Clone)]
+    struct EndToEndCore {
+        address: String,
+        account_nonce: Arc<AtomicU64>,
+        tip_height: Arc<AtomicU64>,
+        lookup_body: Arc<Mutex<Vec<u8>>>,
+        submitted_transaction: Arc<Mutex<Option<VisionTransaction>>>,
+        writes: Arc<AtomicUsize>,
         request_ledger: TestRequestLedger,
     }
 
@@ -348,6 +364,135 @@ mod tests {
     struct ActionObserver {
         checkpoint: ReceiptRefreshCheckpoint,
         action: RefCell<Option<Box<dyn FnOnce()>>>,
+    }
+
+    impl EndToEndCore {
+        fn new(address: String) -> Self {
+            Self {
+                address,
+                account_nonce: Arc::new(AtomicU64::new(7)),
+                tip_height: Arc::new(AtomicU64::new(100)),
+                lookup_body: Arc::new(Mutex::new(Vec::new())),
+                submitted_transaction: Arc::new(Mutex::new(None)),
+                writes: Arc::new(AtomicUsize::new(0)),
+                request_ledger: TestRequestLedger::default(),
+            }
+        }
+
+        fn submitted_transaction(&self) -> VisionTransaction {
+            self.submitted_transaction
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("the real submission did not retain its exact transaction")
+        }
+
+        fn replace_observation(&self, observation: &WalletReceiptObservation) {
+            let transaction = self.submitted_transaction();
+            let transaction_id = canonical_transaction_id(&transaction).unwrap();
+            *self.lookup_body.lock().unwrap() =
+                lookup_body(&transaction, &transaction_id, observation);
+        }
+    }
+
+    impl WalletCoreReadSource for EndToEndCore {
+        fn account_snapshot(
+            &self,
+            _address: &str,
+        ) -> Result<WalletCoreAccountSnapshot, WalletCoreClientError> {
+            Ok(WalletCoreAccountSnapshot {
+                address: self.address.clone(),
+                exists: true,
+                balance: 10_000_000_000,
+                nonce: self.account_nonce.load(Ordering::SeqCst),
+            })
+        }
+
+        fn status(&self) -> Result<WalletCoreStatus, WalletCoreClientError> {
+            Ok(WalletCoreStatus {
+                version: SUPPORTED_STATUS_VERSION.to_string(),
+                canonical_tip_height: self.tip_height.load(Ordering::SeqCst),
+                canonical_tip_hash: "11".repeat(32),
+                peer_count: 1,
+                recovery_state: "normal".to_string(),
+            })
+        }
+
+        fn validated_identity_fingerprint(&self) -> Result<[u8; 32], WalletCoreClientError> {
+            Ok([0x31; 32])
+        }
+    }
+
+    impl WalletCoreReceiptSource for EndToEndCore {
+        fn transaction_lookup(
+            &self,
+            transaction_id: &str,
+        ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError> {
+            let body = self.lookup_body.lock().unwrap().clone();
+            self.request_ledger.record(
+                "GET",
+                format!("/transactions/{transaction_id}"),
+                transaction_id,
+                &[],
+                classify_lookup_outcome(&body),
+            );
+            Ok(Zeroizing::new(body))
+        }
+    }
+
+    impl WalletCoreSubmissionSource for EndToEndCore {
+        fn submit_once(
+            &self,
+            _authority: CoreWriteOnce,
+            exact_body: &[u8],
+        ) -> Result<WalletCoreHttpResponse, WalletCoreClientError> {
+            assert_eq!(
+                self.writes.fetch_add(1, Ordering::SeqCst),
+                0,
+                "the real submission authority was reused"
+            );
+            let transaction: VisionTransaction = serde_json::from_slice(exact_body).unwrap();
+            let transaction_id = canonical_transaction_id(&transaction).unwrap();
+            *self.submitted_transaction.lock().unwrap() = Some(transaction.clone());
+            self.request_ledger.record(
+                "POST",
+                "/transactions",
+                &transaction_id,
+                exact_body,
+                "accepted",
+            );
+            Ok(WalletCoreHttpResponse {
+                status: 200,
+                body: Zeroizing::new(
+                    serde_json::to_vec(&serde_json::json!({
+                        "status": "accepted",
+                        "tx_id": transaction_id,
+                        "current_nonce": transaction.nonce,
+                        "decision": {"kind": "accept"}
+                    }))
+                    .unwrap(),
+                ),
+            })
+        }
+    }
+
+    fn classify_lookup_outcome(body: &[u8]) -> &'static str {
+        serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| {
+                let found = value.get("found")?.as_bool()?;
+                if !found {
+                    return Some("not_found");
+                }
+                Some(
+                    if value.get("block_hash").is_some_and(|hash| !hash.is_null()) {
+                        "mined"
+                    } else {
+                        "pending"
+                    },
+                )
+            })
+            .unwrap_or("malformed")
     }
 
     impl ReceiptRefreshObserver for PanicObserver {
@@ -507,82 +652,6 @@ mod tests {
             );
             let seed = WalletSeed::for_test(0x31);
             let identity = derive_account_identity(&seed);
-            let transaction = sign_cash_transfer_for_test(
-                &seed,
-                &CashTransferDraft {
-                    nonce: 7,
-                    recipient: "22".repeat(32),
-                    amount_raw_units: 42,
-                    tip_raw_units: 0,
-                    fee_limit_raw_units: 201,
-                },
-            )
-            .unwrap();
-            assert_eq!(transaction.sender_pubkey, identity.address);
-            let transaction_id = canonical_transaction_id(&transaction).unwrap();
-            let exact_body = Zeroizing::new(serde_json::to_vec(&transaction).unwrap());
-            let request_ledger = TestRequestLedger::default();
-            request_ledger.record(
-                "POST",
-                "/transactions",
-                &transaction_id,
-                exact_body.as_slice(),
-                "accepted",
-            );
-            let mut body_hasher = blake3::Hasher::new_derive_key(
-                "com.vision.desktop.wallet-signed-envelope-digest.v1",
-            );
-            body_hasher.update(exact_body.as_slice());
-            let body_digest = body_hasher.finalize().to_hex().to_string();
-
-            let envelope_store = EnvelopeStore::for_custody(&custody).unwrap();
-            let envelope_authenticator = EnvelopeStoreAuthenticator::new("primary", &seed).unwrap();
-            let reconciliation_store = ReconciliationStore::for_custody(&custody).unwrap();
-            let reconciliation_authenticator =
-                ReconciliationAuthenticator::new("primary", &seed).unwrap();
-            let reservation = reconciliation_store
-                .reserve_prepared(&reconciliation_authenticator)
-                .unwrap();
-            let compatibility =
-                compatibility_contract_digest(&SubmissionRejectionPolicy::production());
-            let prepared = envelope_store
-                .publish_prepared(
-                    &envelope_authenticator,
-                    EnvelopeEntryInput {
-                        wallet_id: "primary",
-                        attempt_id: &"aa".repeat(32),
-                        transaction_id: &transaction_id,
-                        transaction: &transaction,
-                        exact_body: exact_body.as_slice(),
-                        signed_body_digest_hex: &body_digest,
-                        compatibility_contract_digest_hex: &compatibility,
-                        created_at_unix_ms: SUBMITTED_AT,
-                    },
-                    &reservation,
-                )
-                .unwrap();
-            let ambiguous = envelope_store
-                .mark_ambiguous(&envelope_authenticator, prepared)
-                .unwrap();
-            let accepted = envelope_store
-                .mark_accepted(&envelope_authenticator, ambiguous)
-                .unwrap();
-            let journal_authenticator = WalletJournalAuthenticator::new("primary", &seed).unwrap();
-            let evidence = AcceptedSubmissionEvidence::for_receipt_refresh_test(
-                "primary".to_string(),
-                transaction_id.clone(),
-                identity.address,
-                "22".repeat(32),
-                "42".to_string(),
-                7,
-                0,
-                201,
-                accepted.commitment_hex().to_string(),
-                SUBMITTED_AT,
-            );
-            append_accepted_evidence(custody.journal_path(), &journal_authenticator, &evidence)
-                .unwrap();
-
             let runtime = Arc::new(WalletRuntimeState::for_test());
             let password = WalletPassword::for_test(PASSWORD);
             let vault =
@@ -598,6 +667,41 @@ mod tests {
             unlock.complete(status).unwrap();
             drop(unlock);
 
+            let core = EndToEndCore::new(identity.address.clone());
+            let request: WalletTransferPreviewRequest = serde_json::from_value(serde_json::json!({
+                "recipient": "22".repeat(32),
+                "amount": "0.000000042"
+            }))
+            .unwrap();
+            let prepare = runtime
+                .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+                .unwrap();
+            let preview = prepare_with_source_for_test(&prepare, request, &core).unwrap();
+            drop(prepare);
+            let consume = runtime
+                .begin_operation(MAIN, WalletOperationKind::ConsumePreview)
+                .unwrap();
+            let intent = consume
+                .consume_transaction_preview(&preview.handle)
+                .unwrap();
+            let pending = bind_consumed_preview_for_test(consume, intent, core.clone()).unwrap();
+            let submission = sign_and_submit_after_native_approval(
+                pending,
+                NativeConfirmationApproval::issue_for_test(),
+                &custody,
+                SUBMITTED_AT,
+                &SubmissionRejectionPolicy::production(),
+            );
+            assert!(submission.is_ok(), "the real fixture submission failed");
+            let transaction = core.submitted_transaction();
+            assert_eq!(transaction.sender_pubkey, identity.address);
+            let transaction_id = canonical_transaction_id(&transaction).unwrap();
+            let request_ledger = core.request_ledger.clone();
+            request_ledger.assert_single_post_for_intent(
+                &transaction_id,
+                &serde_json::to_vec(&transaction).unwrap(),
+            );
+
             Self {
                 _fixture_guard: fixture_guard,
                 _directory: directory,
@@ -607,6 +711,7 @@ mod tests {
                 transaction,
                 transaction_id,
                 request_ledger,
+                core,
             }
         }
 
@@ -620,7 +725,7 @@ mod tests {
 
         fn refresh(
             &self,
-            source: &FakeReceiptSource,
+            source: &impl WalletCoreReceiptSource,
             observed_at: u64,
         ) -> Result<PrivateReceiptRefreshResult, WalletReceiptRefreshError> {
             WalletReceiptRefreshEngine::new(&self.runtime).refresh_with_source(
@@ -678,11 +783,9 @@ mod tests {
     fn receipt_state_machine_records_pending_mined_advancement_reorg_and_loss() {
         let fixture = Fixture::new();
         let pending = WalletReceiptObservation::Pending;
-        let source = FakeReceiptSource::with_ledger(
-            lookup_body(&fixture.transaction, &fixture.transaction_id, &pending),
-            fixture.request_ledger.clone(),
-        );
-        let first = fixture.refresh(&source, SUBMITTED_AT + 1).unwrap();
+        let source = &fixture.core;
+        source.replace_observation(&pending);
+        let first = fixture.refresh(source, SUBMITTED_AT + 1).unwrap();
         assert_eq!(first.change, WalletReceiptChange::FirstObservation);
         assert_eq!(first.record.observation, pending);
 
@@ -692,28 +795,20 @@ mod tests {
             tx_index: 2,
             confirmations: 11,
         };
-        source.replace_body(lookup_body(
-            &fixture.transaction,
-            &fixture.transaction_id,
-            &mined,
-        ));
-        let mined_result = fixture.refresh(&source, SUBMITTED_AT + 2).unwrap();
+        source.replace_observation(&mined);
+        let mined_result = fixture.refresh(source, SUBMITTED_AT + 2).unwrap();
         assert_eq!(mined_result.change, WalletReceiptChange::PendingToMined);
 
-        source.tip_height.set(110);
+        source.tip_height.store(110, Ordering::SeqCst);
         let advanced = WalletReceiptObservation::Mined {
             block_hash: "33".repeat(32),
             block_height: 90,
             tx_index: 2,
             confirmations: 21,
         };
-        source.replace_body(lookup_body(
-            &fixture.transaction,
-            &fixture.transaction_id,
-            &advanced,
-        ));
+        source.replace_observation(&advanced);
         assert_eq!(
-            fixture.refresh(&source, SUBMITTED_AT + 3).unwrap().change,
+            fixture.refresh(source, SUBMITTED_AT + 3).unwrap().change,
             WalletReceiptChange::ConfirmationsAdvanced
         );
 
@@ -723,47 +818,32 @@ mod tests {
             tx_index: 1,
             confirmations: 11,
         };
-        source.replace_body(lookup_body(
-            &fixture.transaction,
-            &fixture.transaction_id,
-            &reorganized,
-        ));
+        source.replace_observation(&reorganized);
         assert_eq!(
-            fixture.refresh(&source, SUBMITTED_AT + 4).unwrap().change,
+            fixture.refresh(source, SUBMITTED_AT + 4).unwrap().change,
             WalletReceiptChange::Reorganized
         );
 
-        source.replace_body(lookup_body(
-            &fixture.transaction,
-            &fixture.transaction_id,
-            &WalletReceiptObservation::Pending,
-        ));
+        source.replace_observation(&WalletReceiptObservation::Pending);
+        let returned_to_pending = fixture.refresh(source, SUBMITTED_AT + 60_000).unwrap();
+        assert_eq!(returned_to_pending.change, WalletReceiptChange::Reorganized);
         assert_eq!(
-            fixture
-                .refresh(&source, SUBMITTED_AT + 60_000)
-                .unwrap()
-                .change,
-            WalletReceiptChange::Reorganized
+            returned_to_pending.record.last_observed_at_unix_ms,
+            Some(SUBMITTED_AT + 60_000)
         );
 
-        source.replace_body(lookup_body(
-            &fixture.transaction,
-            &fixture.transaction_id,
-            &WalletReceiptObservation::NotFound,
-        ));
+        source.replace_observation(&WalletReceiptObservation::NotFound);
+        let lost = fixture.refresh(source, SUBMITTED_AT + 86_400_000).unwrap();
+        assert_eq!(lost.change, WalletReceiptChange::ObservationLost);
         assert_eq!(
-            fixture
-                .refresh(&source, SUBMITTED_AT + 86_400_000)
-                .unwrap()
-                .change,
-            WalletReceiptChange::ObservationLost
+            lost.record.last_observed_at_unix_ms,
+            Some(SUBMITTED_AT + 86_400_000)
         );
+        let unchanged = fixture.refresh(source, SUBMITTED_AT + 172_800_000).unwrap();
+        assert_eq!(unchanged.change, WalletReceiptChange::Unchanged);
         assert_eq!(
-            fixture
-                .refresh(&source, SUBMITTED_AT + 172_800_000)
-                .unwrap()
-                .change,
-            WalletReceiptChange::Unchanged
+            unchanged.record.last_observed_at_unix_ms,
+            Some(SUBMITTED_AT + 86_400_000)
         );
 
         let exact_body = serde_json::to_vec(&fixture.transaction).unwrap();
@@ -797,7 +877,7 @@ mod tests {
             .enumerate()
             .all(|(index, record)| record.attempt_number == index + 1
                 && record.route == format!("/transactions/{}", fixture.transaction_id)));
-        assert_eq!(source.lookup_calls.get(), 7);
+        assert_eq!(lookups.len(), 7);
     }
 
     #[test]

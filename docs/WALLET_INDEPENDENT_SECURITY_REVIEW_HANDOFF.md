@@ -169,8 +169,14 @@ fully compromised Windows user session.
    and during sensitive stages. The runtime suppresses results after revocation, but a completed
    atomic/create-new filesystem side effect may remain and sudden process termination during a
    Windows system call still requires external fault testing.
-9. The local activity journal is incomplete by design. Version 2 adds wallet-seed authentication, an authenticated event chain, handle-bound reads, copy-on-write atomic Windows publication, and a per-user global process lease across Windows sessions. Complete-prefix rollback, real console/RDP qualification, and abandoned protected staging-file policy still require review
-   before send activation.
+9. The local activity journal is incomplete by design. Version 2 adds wallet-seed authentication,
+   an authenticated event chain and independent head, handle-bound reads, recoverable copy-on-write
+   Windows publication, and a per-user global process lease. Coordinated rollback of both local
+   authenticated files or the complete Windows profile remains a documented residual risk. Wallet
+   custody support is limited to the exact Windows 11 Client build/edition matrix in
+   `WALLET_RUNTIME_SECURITY.md`, with one interactive session per account; every other build,
+   edition, Server/RDS, and multi-session host fails closed rather than awaiting console/RDP
+   qualification.
 10. The corrected support-package generator no longer reads raw Core logs or walks the report
     directory. It constructs an exact ten-file allowlist in memory, reduces configuration to
     non-identifying booleans/counts, uses fixed omission documents for logs/status/peers, rejects

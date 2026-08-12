@@ -47,8 +47,6 @@ same-user file injection cannot be swept into the ZIP by discovery.
 The configuration document includes only:
 
 - availability;
-- mode;
-- API and P2P ports;
 - configured peer count;
 - whether an advertised endpoint is configured;
 - whether mining is enabled;
@@ -56,7 +54,11 @@ The configuration document includes only:
 - whether data and log directories are configured.
 
 It excludes node names, exact peers, advertised hosts, payout addresses, data/log paths, public
-account addresses, and wallet ownership or activity.
+account addresses, operating mode, exact ports, and wallet ownership or activity.
+
+The public Tauri result is also minimized. React receives only the ZIP SHA-256 and fixed assessment;
+the native report-directory and ZIP paths never cross IPC. Native filesystem failures are mapped to
+one fixed pathless error.
 
 ## Fail-closed classification
 
@@ -79,8 +81,9 @@ occurs before the report directory or ZIP is created.
 Tests use distinct canaries for private-key, recovery, DPAPI, session, activation, and activity data.
 They place those canaries in every excluded configuration field and verify their absence from every
 directory and ZIP member. Each allowed file is then contaminated individually and must fail
-classification. Additional tests reject unexpected and duplicate files and verify that both logs
-contain only the omission notice.
+classification. Additional tests reject unexpected and duplicate files, verify that both logs
+contain only the omission notice, enforce the exact minimized configuration key set, and prove the
+serialized IPC result and public failures are pathless.
 
 Static Tauri authority tests prevent the support command from calling the log-tail reader and
 prevent the report generator from reintroducing directory walking or arbitrary log-tail inputs.
@@ -89,6 +92,6 @@ prevent the report generator from reintroducing directory walking or arbitrary l
 
 This correction requires independent re-review before custody commands are registered. Generated
 packages contain no wallet material, but they still expose the bundled Core version, source commit,
-binary hash, node mode, local port numbers, feature booleans, peer count, and generation timestamp.
-Operators should review packages before sharing them, and release qualification must include
-real-package inspection on a clean Windows account.
+binary hash, feature booleans, peer count, and generation timestamp. Operators should review
+packages before sharing them, and release qualification must include real-package inspection on a
+clean Windows account.

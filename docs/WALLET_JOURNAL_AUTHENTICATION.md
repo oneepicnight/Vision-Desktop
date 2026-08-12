@@ -2,9 +2,9 @@
 
 ## Status
 
-The private Rust wallet journal now uses schema version 2 and cryptographic tamper evidence. No
-journal, signing, submission, or wallet lifecycle command is registered with Tauri, and React has
-no access to the authenticator or wallet seed.
+The private Rust wallet journal uses schema version 2, cryptographic tamper evidence, and a separate
+authenticated head anchor. No journal, signing, submission, or wallet lifecycle command is
+registered with Tauri, and React has no access to the authenticator or wallet seed.
 
 ## Authentication anchor
 
@@ -35,6 +35,35 @@ The authenticated payload has a fixed versioned field order and covers:
 The first event is chained to an all-zero genesis tag. Tags are encoded as exact lowercase
 64-character hexadecimal values. Verification compares decoded tags without data-dependent early
 exit.
+
+## Independent head anchor
+
+The expected journal head is stored in a separate bounded, access-controlled file beside the
+journal. It uses a distinct seed-derived authentication key and domain from event authentication.
+Its authenticated payload covers:
+
+- an independent schema and version;
+- wallet identity;
+- monotonically increasing update generation;
+- committed or in-progress transaction state; and
+- exact previous and next sequence/tag positions.
+
+Loading a non-empty journal without its head fails closed. A valid older journal prefix no longer
+matches the committed head and is rejected. Missing, malformed, wrongly keyed, or modified heads
+also fail closed.
+
+Updates use a two-phase recoverable transaction:
+
+1. Atomically publish an authenticated transition from the verified old head to the expected new
+   head.
+2. Atomically publish the complete new journal.
+3. Atomically replace the transition with the authenticated committed head.
+
+If interruption occurs after step 1, the old journal remains valid and the transition is recovered
+to its old committed position. If interruption occurs after step 2, the new journal matches the
+transition's next position and recovery commits that position. Any other journal/head combination
+fails closed. Both files use the same handle-bound, reparse-aware, restrictive publication
+mechanism.
 
 ## Ownership rules
 
@@ -76,12 +105,38 @@ interrupted first write publishes no partial journal. Additional tests prove tha
 handle blocks replacement, publication remains tied to the staging handle, reparse-point journal
 files fail closed, and alternate data stream paths are rejected.
 
+## Proposed version 3 acceptance association
+
+`WALLET_AUTHENTICATED_ENVELOPE_STORAGE_DESIGN.md` requires a future internal journal schema version 3
+before receipt refresh can be implemented. Version 3 adds one field to each authenticated
+`Submitted` event and internal activity record:
+
+- `envelope_commitment_hex`: exactly 64 lowercase hexadecimal characters.
+
+The event chain and independent journal head authenticate this field. It is omitted from the public
+activity projection and cannot be supplied by React. It contains no signed body, signature, attempt
+identifier, reconciliation position, or path.
+
+The only constructor is the linear `AcceptedSubmissionEvidence` capability after it proves the same
+immutable commitment in the accepted envelope entry and authenticated reconciliation record. Journal
+read-back must verify the transaction identifier, all public transfer fields, and commitment before
+reconciliation reaches `ResolvedRecorded`.
+
+Receipt refresh must select the exact envelope by both authenticated journal transaction identifier
+and commitment. Identifier-only lookup is prohibited. Duplicate identifiers, duplicate commitments,
+a different valid signature, or a missing commitment fail closed.
+
+This section is design-only. The current implementation remains version 2. Version 2 cannot qualify
+atomic activation or receipt refresh, and no automatic migration is authorized while custody
+commands remain unregistered.
+
 ## Deliberate limitations
 
-Authentication proves that retained events were produced for this wallet and that the retained
-chain has not been modified or reordered. It does not prove completeness. An attacker who saved an
-older authentic complete prefix can replace the journal with that prefix because the latest head
-tag is not yet anchored in a separately protected, transactionally updated store.
+Authentication and the independent head detect modification, reordering, deletion, and replacement
+of the journal alone with an older valid prefix. A same-user attacker who captured and later rolls
+back both the journal and its matching authenticated head, or who rolls back the complete Windows
+profile/filesystem snapshot, remains outside what a local file-only anchor can detect. Stronger
+rollback guarantees require an approved external or hardware-backed monotonic anchor.
 
 The journal therefore remains non-authoritative local display history. It never supplies balances,
 nonces, signing decisions, retry decisions, receipt truth, or confidence by itself. Core remains
@@ -94,5 +149,6 @@ process lease now prevents two legitimate Desktop processes across console, fast
 or RDP sessions from replacing the journal from different snapshots. The journal's process-local
 mutex remains defense against overlapping operations within that sole owning process.
 
-Version 1 journals fail closed; no migration is enabled while custody commands remain
-unregistered.
+Version 1 journals and version 2 journals without a head fail closed; no migration is enabled while
+custody commands remain unregistered. This correction remains subject to independent re-review
+before signing or sending can rely on local history presentation.

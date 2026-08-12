@@ -37,6 +37,7 @@ fn manifest_dir() -> PathBuf {
 fn read(relative_path: &str) -> String {
     fs::read_to_string(manifest_dir().join(relative_path))
         .unwrap_or_else(|error| panic!("failed to read {relative_path}: {error}"))
+        .replace("\r\n", "\n")
 }
 
 fn expected_commands() -> BTreeSet<String> {
@@ -292,20 +293,60 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     let lifecycle_source = read("src/wallet/windows_lifecycle.rs");
     let recovery_selection_source = read("src/wallet/recovery_selection.rs");
     let wallet_adapter_source = read("src/wallet/lifecycle.rs");
+    let wallet_command_boundary_source = read("src/wallet/lifecycle_command_boundary.rs");
+    let layer_a_qualification_source =
+        read("src/wallet/lifecycle_command_boundary/generated_wrapper_qualification.rs");
+    let layer_b_source = read("qualification/wallet-layer-b/main.rs");
+    let layer_b_config = read("qualification/wallet-layer-b/tauri.conf.json");
+    let layer_b_permissions = read("qualification/wallet-layer-b/permissions/wallet-layer-b.toml");
+    let layer_b_page = read("qualification/wallet-layer-b/assets/index.html");
+    let layer_b_script = read("qualification/wallet-layer-b/assets/harness.js");
+    let layer_b_runner = read("qualification/wallet-layer-b/run-layer-b-qualification.ps1");
+    let product_config = read("tauri.conf.json");
+    let cargo_manifest = read("Cargo.toml");
+    let build_source = read("build.rs");
     let secure_filesystem_source = read("src/wallet/secure_filesystem.rs");
     let storage_security_source = read("src/wallet/storage_security.rs");
     let vault_source = read("src/wallet/vault.rs");
     let device_protection_source = read("src/wallet/device_protection.rs");
     let secret_input_source = read("src/wallet/secret_input.rs");
+    let secrets_source = read("src/wallet/secrets.rs");
+    let ceremony_source = read("src/wallet/recovery_ceremony.rs");
+    let ceremony_production = ceremony_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("native ceremony module has production source");
+    let panic_policy_source = read("src/wallet/panic_policy.rs");
+    let public_request_source = read("src/wallet/public_request.rs");
+    let public_request_production = public_request_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("public request module has production source");
     let capability_source = read("capabilities/main-desktop.json");
 
     assert!(lib_source.contains("wallet::WalletRuntimeState::initialize()"));
+    let panic_policy = lib_source
+        .find("wallet::install_production_panic_policy()")
+        .expect("silent panic policy is installed");
+    let wallet_runtime_initialization = lib_source
+        .find("wallet::WalletRuntimeState::initialize()")
+        .expect("wallet runtime is initialized");
+    assert!(panic_policy < wallet_runtime_initialization);
+    let panic_policy_production = panic_policy_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("panic policy has production source");
+    assert!(panic_policy_production.contains("std::panic::set_hook"));
+    assert!(!panic_policy_production.contains("eprintln!"));
+    assert!(!panic_policy_production.contains("println!"));
+    assert!(!panic_policy_production.contains("format!("));
     assert!(lib_source.contains("wallet::WindowsWalletLifecycle::register("));
     assert!(lib_source.contains("WindowsWalletLifecycle::register(Arc::clone("));
     assert!(lib_source.contains("&wallet_runtime"));
     assert!(lib_source.contains("app.manage(wallet_runtime)"));
     assert!(lib_source.contains("app.manage(wallet_lifecycle)"));
     assert!(lib_source.contains("wallet::WalletLifecycleAdapters::initialize("));
+    assert!(lib_source.contains("wallet::NativeWalletSecretCeremony::new("));
     assert!(lib_source.contains("app.path().local_data_dir()"));
     let wallet_adapter_production = wallet_adapter_source
         .split("#[cfg(test)]\nmod tests")
@@ -355,6 +396,201 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(lifecycle_source.contains("runtime.invalidate_all()"));
     assert!(!recovery_selection_source.contains("#[tauri::command]"));
     assert!(!wallet_adapter_source.contains("#[tauri::command]"));
+    assert!(!wallet_command_boundary_source.contains("#[tauri::command]"));
+    assert!(wallet_command_boundary_source.contains("impl<'a, R: Runtime> CommandArg<'a, R>"));
+    assert!(wallet_command_boundary_source.contains("command.message.payload()"));
+    assert!(wallet_command_boundary_source.contains("command.message.command()"));
+    assert!(wallet_command_boundary_source.contains("InvokeBody::Raw"));
+    assert!(wallet_command_boundary_source.contains("object.is_empty()"));
+    assert!(wallet_command_boundary_source.contains("object.len() != 1"));
+    assert!(wallet_command_boundary_source.contains("duplicate_key_rejection_proven: false"));
+    assert!(wallet_command_boundary_source.contains("WalletExposureAuthority"));
+    assert!(wallet_command_boundary_source.contains("MainWalletWindowAuthority"));
+    assert!(wallet_command_boundary_source.contains("BUNDLED_WINDOWS_ORIGIN"));
+    assert!(wallet_command_boundary_source.contains("BoundaryFailClosedGuard"));
+    assert!(!wallet_command_boundary_source.contains("derive(Debug, Serialize"));
+    assert!(!wallet_command_boundary_source.contains("impl Clone for WalletExposureAuthority"));
+    assert!(!wallet_command_boundary_source.contains("impl Clone for MainWalletWindowAuthority"));
+    assert!(!wallet_command_boundary_source.contains("pub struct WalletExposureAuthority"));
+    assert!(!wallet_command_boundary_source.contains("pub struct MainWalletWindowAuthority"));
+    assert!(wallet_command_boundary_source
+        .contains("#[cfg(all(test, feature = \"wallet-layer-a-qualification\"))]"));
+    assert_eq!(
+        layer_a_qualification_source
+            .match_indices("#[tauri::command]")
+            .count(),
+        7
+    );
+    for command in [
+        "fn wallet_get_status(",
+        "fn wallet_select_recovery_destination(",
+        "fn wallet_create(",
+        "fn wallet_select_recovery_source(",
+        "fn wallet_restore(",
+        "fn wallet_unlock(",
+        "fn wallet_lock(",
+    ] {
+        assert!(layer_a_qualification_source.contains(command));
+    }
+    assert!(layer_a_qualification_source.contains("tauri::generate_handler!["));
+    assert!(layer_a_qualification_source.contains("mock_builder()"));
+    assert!(layer_a_qualification_source.contains("tauri::test::get_ipc_response("));
+    assert!(layer_a_qualification_source.contains("MockRuntime"));
+    assert!(layer_a_qualification_source.contains("!policy.duplicate_key_rejection_proven"));
+    for forbidden in [
+        "WalletRuntimeState",
+        "WalletLifecycleAdapters",
+        "SecretInput",
+        "WalletSeed",
+        "CoreConnectionAuthority",
+        "SignedTransferArtifact",
+        "AppManifest",
+    ] {
+        assert!(!layer_a_qualification_source.contains(forbidden));
+    }
+    assert!(cargo_manifest.contains("wallet-layer-a-qualification = []"));
+    assert!(cargo_manifest.contains("tauri = { version = \"=2.11.5\", features = [\"test\"] }"));
+    assert!(build_source.contains("CARGO_FEATURE_WALLET_LAYER_A_QUALIFICATION"));
+    assert!(cargo_manifest.contains("wallet-layer-b-qualification = []"));
+    assert!(cargo_manifest.contains("name = \"vision-wallet-transport-qualification\""));
+    assert!(cargo_manifest.contains("required-features = [\"wallet-layer-b-qualification\"]"));
+    assert!(build_source.contains("CARGO_FEATURE_WALLET_LAYER_B_QUALIFICATION"));
+    assert!(build_source.contains("\"qualification/wallet-layer-b/permissions/*.toml\""));
+    assert!(!build_source.contains("QUALIFICATION_APPLICATION_COMMANDS"));
+    assert_eq!(
+        layer_b_source
+            .match_indices("qualification_command!(")
+            .count(),
+        7
+    );
+    for command in [
+        "wallet_get_status",
+        "wallet_select_recovery_destination",
+        "wallet_create",
+        "wallet_select_recovery_source",
+        "wallet_restore",
+        "wallet_unlock",
+        "wallet_lock",
+    ] {
+        assert!(layer_b_source.contains(command));
+    }
+    assert!(layer_b_source.contains("QualificationInvokeRequest"));
+    assert!(layer_b_source.contains("qualification_invoke_handler"));
+    assert_eq!(layer_b_source.match_indices("__cmd__wallet_").count(), 14);
+    assert!(layer_b_source.contains("QUALIFICATION_ARGUMENT"));
+    assert!(layer_b_source.contains("Layer B qualification mode was not explicitly requested"));
+    assert!(layer_b_source.contains("QUALIFICATION_WINDOW"));
+    assert!(layer_b_source.contains("QUALIFICATION_HOST"));
+    assert!(layer_b_source.contains("InvokeBody::Raw"));
+    assert!(layer_b_source.contains("FailClosedGuard"));
+    assert!(layer_b_source.contains("framework_route(request.headers, state.invoke_key())"));
+    assert!(layer_b_source.contains("custom_protocol_proven"));
+    assert!(layer_b_source.contains("post_message_proven"));
+    assert!(layer_b_source.contains("transport_route_inconclusive"));
+    assert!(layer_b_source.contains("qualification_transport_inconclusive"));
+    assert!(layer_b_source.contains("layer_b_terminal_observation"));
+    assert!(layer_b_source.contains("REPORT_PROTOCOL"));
+    assert!(layer_b_source.contains("CONTROL_PROTOCOL"));
+    assert!(layer_b_source.contains("window_authority_matches"));
+    assert!(layer_b_source.contains("window-recreated-main--"));
+    assert!(layer_b_source.contains("window-reloaded-generation--"));
+    assert!(layer_b_source.contains("window-destruction-race--"));
+    assert!(layer_b_source.contains("window-revocation-race--"));
+    assert!(!layer_b_source.contains("top_level_keys"));
+    assert!(!layer_b_source.contains("keys: Vec<String>"));
+    assert_eq!(layer_b_source.match_indices("guard.commit()").count(), 2);
+    for forbidden in [
+        "vision_desktop_lib",
+        "WalletRuntimeState",
+        "WalletLifecycleAdapters",
+        "WalletSeed",
+        "SecretInput",
+        "CoreConnectionAuthority",
+        "SignedTransferArtifact",
+        "WalletSubmission",
+    ] {
+        assert!(!layer_b_source.contains(forbidden));
+    }
+    assert!(layer_b_config.contains("com.vision.desktop.wallet-transport-qualification"));
+    assert!(layer_b_config.contains("wallet-transport-qualification"));
+    assert!(layer_b_config.contains("\"active\": false"));
+    assert!(layer_b_config.contains("\"local\": true"));
+    assert_eq!(
+        layer_b_permissions.match_indices("[[permission]]").count(),
+        7
+    );
+    for command in [
+        "wallet_get_status",
+        "wallet_select_recovery_destination",
+        "wallet_create",
+        "wallet_select_recovery_source",
+        "wallet_restore",
+        "wallet_unlock",
+        "wallet_lock",
+    ] {
+        assert!(layer_b_permissions.contains(&format!("commands.allow = [\"{command}\"]")));
+        assert!(!manifest_dir()
+            .join("permissions/autogenerated")
+            .join(format!("{command}.toml"))
+            .exists());
+    }
+    assert!(!product_config.contains("wallet-transport-qualification"));
+    assert!(!product_config.contains("wallet-layer-b-qualification"));
+    assert!(layer_b_page.contains("TEST-ONLY NON-CUSTODY HARNESS"));
+    assert!(layer_b_script.contains("official-invoke"));
+    assert!(layer_b_script.contains("internals-invoke"));
+    assert!(layer_b_script.contains("internals-ipc"));
+    assert!(layer_b_script.contains("internals-post-message"));
+    assert!(layer_b_script.contains("directFetchProbe"));
+    assert!(layer_b_script.contains("directXhrProbe"));
+    assert!(layer_b_script.contains("duplicateFamilies"));
+    assert!(layer_b_script.contains("nestedDuplicateFamilies"));
+    assert!(layer_b_script.contains("PUBLIC_LAYER_B_CANARY"));
+    assert!(layer_b_script.contains("PUBLIC_SECRET_KEY_NAME_CANARY"));
+    assert!(layer_b_script.contains("postRevocationProof"));
+    assert!(layer_b_script.contains("qualification-report"));
+    assert!(layer_b_script.contains("qualification-control"));
+    assert!(layer_b_script.contains("fallbackIntercepted"));
+    assert!(layer_b_script.contains("matrix_inconclusive"));
+    assert!(layer_b_script.contains("runConcurrentBatch"));
+    assert!(layer_b_script.contains("Promise.allSettled(pending)"));
+    assert!(layer_b_source.contains("BrowserVersionString"));
+    assert!(layer_b_source.contains("loaded_webview2_version"));
+    assert!(layer_b_source.contains("NativeDestructionObservation"));
+    assert!(layer_b_source.contains("native_hwnd_absent"));
+    assert!(layer_b_source.contains("native_destruction_records"));
+    assert!(layer_b_source.contains("structural_post_revocation_proven"));
+    assert!(layer_b_source.contains("valid_native_destruction_request"));
+    assert!(layer_b_source.contains("mismatch_declared_command"));
+    assert!(layer_b_script.contains("appendGeneratedWrapperCases"));
+    assert!(layer_b_script.contains("sequential-repeat"));
+    assert!(layer_b_script.contains("reordered-invoke"));
+    assert!(layer_b_script.contains("declared-invoked-mismatch"));
+    assert!(layer_b_script.contains("text/plain;charset=UTF-8"));
+    assert!(layer_b_runner.contains("Wait-QualificationProcess"));
+    assert!(layer_b_runner.contains("$Process.Kill()"));
+    assert!(layer_b_runner.contains("runner-flush-proof"));
+    assert!(!layer_b_runner.contains(".Kill($true)"));
+    assert!(layer_b_script.contains("duplicateFamilies('wallet_create')"));
+    assert!(layer_b_script.contains("['wallet_create', 'wallet_restore']"));
+    assert!(layer_b_runner.contains("Start-Process"));
+    assert!(layer_b_runner.contains("--wallet-layer-b-case=$case"));
+    assert!(layer_b_runner.contains("stdout_sha256"));
+    assert!(layer_b_runner.contains("stderr_sha256"));
+    assert!(layer_b_runner.contains("'Inconclusive'"));
+    assert!(layer_b_runner.contains("Test-Transcript"));
+    assert!(layer_b_runner.contains("layer_b_terminal_observation"));
+    assert!(layer_b_runner.contains("Get-WebView2Provenance"));
+    assert!(layer_b_runner.contains("Get-FrameworkProvenance"));
+    assert!(layer_b_runner.contains("Get-HarnessSourceHashes"));
+    assert!(layer_b_runner.contains("Get-TreeFingerprint"));
+    assert!(layer_b_runner.contains("ProductionExecutablePath"));
+    assert!(layer_b_runner.contains("ProductionInstallationRoot"));
+    assert!(layer_b_runner.contains("ProductionDataRoot"));
+    assert!(layer_b_runner.contains("actual_loaded_webview2_runtime_proven"));
+    assert!(!layer_b_script.contains("seed phrase"));
+    assert!(!layer_b_script.contains("private key"));
+    assert!(build_source.contains("cargo:rustc-link-arg=/MANIFESTINPUT:"));
     assert!(!secure_filesystem_source.contains("#[tauri::command]"));
     assert!(secure_filesystem_source.contains("FILE_FLAG_OPEN_REPARSE_POINT"));
     assert!(secure_filesystem_source.contains("SetFileInformationByHandle"));
@@ -376,7 +612,7 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
         wallet_adapter_production
             .match_indices(".run_authorized(")
             .count(),
-        12
+        13
     );
     assert_eq!(
         wallet_adapter_production
@@ -391,12 +627,33 @@ fn private_wallet_runtime_has_no_tauri_or_frontend_authority() {
     assert!(recovery_selection_source.contains("FILE_ATTRIBUTE_REPARSE_POINT"));
     assert!(recovery_selection_source.contains("begin_recovery_path_selection"));
     assert!(recovery_selection_source.contains("complete_recovery_path_selection"));
-    assert!(recovery_selection_source.contains("cancel_recovery_path_selection"));
+    assert!(recovery_selection_source.contains("SelectionFailClosedGuard"));
+    assert!(runtime_source.contains("impl Drop for RecoverySelectionPermit"));
     assert!(!secret_input_source.contains("#[tauri::command]"));
     assert!(!secret_input_source.contains("impl Serialize"));
-    assert!(!secret_input_source.contains("#[derive("));
+    assert!(!secret_input_source.contains("impl<'de> Deserialize"));
+    assert!(!secret_input_source.contains("serde_json"));
     assert!(!secret_input_source.contains("impl Clone"));
     assert!(!secret_input_source.contains("impl fmt::Debug"));
+    assert!(!secrets_source.contains("SecretString"));
+    assert!(secrets_source.contains("bytes: Zeroizing<Vec<u8>>"));
+    assert!(secrets_source.contains("logical_len: usize"));
+    assert!(!ceremony_source.contains("#[tauri::command]"));
+    assert!(!ceremony_source.contains("wide_null(\"EDIT\")"));
+    assert!(!ceremony_source.contains("wide_null(\"STATIC\")"));
+    assert!(!ceremony_source.contains("GetWindowTextW"));
+    assert!(!ceremony_source.contains("SetWindowTextW"));
+    assert!(ceremony_production.contains("ImmAssociateContextEx(window, null_mut(), 0)"));
+    assert!(ceremony_production.contains("ImmGetContext(window)"));
+    assert!(ceremony_production.contains("ImmReleaseContext(window, context)"));
+    assert!(ceremony_production.contains("disable_text_services(button)"));
+    assert!(!ceremony_production.contains("IACE_CHILDREN"));
+    assert!(!public_request_production.contains("#[tauri::command]"));
+    assert!(!public_request_production.contains("password:"));
+    assert!(!public_request_production.contains("owner_window:"));
+    assert!(wallet_adapter_production.contains("request: WalletCreateRequest"));
+    assert!(wallet_adapter_production.contains("request: WalletRestoreRequest"));
+    assert!(!public_request_production.contains("derive(Debug, Deserialize)"));
     assert!(!capability_source.contains("wallet"));
     assert!(!capability_source.contains("dialog:"));
     assert!(!read("../src/services/coreApi.ts").contains("wallet_"));
@@ -433,22 +690,45 @@ fn wallet_sensitive_authority_requires_runtime_activation_proof() {
     let transaction_source = read("src/wallet/transaction.rs");
     let vault_source = read("src/wallet/vault.rs");
 
-    assert!(activation_source.contains("INDEPENDENT_SECURITY_REVIEW_APPROVED: bool = false"));
+    assert!(
+        activation_source.contains("INDEPENDENT_LIFECYCLE_SECURITY_REVIEW_APPROVED: bool = false")
+    );
+    assert!(
+        activation_source.contains("INDEPENDENT_SIGNING_SECURITY_REVIEW_APPROVED: bool = false")
+    );
+    assert!(
+        activation_source.contains("INDEPENDENT_SUBMISSION_SECURITY_REVIEW_APPROVED: bool = false")
+    );
+    assert!(activation_source.contains("WalletActivationScope::Lifecycle"));
+    assert!(activation_source.contains("WalletActivationScope::Signing"));
+    assert!(activation_source.contains("WalletActivationScope::Submission"));
+    assert!(activation_source.contains("WalletActivationScope::Reconciliation"));
     assert!(activation_source.contains("WalletActivationRequirement::IndependentSecurityReview"));
     assert!(runtime_source.contains("activation: WalletActivationPolicy"));
     assert_eq!(
         runtime_source
-            .match_indices("self.require_activation()?;")
+            .match_indices("self.require_activation(")
             .count(),
-        2
+        4
     );
     assert!(runtime_source.contains("pub(in crate::wallet) struct WalletActivationProof"));
     assert_eq!(
         runtime_source
-            .match_indices("WalletActivationProof { _private: () }")
+            .match_indices("activation_proof: WalletActivationProof {")
             .count(),
-        1
+        5
     );
+    assert!(runtime_source.contains("pub(in crate::wallet) fn promote_to_signing("));
+    assert!(runtime_source.contains("if matches!("));
+    assert!(runtime_source.contains("WalletOperationKind::Sign"));
+    assert!(runtime_source.contains("WalletOperationKind::Submit"));
+    assert!(runtime_source.contains("WalletOperationKind::Reconcile"));
+    assert!(runtime_source.contains("WalletOperationKind::Refresh"));
+    assert!(runtime_source.contains("return Err(WalletRuntimeError::InvalidRequest)"));
+    assert!(runtime_source.contains("scope: WalletActivationScope"));
+    assert!(runtime_source.contains("pub(in crate::wallet) fn require_signing"));
+    assert!(runtime_source.contains("pub(in crate::wallet) fn require_submission"));
+    assert!(runtime_source.contains("pub(in crate::wallet) fn require_reconciliation"));
     assert!(runtime_source.contains("activation_proof: WalletActivationProof"));
     assert!(runtime_source.contains("WalletRuntimeError::ActivationUnavailable"));
     assert!(cargo_manifest.contains("argon2 = { version = \"0.5.3\", features = [\"zeroize\"] }"));
@@ -463,6 +743,7 @@ fn wallet_sensitive_authority_requires_runtime_activation_proof() {
     assert!(!ceremony_production.contains("SetClipboardData"));
     assert!(!ceremony_production.contains("OpenClipboard"));
     assert!(!lifecycle_source.contains("WalletCreationResult"));
+    assert!(transaction_source.contains(".require_signing()"));
 
     let create_flow = lifecycle_source
         .split("fn create_at(")
@@ -490,7 +771,7 @@ fn wallet_sensitive_authority_requires_runtime_activation_proof() {
         vault_source,
     ] {
         assert!(source.contains("&WalletActivationProof"));
-        assert!(!source.contains("WalletActivationProof { _private: () }"));
+        assert!(!source.contains("WalletActivationProof {"));
         assert!(!source.contains("#[tauri::command]"));
     }
 }

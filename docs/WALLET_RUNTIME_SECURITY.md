@@ -11,14 +11,40 @@ the WebView and no wallet command can invoke it yet.
 The runtime exists so lifecycle and exclusion controls are established before any secret-bearing
 command is designed or exposed.
 
+## Supported Windows host matrix
+
+Wallet custody is limited to one interactive session per Windows account on these Windows 11
+release families:
+
+- 24H2, build family 26100;
+- 25H2, build family 26200; and
+- 26H1, build family 28000.
+
+Within those build families, the exact non-evaluation edition allowlist is:
+
+- Home, Home N, Home China, and Home Single Language;
+- Pro and Pro N;
+- Pro for Workstations and Pro for Workstations N;
+- Pro Education and Pro Education N;
+- Enterprise and Enterprise N;
+- Enterprise LTSC and Enterprise LTSC N; and
+- Education and Education N.
+
+Windows 10, evaluation editions, Enterprise E/G, Pro Single Language, Windows SE, Cloud editions,
+Server/RDS, Enterprise multi-session, IoT, unlisted editions, unknown values, and future Windows
+versions or build families are deliberately unsupported. Supporting another host requires a code,
+test, documentation, and independent-review update; it is never inferred from a broad Client label.
+
 ## Independent process ownership
 
 The runtime atomically creates a per-user Windows kernel mutex in the global namespace:
 `Global\com.vision.desktop.wallet-runtime.v2.<BLAKE3-user-SID>`. It retains the non-inheritable
 handle for the runtime's entire lifetime. The SID is hashed before it enters the name, and the
 object DACL grants access only to the current user, Local System, and built-in administrators. A
-second process for the same Windows user in any console, fast-user-switching, or RDP session cannot
-create wallet runtime state and fails closed with a fixed, non-sensitive startup error.
+second process for the same Windows user cannot create wallet runtime state and fails closed with a
+fixed, non-sensitive startup error. The kernel object is global across Windows sessions as defense
+in depth, but the supported product boundary is the exact matrix above. Concurrent same-account
+Windows Server/RDS and other multi-session environments are unsupported.
 
 This lock is independent of the Tauri single-instance plugin and closes the reviewed interval
 between that plugin's Windows mutex creation and hidden receiver-window creation. Normal duplicates
@@ -64,17 +90,18 @@ The adapters are managed only as private Rust state. No Tauri command exposes th
 
 ## Secret input
 
-`SecretInput` is a dedicated custom-deserialized Rust type with a 1,024-byte UTF-8 ceiling. It:
+`SecretInput` is a Rust-native ownership type with a 1,024-byte UTF-8 ceiling. It is constructed
+only by a fixed-allocation native ceremony and:
 
-- accepts only a string value;
-- owns a zeroizing buffer;
-- moves that buffer into the existing `WalletPassword` wrapper;
+- has no Serde implementation and cannot be constructed from Tauri JSON;
+- preallocates the maximum UTF-8 buffer before controlled UTF-16 conversion and never grows it;
+- moves the controlled allocation into the existing `WalletPassword` wrapper;
 - implements no response serialization, clone, display, or debug interface;
 - returns no submitted value, length, or content in its validation error.
 
-This bounds the Rust-owned command value but cannot erase copies created by JavaScript, WebView IPC,
-or the upstream JSON parser. Frontend custody remains disabled until isolated password forms and
-immediate clearing receive independent review.
+No secret crosses JavaScript, WebView IPC, the upstream JSON parser, frontend state, or DOM controls.
+Frontend custody remains disabled until the native ceremony implementation and complete lifecycle
+boundary receive independent review.
 
 ## Recovery selection and authorization
 
@@ -176,5 +203,14 @@ sole runtime owner after that mutex is released.
 Automated validation on 2026-08-03 replaced the session-local mutex with the per-user global
 process lease. A spawned child process acquired the real protected object, the parent failed closed
 while that child was alive, the child was forcibly terminated, and the parent then acquired the
-same name successfully. Release qualification still requires console/RDP and fast-user-switching
-exercises on supported Windows installations.
+same name successfully. Release qualification requires the same exclusion, normal release, and
+forced-termination recovery in the supported single interactive session. Concurrent same-account
+console/RDP, Fast User Switching, Windows Server/RDS, and multi-session virtual desktop operation
+remain unsupported rather than silently qualified.
+
+Runtime initialization obtains the actual Windows major, minor, build, service-pack, and product
+family through native `RtlGetVersion`, requires the workstation family and one of the three reviewed
+build families, and passes the actual version into `GetProductInfo`. Only the exact named edition
+allowlist above is accepted. This prevents a future release from entering custody through
+`GetProductInfo` backward product mapping. Any API failure or unlisted identity returns the fixed
+`unsupported_windows_host` error before the wallet process lease or custody state is created.

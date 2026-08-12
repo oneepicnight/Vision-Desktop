@@ -143,8 +143,12 @@ fn rename_open_file(file: &File, destination: &Path, replace_existing: bool) -> 
         .checked_mul(size_of::<u16>())
         .and_then(|size| u32::try_from(size).ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "vault path is too long"))?;
+    // `FileNameLength` excludes a terminator, but reserve and retain one UTF-16 NUL after the
+    // flexible array. Some Windows paths otherwise land exactly on the allocation boundary and
+    // can be published with trailing garbage despite the explicit byte count.
     let buffer_size = offset_of!(FILE_RENAME_INFO, FileName)
         .checked_add(name_bytes as usize)
+        .and_then(|size| size.checked_add(size_of::<u16>()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "vault path is too long"))?;
     let buffer_size_u32 = u32::try_from(buffer_size)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "vault path is too long"))?;
@@ -275,6 +279,29 @@ mod tests {
         let second = create_new_publishable_file(&second_stage).unwrap();
         assert!(publish_open_file(&second, &final_path).is_err());
         assert_eq!(fs::read(&final_path).unwrap(), b"encrypted-vault");
+    }
+
+    #[test]
+    fn publication_preserves_the_exact_utf16_filename_at_allocation_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let guarded = directory.path().join("guarded");
+        let _guard = DirectoryChainGuard::ensure(&guarded).unwrap();
+        let staged_path = guarded.join("stage.bin");
+        let destination = guarded.join("wallet.submission-reconciliation.json");
+        let mut staged = create_new_publishable_file(&staged_path).unwrap();
+        staged.write_all(b"authenticated-record").unwrap();
+        staged.sync_all().unwrap();
+        publish_open_file(&staged, &destination).unwrap();
+
+        let entries = fs::read_dir(&guarded)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            vec!["wallet.submission-reconciliation.json".to_string()]
+        );
+        assert_eq!(fs::read(destination).unwrap(), b"authenticated-record");
     }
 
     #[test]

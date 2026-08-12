@@ -362,7 +362,7 @@ mod tests {
     const WALLET_PASSWORD: &str = "local wallet password";
 
     fn password(value: &str) -> WalletPassword {
-        WalletPassword::new(value.to_string())
+        WalletPassword::for_test(value)
     }
 
     #[test]

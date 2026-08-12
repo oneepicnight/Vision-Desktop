@@ -81,7 +81,18 @@ The exact route is `POST /transactions` with the canonical signed transaction JS
 
 The Rust-only Desktop response parser requires the returned transaction identifier and accepted nonce to match the reviewed transaction. It rejects unknown shapes and error codes, refuses an unapproved replacement even when Core returns HTTP `200`, and never treats an HTTP success alone as proof that a transaction was mined or final. No network submission command is registered yet.
 
-This satisfies the Desktop `SubmissionResponse` gate.
+These verified response shapes do not establish which HTTP `400` or `422` outcomes are guaranteed
+to occur before mempool or chain insertion. The current Desktop compatibility contract therefore has
+an empty definitive-rejection allowlist. In particular, `duplicate_canonical_tx_id` and
+`duplicate_sender_nonce` remain ambiguous until a read-only point lookup returns the exact signed
+envelope and Desktop verifies its body digest and signature. Every other rejection code remains
+`OutcomeUnknown` unless a future versioned Core contract explicitly supplies, qualifies, and
+independently reviews a non-mutating guarantee for that exact code.
+
+This satisfies only the response-shape portion of the Desktop `SubmissionResponse` gate.
+Definitive-rejection semantics remain unmet until the versioned compatibility contract provides the
+reviewed non-mutating allowlist. The private submission design therefore requires a separate
+`SubmissionRejectionSemantics` compatibility gate before production write authority can exist.
 
 ## Verified receipt observations and unresolved finality
 
@@ -115,7 +126,7 @@ RC2 exposes exact point lookup by transaction identifier, but it does not expose
 2. Keep all sending disabled until Vision-Core exposes a typed, paginated account-history API whose ordering and reorganization behavior are specified.
 3. Scan the chain inside Desktop to reconstruct account history. This is not recommended because it duplicates indexing behavior, increases resource use, and creates another protocol-coupled implementation.
 
-The recommended first-release source was approved on 2026-08-01. The internal version 2 journal records the transaction identifier, public sender and recipient, exact raw amount, nonce, tip, fee limit, timestamps, and validated receipt observations. It excludes signed bytes, signatures, vault credentials, signing seeds, recovery material, and plaintext secrets. Each event carries a domain-separated BLAKE3 tag keyed by a dedicated wallet-seed-derived subkey and the preceding event tag. Loading verifies wallet ownership, sender identity, event content, sequence, and chain order before exposing records. Corruption and authentication failure are indistinguishable and fail closed. Windows journal reads are handle-bound and reparse-aware; updates atomically publish a fully flushed protected replacement rather than appending in place. A per-user global process lease excludes a second wallet runtime across Windows sessions. The journal remains display metadata only and is never an authority for balances, nonces, signing, or transaction success. A complete rollback to an older authentic prefix remains possible until an external protected head anchor is designed.
+The recommended first-release source was approved on 2026-08-01. The internal version 2 journal records the transaction identifier, public sender and recipient, exact raw amount, nonce, tip, fee limit, timestamps, and validated receipt observations. It excludes signed bytes, signatures, vault credentials, signing seeds, recovery material, and plaintext secrets. Each event carries a domain-separated BLAKE3 tag keyed by a dedicated wallet-seed-derived subkey and the preceding event tag. Loading verifies wallet ownership, sender identity, event content, sequence, and chain order before exposing records. Corruption and authentication failure are indistinguishable and fail closed. Windows journal reads are handle-bound and reparse-aware; updates atomically publish a fully flushed protected replacement rather than appending in place. A separate seed-authenticated head file binds the exact expected sequence and event tag through a recoverable transition/commit protocol, so replacement of the journal alone with an older authentic prefix fails closed. A per-user global process lease excludes a second wallet runtime across Windows sessions. The journal remains display metadata only and is never an authority for balances, nonces, signing, or transaction success. Coordinated rollback of both authenticated files, or rollback of the complete Windows profile/filesystem snapshot, remains outside what a local file-only anchor can detect.
 
 ## Product decision: private Core connectivity
 

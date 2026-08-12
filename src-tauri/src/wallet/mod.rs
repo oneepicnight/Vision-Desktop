@@ -8,13 +8,29 @@ mod account;
 mod activation;
 mod amount;
 mod contract;
+#[cfg(windows)]
+mod core_client;
 mod device_protection;
+#[cfg(windows)]
+mod envelope_store;
 mod journal;
 mod kdf;
 #[cfg(windows)]
 mod lifecycle;
+#[cfg(windows)]
+mod lifecycle_command_boundary;
+#[cfg(windows)]
+mod native_secret_buffer;
 mod onboarding;
+mod panic_policy;
+#[cfg(windows)]
+mod preview;
+mod public_request;
 mod receipt;
+#[cfg(windows)]
+mod receipt_refresh;
+#[cfg(windows)]
+mod reconciliation;
 mod recovery;
 #[cfg(windows)]
 mod recovery_ceremony;
@@ -26,9 +42,15 @@ mod secrets;
 #[cfg(windows)]
 mod secure_filesystem;
 mod session;
+#[cfg(windows)]
+mod signing;
 mod storage_security;
 mod submission;
+#[cfg(all(test, windows))]
+mod test_request_ledger;
 mod transaction;
+#[cfg(windows)]
+mod transaction_confirmation;
 mod vault;
 #[cfg(windows)]
 mod windows_lifecycle;
@@ -40,8 +62,11 @@ pub use contract::{
 };
 #[cfg(windows)]
 pub(crate) use lifecycle::WalletLifecycleAdapters;
+pub(crate) use panic_policy::install_production_panic_policy;
 #[cfg(windows)]
 pub(crate) use recovery_ceremony::NativeRecoveryCredentialCeremony;
+#[cfg(windows)]
+pub(crate) use recovery_ceremony::NativeWalletSecretCeremony;
 pub(crate) use runtime::WalletRuntimeState;
 pub use secrets::WalletSeed;
 #[cfg(windows)]

@@ -8,18 +8,45 @@
 
 use super::{
     account::derive_account_identity,
-    activation::WalletActivationPolicy,
+    activation::{WalletActivationPolicy, WalletActivationScope},
     contract::{WalletAccountSummary, WalletLifecycleStatus, WalletPublicMetadata},
+    core_client::WalletCoreReceiptSource,
+    envelope_store::{
+        AcceptedEnvelopeAuthority, AmbiguousEnvelopeAuthority, EnvelopeEntryInput,
+        EnvelopeRefreshAuthority, EnvelopeStore, EnvelopeStoreAuthenticator,
+        PreparedEnvelopeAuthority,
+    },
+    journal::{
+        append_accepted_evidence, append_receipt_observation, load_activity_journal,
+        WalletActivityJournal, WalletActivityRecord, WalletJournalAuthenticator,
+    },
+    lifecycle::WalletCustodyPathAuthority,
+    preview::BoundTransferPreview,
+    receipt::{prove_exact_reconciliation_lookup, WalletReceiptObservation},
+    reconciliation::{
+        AcceptedRecordingAuthority, AcceptedSubmissionEvidence, LiveReconciliationAuthority,
+        MayHaveBeenSubmittedAuthority, PreparedReconciliationAuthority,
+        ReconciliationAuthenticator, ReconciliationDiscoveryPermit, ReconciliationError,
+        ReconciliationPhaseTag, ReconciliationRecord, ReconciliationReservation,
+        ReconciliationStore, RestartReconciliationPermit, SubmissionActivationGrant,
+    },
     secrets::WalletPassword,
     session::{WalletSession, WalletSessionError},
+    submission::{compatibility_contract_digest, SubmissionRejectionPolicy},
+    transaction::{
+        canonical_transaction_id, sign_confirmed_cash_transfer, TransactionSigningObserver,
+        VisionTransaction, WalletTransactionError,
+    },
+    transaction_confirmation::NativeConfirmationApproval,
     vault::EncryptedWalletVault,
 };
+use serde::Deserialize;
 use std::{
     fmt,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard,
     },
     time::Instant,
 };
@@ -33,6 +60,9 @@ const PATH_TOKEN_BYTES: usize = 32;
 const PATH_TOKEN_HEX_BYTES: usize = PATH_TOKEN_BYTES * 2;
 const PATH_TOKEN_TTL_MS: u64 = 2 * 60 * 1000;
 const WALLET_PROCESS_MUTEX_BASE: &str = "com.vision.desktop.wallet-runtime.v2";
+const TRANSACTION_PREVIEW_TOKEN_BYTES: usize = 32;
+const TRANSACTION_PREVIEW_TOKEN_HEX_BYTES: usize = TRANSACTION_PREVIEW_TOKEN_BYTES * 2;
+pub(in crate::wallet) const TRANSACTION_PREVIEW_TTL_MS: u64 = 60 * 1000;
 
 /// Rust-only wallet authority owned by the application process.
 ///
@@ -52,6 +82,7 @@ struct WalletRuntimeInner {
     active_operation: Option<ActiveOperation>,
     pending_path_selection: Option<PendingPathSelection>,
     path_authorization: Option<PathAuthorization>,
+    transaction_preview: Option<PendingTransactionPreview>,
     public_account: Option<WalletAccountSummary>,
     next_generation: u64,
 }
@@ -59,7 +90,7 @@ struct WalletRuntimeInner {
 struct ActiveOperation {
     generation: u64,
     owner_window: String,
-    _kind: WalletOperationKind,
+    kind: WalletOperationKind,
 }
 
 struct PendingPathSelection {
@@ -75,6 +106,25 @@ struct PathAuthorization {
     selected_path: PathBuf,
     issued_at_ms: u64,
 }
+struct PendingTransactionPreview {
+    token: Zeroizing<String>,
+    owner_window: String,
+    wallet_id: String,
+    issued_at_ms: u64,
+    revocation_epoch: u64,
+    intent: BoundTransferPreview,
+}
+
+pub(in crate::wallet) struct TransactionPreviewInstallReceipt {
+    handle: String,
+    issued_at_ms: u64,
+}
+
+impl TransactionPreviewInstallReceipt {
+    pub(in crate::wallet) fn into_parts(self) -> (String, u64) {
+        (self.handle, self.issued_at_ms)
+    }
+}
 
 struct WalletProcessLock {
     _platform_lock: platform::ProcessLock,
@@ -85,19 +135,108 @@ pub(in crate::wallet) struct WalletOperationPermit<'a> {
     generation: u64,
     revocation_epoch: u64,
     owner_window: String,
+    kind: WalletOperationKind,
     activation_proof: WalletActivationProof,
+    armed: bool,
+}
+
+/// Linear signing authority produced only by atomic promotion of the live confirmation permit.
+///
+/// This type intentionally implements neither Clone, Debug, nor serialization. Dropping it before
+/// successful completion invalidates the wallet session and all outstanding authority.
+pub(in crate::wallet) struct WalletSigningPermit<'a> {
+    permit: WalletOperationPermit<'a>,
+    wallet_id: String,
+    armed: bool,
+}
+
+/// Linear submission authority produced only by atomic promotion of a live signing permit.
+///
+/// Dropping an armed value revokes the complete wallet session. This type intentionally has no
+/// Clone, Debug, Display, or serialization implementation.
+pub(in crate::wallet) struct WalletSubmissionPermit<'a> {
+    permit: WalletOperationPermit<'a>,
+    wallet_id: String,
+    core_identity_fingerprint: [u8; 32],
+    activation_grant: Option<SubmissionActivationGrant>,
+    armed: bool,
+}
+
+pub(in crate::wallet) struct WalletReconciliationPermit<'a> {
+    permit: WalletOperationPermit<'a>,
+    wallet_id: String,
+    armed: bool,
+}
+
+/// Linear, read-only receipt-refresh authority issued only for one unlocked wallet operation.
+/// It carries no signing, submission, retry, recovery-export, or Core-write capability.
+pub(in crate::wallet) struct WalletReceiptRefreshPermit<'a> {
+    permit: WalletOperationPermit<'a>,
+    wallet_id: String,
+}
+
+pub(in crate::wallet) struct PreparedReceiptRefresh {
+    operation_generation: u64,
+    revocation_epoch: u64,
+    owner_window: String,
+    envelope: EnvelopeRefreshAuthority,
+    journal: ReceiptJournalAuthority,
+}
+
+struct ReceiptJournalAuthority {
+    wallet_id: String,
+    record: WalletActivityRecord,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RefreshCashTransferArgs {
+    to: String,
+    amount: u128,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::wallet) enum WalletReconciliationResult {
+    Unresolved,
+    ResolvedRecorded,
+    AcceptedRecordingPending,
 }
 
 pub(in crate::wallet) struct WalletActivationProof {
-    _private: (),
+    scope: WalletActivationScope,
 }
 
 pub(in crate::wallet) struct RecoveryPathToken(Zeroizing<String>);
 
 pub(in crate::wallet) struct RecoverySelectionPermit {
+    state: Arc<WalletRuntimeState>,
     generation: u64,
     owner_window: String,
     purpose: RecoveryPathPurpose,
+    armed: bool,
+}
+
+impl RecoverySelectionPermit {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn invalidate_or_terminate(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.state.invalidate_all()))
+        {
+            Ok(Ok(())) => self.armed = false,
+            Ok(Err(_)) | Err(_) => std::process::abort(),
+        }
+    }
+}
+
+impl Drop for RecoverySelectionPermit {
+    fn drop(&mut self) {
+        self.invalidate_or_terminate();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +244,12 @@ pub(in crate::wallet) enum WalletOperationKind {
     Create,
     Restore,
     Unlock,
+    PreparePreview,
+    ConsumePreview,
     Sign,
+    Submit,
+    Reconcile,
+    Refresh,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +261,7 @@ pub(in crate::wallet) enum RecoveryPathPurpose {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WalletRuntimeError {
     ProcessLockUnavailable,
+    UnsupportedWindowsHost,
     RuntimeUnavailable,
     ActivationUnavailable,
     InvalidWindow,
@@ -129,12 +274,14 @@ pub(crate) enum WalletRuntimeError {
     RecoveryDestinationInvalid,
     RecoveryDestinationExists,
     RecoverySourceInvalid,
+    ReconciliationUnavailable,
 }
 
 impl WalletRuntimeError {
     pub(in crate::wallet) const fn code(self) -> &'static str {
         match self {
             Self::ProcessLockUnavailable => "wallet_process_lock_unavailable",
+            Self::UnsupportedWindowsHost => "unsupported_windows_host",
             Self::RuntimeUnavailable => "wallet_runtime_unavailable",
             Self::ActivationUnavailable => "wallet_activation_unavailable",
             Self::InvalidWindow => "invalid_window",
@@ -147,6 +294,7 @@ impl WalletRuntimeError {
             Self::RecoveryDestinationInvalid => "recovery_destination_invalid",
             Self::RecoveryDestinationExists => "recovery_destination_exists",
             Self::RecoverySourceInvalid => "recovery_source_invalid",
+            Self::ReconciliationUnavailable => "wallet_reconciliation_unavailable",
         }
     }
 }
@@ -155,6 +303,7 @@ impl fmt::Display for WalletRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::ProcessLockUnavailable => "secure wallet process ownership is unavailable",
+            Self::UnsupportedWindowsHost => "wallet custody is unavailable on this Windows edition",
             Self::RuntimeUnavailable => "secure wallet runtime is unavailable",
             Self::ActivationUnavailable => "secure wallet activation is unavailable",
             Self::InvalidWindow => "wallet access is unavailable from this window",
@@ -167,6 +316,7 @@ impl fmt::Display for WalletRuntimeError {
             Self::RecoveryDestinationInvalid => "recovery destination is invalid",
             Self::RecoveryDestinationExists => "recovery destination already exists",
             Self::RecoverySourceInvalid => "recovery source is invalid",
+            Self::ReconciliationUnavailable => "wallet reconciliation is unavailable",
         })
     }
 }
@@ -193,6 +343,7 @@ impl WalletRuntimeState {
                 pending_path_selection: None,
                 path_authorization: None,
                 public_account: None,
+                transaction_preview: None,
                 next_generation: 0,
             }),
             revocation_epoch: AtomicU64::new(1),
@@ -208,7 +359,17 @@ impl WalletRuntimeState {
         kind: WalletOperationKind,
     ) -> Result<WalletOperationPermit<'_>, WalletRuntimeError> {
         require_main_window(owner_window)?;
-        self.require_activation()?;
+        let activation_scope = kind.activation_scope();
+        self.require_activation(activation_scope)?;
+        if matches!(
+            kind,
+            WalletOperationKind::Sign
+                | WalletOperationKind::Submit
+                | WalletOperationKind::Reconcile
+                | WalletOperationKind::Refresh
+        ) {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
         let mut inner = self.lock_inner()?;
         if self.revocation_is_pending() {
             return Err(WalletRuntimeError::RuntimeUnavailable);
@@ -219,27 +380,40 @@ impl WalletRuntimeState {
         inner.next_generation = inner.next_generation.wrapping_add(1).max(1);
         let generation = inner.next_generation;
         let revocation_epoch = self.revocation_epoch.load(Ordering::Acquire);
+        if matches!(
+            kind,
+            WalletOperationKind::Create
+                | WalletOperationKind::Restore
+                | WalletOperationKind::Unlock
+                | WalletOperationKind::PreparePreview
+        ) {
+            inner.transaction_preview = None;
+        }
         inner.active_operation = Some(ActiveOperation {
             generation,
             owner_window: owner_window.to_string(),
-            _kind: kind,
+            kind,
         });
         Ok(WalletOperationPermit {
             state: self,
             generation,
             revocation_epoch,
             owner_window: owner_window.to_string(),
-            activation_proof: WalletActivationProof { _private: () },
+            kind,
+            activation_proof: WalletActivationProof {
+                scope: activation_scope,
+            },
+            armed: true,
         })
     }
 
     pub(in crate::wallet) fn begin_recovery_path_selection(
-        &self,
+        self: &Arc<Self>,
         owner_window: &str,
         purpose: RecoveryPathPurpose,
     ) -> Result<RecoverySelectionPermit, WalletRuntimeError> {
         require_main_window(owner_window)?;
-        self.require_activation()?;
+        self.require_activation(WalletActivationScope::Lifecycle)?;
         let mut inner = self.lock_inner()?;
         if self.revocation_is_pending() {
             return Err(WalletRuntimeError::RuntimeUnavailable);
@@ -256,9 +430,94 @@ impl WalletRuntimeState {
             purpose,
         });
         Ok(RecoverySelectionPermit {
+            state: Arc::clone(self),
             generation,
             owner_window: owner_window.to_string(),
             purpose,
+            armed: true,
+        })
+    }
+
+    pub(in crate::wallet) fn begin_reconciliation_discovery(
+        &self,
+        owner_window: &str,
+    ) -> Result<WalletReconciliationPermit<'_>, WalletRuntimeError> {
+        require_main_window(owner_window)?;
+        self.require_activation(WalletActivationScope::Reconciliation)?;
+        let mut inner = self.lock_inner()?;
+        if self.revocation_is_pending()
+            || inner.active_operation.is_some()
+            || inner.pending_path_selection.is_some()
+        {
+            return Err(WalletRuntimeError::OperationInProgress);
+        }
+        let wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::RuntimeUnavailable)?;
+        inner.next_generation = inner.next_generation.wrapping_add(1).max(1);
+        let generation = inner.next_generation;
+        let revocation_epoch = self.revocation_epoch.load(Ordering::Acquire);
+        inner.active_operation = Some(ActiveOperation {
+            generation,
+            owner_window: owner_window.to_string(),
+            kind: WalletOperationKind::Reconcile,
+        });
+        Ok(WalletReconciliationPermit {
+            permit: WalletOperationPermit {
+                state: self,
+                generation,
+                revocation_epoch,
+                owner_window: owner_window.to_string(),
+                kind: WalletOperationKind::Reconcile,
+                activation_proof: WalletActivationProof {
+                    scope: WalletActivationScope::Reconciliation,
+                },
+                armed: true,
+            },
+            wallet_id,
+            armed: true,
+        })
+    }
+
+    pub(in crate::wallet) fn begin_receipt_refresh(
+        &self,
+        owner_window: &str,
+    ) -> Result<WalletReceiptRefreshPermit<'_>, WalletRuntimeError> {
+        require_main_window(owner_window)?;
+        self.require_activation(WalletActivationScope::Reconciliation)?;
+        let mut inner = self.lock_inner()?;
+        if self.revocation_is_pending() {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        if inner.active_operation.is_some() || inner.pending_path_selection.is_some() {
+            return Err(WalletRuntimeError::OperationInProgress);
+        }
+        let wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::RuntimeUnavailable)?;
+        inner.next_generation = inner.next_generation.wrapping_add(1).max(1);
+        let generation = inner.next_generation;
+        let revocation_epoch = self.revocation_epoch.load(Ordering::Acquire);
+        inner.active_operation = Some(ActiveOperation {
+            generation,
+            owner_window: owner_window.to_string(),
+            kind: WalletOperationKind::Refresh,
+        });
+        Ok(WalletReceiptRefreshPermit {
+            permit: WalletOperationPermit {
+                state: self,
+                generation,
+                revocation_epoch,
+                owner_window: owner_window.to_string(),
+                kind: WalletOperationKind::Refresh,
+                activation_proof: WalletActivationProof {
+                    scope: WalletActivationScope::Reconciliation,
+                },
+                armed: true,
+            },
+            wallet_id,
         })
     }
 
@@ -269,29 +528,24 @@ impl WalletRuntimeState {
     ) -> Result<RecoveryPathToken, WalletRuntimeError> {
         let mut token_bytes = Zeroizing::new([0_u8; PATH_TOKEN_BYTES]);
         if getrandom::fill(&mut *token_bytes).is_err() {
-            let _ = self.cancel_recovery_path_selection(&permit);
             return Err(WalletRuntimeError::SecureRandomUnavailable);
         }
-        let now_ms = match self.now_ms() {
-            Ok(now_ms) => now_ms,
-            Err(error) => {
-                let _ = self.cancel_recovery_path_selection(&permit);
-                return Err(error);
-            }
-        };
+        let now_ms = self.now_ms()?;
         self.complete_recovery_path_selection_at(permit, selected_path, &token_bytes, now_ms)
     }
 
     fn complete_recovery_path_selection_at(
         &self,
-        permit: RecoverySelectionPermit,
+        mut permit: RecoverySelectionPermit,
         selected_path: PathBuf,
         token_bytes: &[u8; PATH_TOKEN_BYTES],
         now_ms: u64,
     ) -> Result<RecoveryPathToken, WalletRuntimeError> {
         if selected_path.as_os_str().is_empty() {
-            let _ = self.cancel_recovery_path_selection(&permit);
             return Err(WalletRuntimeError::InvalidRequest);
+        }
+        if !std::ptr::eq(permit.state.as_ref(), self) {
+            return Err(WalletRuntimeError::PathAuthorizationInvalid);
         }
         let mut inner = self.lock_inner()?;
         if self.revocation_is_pending() {
@@ -306,20 +560,25 @@ impl WalletRuntimeState {
         }
         inner.pending_path_selection = None;
         let token = hex::encode(token_bytes);
+        let owner_window = std::mem::take(&mut permit.owner_window);
         inner.path_authorization = Some(PathAuthorization {
             token: Zeroizing::new(token.clone()),
-            owner_window: permit.owner_window,
+            owner_window,
             purpose: permit.purpose,
             selected_path,
             issued_at_ms: now_ms,
         });
+        permit.disarm();
         Ok(RecoveryPathToken(Zeroizing::new(token)))
     }
 
     pub(in crate::wallet) fn cancel_recovery_path_selection(
         &self,
-        permit: &RecoverySelectionPermit,
+        permit: &mut RecoverySelectionPermit,
     ) -> Result<(), WalletRuntimeError> {
+        if !std::ptr::eq(permit.state.as_ref(), self) {
+            return Err(WalletRuntimeError::PathAuthorizationInvalid);
+        }
         let mut inner = self.lock_inner()?;
         if self.revocation_is_pending() {
             return Err(WalletRuntimeError::RuntimeUnavailable);
@@ -333,6 +592,7 @@ impl WalletRuntimeState {
         }
         inner.pending_path_selection = None;
         inner.path_authorization = None;
+        permit.disarm();
         Ok(())
     }
 
@@ -355,7 +615,9 @@ impl WalletRuntimeState {
     ) -> Result<PathBuf, WalletRuntimeError> {
         require_main_window(owner_window)?;
         if token.len() != PATH_TOKEN_HEX_BYTES
-            || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
             return Err(WalletRuntimeError::InvalidRequest);
         }
@@ -405,6 +667,7 @@ impl WalletRuntimeState {
         let mut inner = self.lock_inner()?;
         inner.session.lock();
         inner.public_account = Some(metadata.into());
+        inner.transaction_preview = None;
         Ok(inner.lifecycle_status(true))
     }
 
@@ -458,6 +721,7 @@ impl WalletRuntimeState {
         if !vault_exists {
             inner.session.lock();
             inner.public_account = None;
+            inner.transaction_preview = None;
         }
         Ok(inner.lifecycle_status(vault_exists))
     }
@@ -473,6 +737,7 @@ impl WalletRuntimeState {
         }) {
             inner.session.lock();
             inner.public_account = None;
+            inner.transaction_preview = None;
         }
         Ok(inner.lifecycle_status(true))
     }
@@ -482,8 +747,8 @@ impl WalletRuntimeState {
         Ok(u64::try_from(inner.started_at.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 
-    fn require_activation(&self) -> Result<(), WalletRuntimeError> {
-        if self.activation.is_satisfied() {
+    fn require_activation(&self, scope: WalletActivationScope) -> Result<(), WalletRuntimeError> {
+        if self.activation.is_satisfied(scope) {
             Ok(())
         } else {
             Err(WalletRuntimeError::ActivationUnavailable)
@@ -512,14 +777,49 @@ impl WalletRuntimeState {
         self.pending_revocations.load(Ordering::Acquire) != 0
     }
 
+    pub(in crate::wallet) fn wallet_exposure_scopes_satisfied(&self) -> bool {
+        self.activation.all_wallet_scopes_satisfied()
+    }
+
+    pub(in crate::wallet) fn capture_boundary_epoch(&self) -> Result<u64, WalletRuntimeError> {
+        if self.revocation_is_pending() {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let epoch = self.revocation_epoch.load(Ordering::Acquire);
+        let _inner = self.lock_inner()?;
+        if self.revocation_is_pending() || self.revocation_epoch.load(Ordering::Acquire) != epoch {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(epoch)
+    }
+
+    pub(in crate::wallet) fn validate_boundary_epoch(
+        &self,
+        epoch: u64,
+    ) -> Result<(), WalletRuntimeError> {
+        if self.revocation_is_pending() || self.revocation_epoch.load(Ordering::Acquire) != epoch {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let _inner = self.lock_inner()?;
+        if self.revocation_is_pending() || self.revocation_epoch.load(Ordering::Acquire) != epoch {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn revocation_is_pending_for_test(&self) -> bool {
+        self.revocation_is_pending()
+    }
+
     #[cfg(test)]
     pub(in crate::wallet) fn with_activation_proof_for_test<R>(
         kind: WalletOperationKind,
         operation: impl FnOnce(&WalletActivationProof) -> R,
     ) -> R {
-        let runtime = Self::for_test();
-        let permit = runtime.begin_operation(MAIN_WINDOW_LABEL, kind).unwrap();
-        operation(&permit.activation_proof)
+        operation(&WalletActivationProof {
+            scope: kind.activation_scope(),
+        })
     }
 
     #[cfg(test)]
@@ -554,18 +854,64 @@ impl WalletRuntimeState {
     }
 }
 
+impl WalletOperationKind {
+    const fn activation_scope(self) -> WalletActivationScope {
+        match self {
+            Self::Create
+            | Self::Restore
+            | Self::Unlock
+            | Self::PreparePreview
+            | Self::ConsumePreview => WalletActivationScope::Lifecycle,
+            Self::Sign => WalletActivationScope::Signing,
+            Self::Submit => WalletActivationScope::Submission,
+            Self::Reconcile | Self::Refresh => WalletActivationScope::Reconciliation,
+        }
+    }
+}
+
+impl WalletActivationProof {
+    pub(in crate::wallet) fn require_signing(&self) -> Result<(), WalletRuntimeError> {
+        if self.scope == WalletActivationScope::Signing {
+            Ok(())
+        } else {
+            Err(WalletRuntimeError::ActivationUnavailable)
+        }
+    }
+
+    pub(in crate::wallet) fn require_submission(&self) -> Result<(), WalletRuntimeError> {
+        if self.scope == WalletActivationScope::Submission {
+            Ok(())
+        } else {
+            Err(WalletRuntimeError::ActivationUnavailable)
+        }
+    }
+
+    pub(in crate::wallet) fn require_reconciliation(&self) -> Result<(), WalletRuntimeError> {
+        if self.scope == WalletActivationScope::Reconciliation {
+            Ok(())
+        } else {
+            Err(WalletRuntimeError::ActivationUnavailable)
+        }
+    }
+}
+
 impl WalletRuntimeInner {
     fn invalidate_all(&mut self) {
         self.session.lock();
         self.active_operation = None;
         self.pending_path_selection = None;
         self.path_authorization = None;
+        self.transaction_preview = None;
     }
 
     fn lifecycle_status(&mut self, vault_exists: bool) -> WalletLifecycleStatus {
+        let locked = self.session.is_locked();
+        if locked {
+            self.transaction_preview = None;
+        }
         WalletLifecycleStatus {
             vault_exists,
-            locked: self.session.is_locked(),
+            locked,
             account: self.public_account.clone(),
         }
     }
@@ -592,6 +938,9 @@ impl Drop for WalletRuntimeState {
 
 impl Drop for WalletOperationPermit<'_> {
     fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
         let Ok(mut inner) = self.state.lock_inner() else {
             return;
         };
@@ -603,7 +952,7 @@ impl Drop for WalletOperationPermit<'_> {
     }
 }
 
-impl WalletOperationPermit<'_> {
+impl<'a> WalletOperationPermit<'a> {
     /// Proves that no lifecycle event, explicit lock, or newer operation revoked this work.
     pub(in crate::wallet) fn ensure_current(&self) -> Result<(), WalletRuntimeError> {
         if self.state.revocation_is_pending()
@@ -654,10 +1003,1422 @@ impl WalletOperationPermit<'_> {
         Ok(value)
     }
 
+    /// Atomically promotes the still-live confirmation operation into signing scope.
+    ///
+    /// Consuming the native approval is mandatory. The old permit is explicitly disarmed before
+    /// it is dropped so it cannot clear the continuously occupied active-operation slot.
+    pub(in crate::wallet) fn promote_to_signing(
+        mut self,
+        _approval: NativeConfirmationApproval,
+        sender_address: &str,
+        sender_public_key: &str,
+    ) -> Result<WalletSigningPermit<'a>, WalletRuntimeError> {
+        if self.kind != WalletOperationKind::ConsumePreview
+            || self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let mut inner = self.state.lock_inner()?;
+        if !self.is_current(&inner)
+            || !inner
+                .active_operation
+                .as_ref()
+                .is_some_and(|operation| operation.kind == WalletOperationKind::ConsumePreview)
+            || self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        if !self
+            .state
+            .activation
+            .is_satisfied(WalletActivationScope::Signing)
+        {
+            return Err(WalletRuntimeError::ActivationUnavailable);
+        }
+        let wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::RuntimeUnavailable)?;
+        let account_matches = inner.public_account.as_ref().is_some_and(|account| {
+            account.wallet_id == wallet_id
+                && account.address == sender_address
+                && account.public_key == sender_public_key
+        });
+        if !account_matches
+            || self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let active = inner
+            .active_operation
+            .as_mut()
+            .ok_or(WalletRuntimeError::RuntimeUnavailable)?;
+        active.kind = WalletOperationKind::Sign;
+        drop(inner);
+
+        let promoted = WalletOperationPermit {
+            state: self.state,
+            generation: self.generation,
+            revocation_epoch: self.revocation_epoch,
+            owner_window: std::mem::take(&mut self.owner_window),
+            kind: WalletOperationKind::Sign,
+            activation_proof: WalletActivationProof {
+                scope: WalletActivationScope::Signing,
+            },
+            armed: true,
+        };
+        self.armed = false;
+        Ok(WalletSigningPermit {
+            permit: promoted,
+            wallet_id,
+            armed: true,
+        })
+    }
+
+    pub(in crate::wallet) fn current_public_account(
+        &self,
+    ) -> Result<WalletAccountSummary, WalletRuntimeError> {
+        if self.kind != WalletOperationKind::PreparePreview {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        self.ensure_current()?;
+        let mut inner = self.state.lock_inner()?;
+        let wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::InvalidRequest)?;
+        let account = inner
+            .public_account
+            .as_ref()
+            .filter(|account| account.wallet_id == wallet_id)
+            .cloned()
+            .ok_or(WalletRuntimeError::InvalidRequest)?;
+        if !self.is_current(&inner)
+            || self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(account)
+    }
+
+    pub(in crate::wallet) fn ensure_envelope_store_accepts_transaction(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+        transaction_id: &str,
+    ) -> Result<(), WalletRuntimeError> {
+        if self.kind != WalletOperationKind::PreparePreview {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        self.ensure_current()?;
+        let store = EnvelopeStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let mut inner = self.state.lock_inner()?;
+        let result = inner.session.with_seed(|wallet_id, seed| {
+            let envelope_authenticator =
+                EnvelopeStoreAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+            store
+                .ensure_can_accept_transaction_id(&envelope_authenticator, transaction_id)
+                .map_err(|_| ())?;
+            let journal_authenticator =
+                WalletJournalAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+            let journal = load_activity_journal(custody.journal_path(), &journal_authenticator)
+                .map_err(|_| ())?;
+            Ok::<bool, ()>(journal.contains_transaction_id(transaction_id))
+        });
+        if !self.is_current(&inner)
+            || self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        match result {
+            Ok(Ok(false)) => Ok(()),
+            Ok(Ok(true)) | Ok(Err(_)) | Err(_) => {
+                Err(WalletRuntimeError::ReconciliationUnavailable)
+            }
+        }
+    }
+
+    pub(in crate::wallet) fn complete_transaction_preview(
+        &self,
+        intent: BoundTransferPreview,
+    ) -> Result<TransactionPreviewInstallReceipt, WalletRuntimeError> {
+        if self.kind != WalletOperationKind::PreparePreview {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        let mut token_bytes = Zeroizing::new([0_u8; TRANSACTION_PREVIEW_TOKEN_BYTES]);
+        if getrandom::fill(&mut *token_bytes).is_err() {
+            return Err(WalletRuntimeError::SecureRandomUnavailable);
+        }
+        let handle = hex::encode(token_bytes.as_slice());
+        if self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let mut inner = self.state.lock_inner()?;
+        if !self.is_current(&inner)
+            || self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::InvalidRequest)?;
+        let account_matches = inner.public_account.as_ref().is_some_and(|account| {
+            account.wallet_id == wallet_id
+                && account.address == intent.sender_address()
+                && account.public_key == intent.sender_public_key()
+        });
+        if !account_matches {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        let issued_at_ms =
+            u64::try_from(inner.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        inner.transaction_preview = Some(PendingTransactionPreview {
+            token: Zeroizing::new(handle.clone()),
+            owner_window: self.owner_window.clone(),
+            wallet_id,
+            issued_at_ms,
+            revocation_epoch: self.revocation_epoch,
+            intent,
+        });
+        inner.active_operation = None;
+        Ok(TransactionPreviewInstallReceipt {
+            handle,
+            issued_at_ms,
+        })
+    }
+
+    pub(in crate::wallet) fn consume_transaction_preview(
+        &self,
+        handle: &str,
+    ) -> Result<BoundTransferPreview, WalletRuntimeError> {
+        self.consume_transaction_preview_at(handle, None)
+    }
+
+    #[cfg(test)]
+    pub(in crate::wallet) fn consume_transaction_preview_at_for_test(
+        &self,
+        handle: &str,
+        now_ms: u64,
+    ) -> Result<BoundTransferPreview, WalletRuntimeError> {
+        self.consume_transaction_preview_at(handle, Some(now_ms))
+    }
+
+    fn consume_transaction_preview_at(
+        &self,
+        handle: &str,
+        now_override_ms: Option<u64>,
+    ) -> Result<BoundTransferPreview, WalletRuntimeError> {
+        if self.kind != WalletOperationKind::ConsumePreview
+            || handle.len() != TRANSACTION_PREVIEW_TOKEN_HEX_BYTES
+            || !handle
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        if self.state.revocation_is_pending()
+            || self.state.revocation_epoch.load(Ordering::Acquire) != self.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let mut inner = self.state.lock_inner()?;
+        if !self.is_current(&inner) {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let preview = inner
+            .transaction_preview
+            .take()
+            .ok_or(WalletRuntimeError::InvalidRequest)?;
+        let now_ms = now_override_ms.unwrap_or_else(|| {
+            u64::try_from(inner.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+        });
+        let wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::InvalidRequest)?;
+        let account_matches = inner.public_account.as_ref().is_some_and(|account| {
+            account.wallet_id == wallet_id
+                && account.address == preview.intent.sender_address()
+                && account.public_key == preview.intent.sender_public_key()
+        });
+        let valid = preview.owner_window == self.owner_window
+            && preview.wallet_id == wallet_id
+            && preview.revocation_epoch == self.revocation_epoch
+            && preview.token.as_str() == handle
+            && now_ms >= preview.issued_at_ms
+            && now_ms.saturating_sub(preview.issued_at_ms) <= TRANSACTION_PREVIEW_TTL_MS
+            && account_matches
+            && !self.state.revocation_is_pending()
+            && self.state.revocation_epoch.load(Ordering::Acquire) == self.revocation_epoch;
+        if !valid {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        Ok(preview.intent)
+    }
+
     fn is_current(&self, inner: &WalletRuntimeInner) -> bool {
         inner.active_operation.as_ref().is_some_and(|operation| {
             operation.generation == self.generation && operation.owner_window == self.owner_window
         })
+    }
+}
+
+impl<'a> WalletSigningPermit<'a> {
+    pub(in crate::wallet) fn wallet_id(&self) -> &str {
+        self.wallet_id.as_str()
+    }
+
+    pub(in crate::wallet) fn ensure_current(&self) -> Result<(), WalletRuntimeError> {
+        if self.permit.kind != WalletOperationKind::Sign {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        self.permit.ensure_current()?;
+        let inner = self.permit.state.lock_inner()?;
+        if inner
+            .active_operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind == WalletOperationKind::Sign)
+        {
+            Ok(())
+        } else {
+            Err(WalletRuntimeError::RuntimeUnavailable)
+        }
+    }
+
+    pub(in crate::wallet) fn sign_confirmed_intent_with_observer(
+        &self,
+        intent: &BoundTransferPreview,
+        expected_core_contract: &str,
+        expected_status_version: &str,
+        observer: &dyn TransactionSigningObserver,
+    ) -> Result<Result<VisionTransaction, WalletTransactionError>, WalletRuntimeError> {
+        self.ensure_current()?;
+        self.permit.activation_proof.require_signing()?;
+        if !self
+            .permit
+            .state
+            .activation
+            .is_satisfied(WalletActivationScope::Signing)
+        {
+            return Err(WalletRuntimeError::ActivationUnavailable);
+        }
+        let mut inner = self.permit.state.lock_inner()?;
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let active_wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::RuntimeUnavailable)?;
+        let account_matches = active_wallet_id == self.wallet_id
+            && inner.public_account.as_ref().is_some_and(|account| {
+                account.wallet_id == self.wallet_id
+                    && account.address == intent.sender_address()
+                    && account.public_key == intent.sender_public_key()
+            });
+        if !account_matches {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+
+        let signing_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inner.session.with_seed(|wallet_id, seed| {
+                if wallet_id != self.wallet_id {
+                    return Err(WalletTransactionError::InvalidSender);
+                }
+                sign_confirmed_cash_transfer(
+                    &self.permit.activation_proof,
+                    seed,
+                    intent.confirmed_cash_transfer(),
+                    expected_core_contract,
+                    expected_status_version,
+                    observer,
+                )
+            })
+        }));
+        let result = match signing_result {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => return Err(WalletRuntimeError::RuntimeUnavailable),
+            Err(payload) => {
+                self.permit.state.revoke_current_authority();
+                inner.invalidate_all();
+                drop(inner);
+                std::panic::resume_unwind(payload);
+            }
+        };
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(result)
+    }
+
+    /// Atomically promotes the occupied signing slot to submission authority.
+    pub(in crate::wallet) fn promote_to_submission(
+        mut self,
+        core_identity_fingerprint: [u8; 32],
+    ) -> Result<WalletSubmissionPermit<'a>, WalletRuntimeError> {
+        self.ensure_current()?;
+        if !self
+            .permit
+            .state
+            .activation
+            .is_satisfied(WalletActivationScope::Submission)
+        {
+            return Err(WalletRuntimeError::ActivationUnavailable);
+        }
+        let mut inner = self.permit.state.lock_inner()?;
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let active_wallet_id = inner
+            .session
+            .active_wallet_id()
+            .map_err(|_| WalletRuntimeError::RuntimeUnavailable)?;
+        if active_wallet_id != self.wallet_id {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let active = inner
+            .active_operation
+            .as_mut()
+            .filter(|operation| operation.kind == WalletOperationKind::Sign)
+            .ok_or(WalletRuntimeError::RuntimeUnavailable)?;
+        active.kind = WalletOperationKind::Submit;
+        drop(inner);
+
+        let promoted = WalletOperationPermit {
+            state: self.permit.state,
+            generation: self.permit.generation,
+            revocation_epoch: self.permit.revocation_epoch,
+            owner_window: std::mem::take(&mut self.permit.owner_window),
+            kind: WalletOperationKind::Submit,
+            activation_proof: WalletActivationProof {
+                scope: WalletActivationScope::Submission,
+            },
+            armed: true,
+        };
+        let activation_grant = SubmissionActivationGrant::new(&promoted.activation_proof)?;
+        self.permit.armed = false;
+        self.armed = false;
+        Ok(WalletSubmissionPermit {
+            permit: promoted,
+            wallet_id: std::mem::take(&mut self.wallet_id),
+            core_identity_fingerprint,
+            activation_grant: Some(activation_grant),
+            armed: true,
+        })
+    }
+
+    pub(in crate::wallet) fn complete<T>(mut self, value: T) -> Result<T, WalletRuntimeError> {
+        let result = self.permit.complete(value);
+        if result.is_ok() {
+            self.armed = false;
+        }
+        result
+    }
+}
+
+impl WalletSubmissionPermit<'_> {
+    pub(in crate::wallet) fn ensure_current(&self) -> Result<(), WalletRuntimeError> {
+        self.permit.activation_proof.require_submission()?;
+        if self.permit.kind != WalletOperationKind::Submit
+            || !self
+                .permit
+                .state
+                .activation
+                .is_satisfied(WalletActivationScope::Submission)
+        {
+            return Err(WalletRuntimeError::ActivationUnavailable);
+        }
+        self.permit.ensure_current()?;
+        let mut inner = self.permit.state.lock_inner()?;
+        let active_kind_matches = inner
+            .active_operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind == WalletOperationKind::Submit);
+        let wallet_matches =
+            inner.session.active_wallet_id().ok().as_deref() == Some(self.wallet_id.as_str());
+        let current = active_kind_matches && wallet_matches;
+        if current {
+            Ok(())
+        } else {
+            Err(WalletRuntimeError::RuntimeUnavailable)
+        }
+    }
+
+    pub(in crate::wallet) fn wallet_id(&self) -> &str {
+        &self.wallet_id
+    }
+
+    pub(in crate::wallet) const fn core_identity_fingerprint(&self) -> &[u8; 32] {
+        &self.core_identity_fingerprint
+    }
+
+    pub(in crate::wallet) fn take_activation_grant(
+        &mut self,
+    ) -> Result<SubmissionActivationGrant, WalletRuntimeError> {
+        self.ensure_current()?;
+        self.activation_grant
+            .take()
+            .ok_or(WalletRuntimeError::RuntimeUnavailable)
+    }
+
+    pub(in crate::wallet) fn publish_prepared(
+        &self,
+        authority: LiveReconciliationAuthority,
+        store: &ReconciliationStore,
+        record: ReconciliationRecord,
+        reservation: ReconciliationReservation,
+    ) -> Result<PreparedReconciliationAuthority, WalletRuntimeError> {
+        self.with_reconciliation_auth(|authenticator| {
+            authority.publish_prepared_reserved(store, authenticator, record, reservation)
+        })
+    }
+
+    pub(in crate::wallet) fn reserve_reconciliation(
+        &self,
+        store: &ReconciliationStore,
+    ) -> Result<ReconciliationReservation, WalletRuntimeError> {
+        self.with_reconciliation_auth(|authenticator| store.reserve_prepared(authenticator))
+    }
+
+    pub(in crate::wallet) fn publish_prepared_envelope(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+        store: &EnvelopeStore,
+        input: EnvelopeEntryInput<'_>,
+        reservation: &ReconciliationReservation,
+    ) -> Result<PreparedEnvelopeAuthority, WalletRuntimeError> {
+        self.with_envelope_and_journal_auth(|authenticator, journal_authenticator| {
+            store.ensure_can_accept_transaction_id(authenticator, input.transaction_id)?;
+            let journal = load_activity_journal(custody.journal_path(), journal_authenticator)
+                .map_err(|_| super::envelope_store::EnvelopeStoreError::AuthenticationFailed)?;
+            if journal.contains_transaction_id(input.transaction_id) {
+                return Err(super::envelope_store::EnvelopeStoreError::Collision);
+            }
+            store.publish_prepared(authenticator, input, reservation)
+        })
+    }
+
+    pub(in crate::wallet) fn mark_envelope_ambiguous(
+        &self,
+        store: &EnvelopeStore,
+        authority: PreparedEnvelopeAuthority,
+    ) -> Result<AmbiguousEnvelopeAuthority, WalletRuntimeError> {
+        self.with_envelope_auth(|authenticator| store.mark_ambiguous(authenticator, authority))
+    }
+
+    pub(in crate::wallet) fn mark_envelope_accepted(
+        &self,
+        store: &EnvelopeStore,
+        authority: AmbiguousEnvelopeAuthority,
+    ) -> Result<AcceptedEnvelopeAuthority, WalletRuntimeError> {
+        self.with_envelope_auth(|authenticator| store.mark_accepted(authenticator, authority))
+    }
+
+    pub(in crate::wallet) fn remove_prewrite_envelope(
+        &self,
+        store: &EnvelopeStore,
+        authority: PreparedEnvelopeAuthority,
+    ) -> Result<(), WalletRuntimeError> {
+        self.with_envelope_auth(|authenticator| store.remove_prewrite(authenticator, authority))
+    }
+
+    pub(in crate::wallet) fn verify_accepted_envelope(
+        &self,
+        store: &EnvelopeStore,
+        authority: &AcceptedEnvelopeAuthority,
+    ) -> Result<(), WalletRuntimeError> {
+        self.with_envelope_auth(|authenticator| store.verify_accepted(authenticator, authority))
+    }
+
+    pub(in crate::wallet) fn verify_prepared_envelope(
+        &self,
+        store: &EnvelopeStore,
+        authority: &PreparedEnvelopeAuthority,
+    ) -> Result<(), WalletRuntimeError> {
+        self.with_envelope_auth(|authenticator| store.verify_prepared(authenticator, authority))
+    }
+
+    pub(in crate::wallet) fn publish_may_have_been_submitted(
+        &self,
+        authority: PreparedReconciliationAuthority,
+        store: &ReconciliationStore,
+    ) -> Result<MayHaveBeenSubmittedAuthority, WalletRuntimeError> {
+        self.with_reconciliation_auth(|authenticator| {
+            authority.publish_may_have_been_submitted(store, authenticator)
+        })
+    }
+
+    pub(in crate::wallet) fn resolve_not_attempted(
+        &self,
+        authority: PreparedReconciliationAuthority,
+        store: &ReconciliationStore,
+    ) -> Result<(), WalletRuntimeError> {
+        self.with_reconciliation_auth(|authenticator| {
+            authority.resolve_not_attempted(store, authenticator)
+        })
+    }
+
+    pub(in crate::wallet) fn publish_accepted(
+        &self,
+        authority: MayHaveBeenSubmittedAuthority,
+        store: &ReconciliationStore,
+        accepted_tx_id: String,
+        accepted_nonce: u64,
+        compatibility_contract_digest_hex: String,
+    ) -> Result<AcceptedRecordingAuthority, WalletRuntimeError> {
+        self.with_reconciliation_auth(|authenticator| {
+            authority.publish_accepted(
+                store,
+                authenticator,
+                accepted_tx_id,
+                accepted_nonce,
+                compatibility_contract_digest_hex,
+            )
+        })
+    }
+
+    pub(in crate::wallet) fn resolve_rejected(
+        &self,
+        authority: MayHaveBeenSubmittedAuthority,
+        store: &ReconciliationStore,
+        http_status: u16,
+        rejection_code: String,
+        allowlist_digest_hex: String,
+    ) -> Result<(), WalletRuntimeError> {
+        self.with_reconciliation_auth(|authenticator| {
+            authority.resolve_rejected(
+                store,
+                authenticator,
+                http_status,
+                rejection_code,
+                allowlist_digest_hex,
+            )
+        })
+    }
+
+    pub(in crate::wallet) fn resolve_recorded(
+        &self,
+        authority: AcceptedRecordingAuthority,
+        store: &ReconciliationStore,
+    ) -> Result<(), WalletRuntimeError> {
+        self.with_reconciliation_auth(|authenticator| {
+            authority.resolve_recorded(store, authenticator)
+        })
+    }
+
+    pub(in crate::wallet) fn record_accepted_evidence(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+        evidence: &AcceptedSubmissionEvidence,
+    ) -> Result<(), WalletRuntimeError> {
+        self.ensure_current()?;
+        let mut inner = self.permit.state.lock_inner()?;
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let result = inner.session.with_seed(|wallet_id, seed| {
+            if wallet_id != self.wallet_id {
+                return Err(());
+            }
+            let authenticator = WalletJournalAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+            append_accepted_evidence(custody.journal_path(), &authenticator, evidence)
+                .map(|_| ())
+                .map_err(|_| ())
+        });
+        if !matches!(result, Ok(Ok(()))) {
+            return Err(WalletRuntimeError::ReconciliationUnavailable);
+        }
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(())
+    }
+
+    fn with_reconciliation_auth<T>(
+        &self,
+        action: impl FnOnce(&ReconciliationAuthenticator) -> Result<T, ReconciliationError>,
+    ) -> Result<T, WalletRuntimeError> {
+        self.ensure_current()?;
+        let mut inner = self.permit.state.lock_inner()?;
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inner.session.with_seed(|wallet_id, seed| {
+                if wallet_id != self.wallet_id {
+                    return Err(ReconciliationError::AuthenticationFailed);
+                }
+                let authenticator = ReconciliationAuthenticator::new(wallet_id, seed)?;
+                action(&authenticator)
+            })
+        }));
+        let result = match result {
+            Ok(Ok(Ok(result))) => result,
+            Ok(Ok(Err(_))) => {
+                return Err(WalletRuntimeError::ReconciliationUnavailable);
+            }
+            Ok(Err(_)) => {
+                return Err(WalletRuntimeError::ReconciliationUnavailable);
+            }
+            Err(payload) => {
+                self.permit.state.revoke_current_authority();
+                inner.invalidate_all();
+                drop(inner);
+                std::panic::resume_unwind(payload);
+            }
+        };
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(result)
+    }
+
+    fn with_envelope_auth<T>(
+        &self,
+        action: impl FnOnce(
+            &EnvelopeStoreAuthenticator,
+        ) -> Result<T, super::envelope_store::EnvelopeStoreError>,
+    ) -> Result<T, WalletRuntimeError> {
+        self.ensure_current()?;
+        let mut inner = self.permit.state.lock_inner()?;
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inner.session.with_seed(|wallet_id, seed| {
+                if wallet_id != self.wallet_id {
+                    return Err(super::envelope_store::EnvelopeStoreError::AuthenticationFailed);
+                }
+                let authenticator = EnvelopeStoreAuthenticator::new(wallet_id, seed)?;
+                action(&authenticator)
+            })
+        }));
+        let result = match result {
+            Ok(Ok(Ok(result))) => result,
+            Ok(Ok(Err(_))) | Ok(Err(_)) => {
+                return Err(WalletRuntimeError::ReconciliationUnavailable)
+            }
+            Err(payload) => {
+                self.permit.state.revoke_current_authority();
+                inner.invalidate_all();
+                drop(inner);
+                std::panic::resume_unwind(payload);
+            }
+        };
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(result)
+    }
+
+    fn with_envelope_and_journal_auth<T>(
+        &self,
+        action: impl FnOnce(
+            &EnvelopeStoreAuthenticator,
+            &WalletJournalAuthenticator<'_>,
+        ) -> Result<T, super::envelope_store::EnvelopeStoreError>,
+    ) -> Result<T, WalletRuntimeError> {
+        self.ensure_current()?;
+        let mut inner = self.permit.state.lock_inner()?;
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inner.session.with_seed(|wallet_id, seed| {
+                if wallet_id != self.wallet_id {
+                    return Err(super::envelope_store::EnvelopeStoreError::AuthenticationFailed);
+                }
+                let envelope = EnvelopeStoreAuthenticator::new(wallet_id, seed)?;
+                let journal = WalletJournalAuthenticator::new(wallet_id, seed)
+                    .map_err(|_| super::envelope_store::EnvelopeStoreError::AuthenticationFailed)?;
+                action(&envelope, &journal)
+            })
+        }));
+        let result = match result {
+            Ok(Ok(Ok(result))) => result,
+            Ok(Ok(Err(_))) | Ok(Err(_)) => {
+                return Err(WalletRuntimeError::ReconciliationUnavailable)
+            }
+            Err(payload) => {
+                self.permit.state.revoke_current_authority();
+                inner.invalidate_all();
+                drop(inner);
+                std::panic::resume_unwind(payload);
+            }
+        };
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(result)
+    }
+
+    pub(in crate::wallet) fn complete<T>(mut self, value: T) -> Result<T, WalletRuntimeError> {
+        let result = self.permit.complete(value);
+        if result.is_ok() {
+            self.armed = false;
+        }
+        result
+    }
+}
+
+impl Drop for WalletSubmissionPermit<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.permit.state.invalidate_all()
+        })) {
+            Ok(Ok(())) => self.armed = false,
+            Ok(Err(_)) | Err(_) => std::process::abort(),
+        }
+    }
+}
+
+impl PreparedReceiptRefresh {
+    pub(in crate::wallet) fn transaction_id(&self) -> &str {
+        self.envelope.transaction_id()
+    }
+
+    pub(in crate::wallet) fn transaction(&self) -> &VisionTransaction {
+        self.envelope.transaction()
+    }
+
+    pub(in crate::wallet) fn signed_body_digest_hex(&self) -> &str {
+        self.envelope.signed_body_digest_hex()
+    }
+
+    pub(in crate::wallet) fn previous_observation(&self) -> &WalletReceiptObservation {
+        &self.journal.record.observation
+    }
+}
+
+impl WalletReceiptRefreshPermit<'_> {
+    pub(in crate::wallet) fn ensure_current(&self) -> Result<(), WalletRuntimeError> {
+        self.permit.ensure_current()
+    }
+
+    pub(in crate::wallet) fn prepare(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+        transaction_id: &str,
+    ) -> Result<Option<PreparedReceiptRefresh>, WalletRuntimeError> {
+        if self.permit.kind != WalletOperationKind::Refresh {
+            return Err(WalletRuntimeError::InvalidRequest);
+        }
+        self.ensure_current()?;
+        let store = EnvelopeStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let mut inner = self.permit.state.lock_inner()?;
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let prepared = inner.session.with_seed(|wallet_id, seed| {
+            if wallet_id != self.wallet_id {
+                return Err(());
+            }
+            let journal_authenticator =
+                WalletJournalAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+            let journal = load_activity_journal(custody.journal_path(), &journal_authenticator)
+                .map_err(|_| ())?;
+            let mut matches = journal
+                .records()
+                .iter()
+                .filter(|record| record.tx_id == transaction_id);
+            let Some(record) = matches.next() else {
+                return Ok(None);
+            };
+            if matches.next().is_some() {
+                return Err(());
+            }
+            let envelope_authenticator =
+                EnvelopeStoreAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+            let envelope = store
+                .prepare_receipt_refresh(
+                    &envelope_authenticator,
+                    transaction_id,
+                    &record.envelope_commitment_hex,
+                )
+                .map_err(|_| ())?;
+            if !refresh_envelope_matches_journal(&envelope, record) {
+                return Err(());
+            }
+            Ok(Some(PreparedReceiptRefresh {
+                operation_generation: self.permit.generation,
+                revocation_epoch: self.permit.revocation_epoch,
+                owner_window: self.permit.owner_window.clone(),
+                envelope,
+                journal: ReceiptJournalAuthority {
+                    wallet_id: wallet_id.to_string(),
+                    record: record.clone(),
+                },
+            }))
+        });
+        let prepared = match prepared {
+            Ok(Ok(value)) => value,
+            Ok(Err(_)) | Err(_) => {
+                return Err(WalletRuntimeError::ReconciliationUnavailable);
+            }
+        };
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(prepared)
+    }
+
+    pub(in crate::wallet) fn record_observation(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+        prepared: PreparedReceiptRefresh,
+        observation: &WalletReceiptObservation,
+        observed_at_unix_ms: u64,
+    ) -> Result<WalletActivityRecord, WalletRuntimeError> {
+        if prepared.operation_generation != self.permit.generation
+            || prepared.revocation_epoch != self.permit.revocation_epoch
+            || prepared.owner_window != self.permit.owner_window
+            || prepared.journal.wallet_id != self.wallet_id
+        {
+            return Err(WalletRuntimeError::ReconciliationUnavailable);
+        }
+        self.ensure_current()?;
+        let store = EnvelopeStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let mut inner = self.permit.state.lock_inner()?;
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        let recorded = inner.session.with_seed(|wallet_id, seed| {
+            if wallet_id != self.wallet_id || wallet_id != prepared.journal.wallet_id {
+                return Err(());
+            }
+            let envelope_authenticator =
+                EnvelopeStoreAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+            store
+                .verify_receipt_refresh(&envelope_authenticator, &prepared.envelope)
+                .map_err(|_| ())?;
+            if !refresh_envelope_matches_journal(&prepared.envelope, &prepared.journal.record) {
+                return Err(());
+            }
+            let journal_authenticator =
+                WalletJournalAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+            let before = load_activity_journal(custody.journal_path(), &journal_authenticator)
+                .map_err(|_| ())?;
+            let current = before
+                .records()
+                .iter()
+                .find(|record| record.tx_id == prepared.journal.record.tx_id)
+                .filter(|record| **record == prepared.journal.record)
+                .ok_or(())?;
+            if current.envelope_commitment_hex != prepared.envelope.commitment_hex() {
+                return Err(());
+            }
+            append_receipt_observation(
+                custody.journal_path(),
+                &journal_authenticator,
+                prepared.envelope.transaction_id(),
+                observation,
+                observed_at_unix_ms,
+            )
+            .map_err(|_| ())?;
+            let verified = load_activity_journal(custody.journal_path(), &journal_authenticator)
+                .map_err(|_| ())?;
+            let record = verified
+                .records()
+                .iter()
+                .find(|record| record.tx_id == prepared.envelope.transaction_id())
+                .filter(|record| record.observation == *observation)
+                .ok_or(())?;
+            if record.envelope_commitment_hex != prepared.envelope.commitment_hex() {
+                return Err(());
+            }
+            Ok(record.clone())
+        });
+        let record = match recorded {
+            Ok(Ok(record)) => record,
+            Ok(Err(_)) | Err(_) => {
+                return Err(WalletRuntimeError::ReconciliationUnavailable);
+            }
+        };
+        if !self.permit.is_current(&inner)
+            || self.permit.state.revocation_is_pending()
+            || self.permit.state.revocation_epoch.load(Ordering::Acquire)
+                != self.permit.revocation_epoch
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(record)
+    }
+
+    pub(in crate::wallet) fn complete<T>(&self, value: T) -> Result<T, WalletRuntimeError> {
+        self.permit.complete(value)
+    }
+}
+
+fn refresh_envelope_matches_journal(
+    envelope: &EnvelopeRefreshAuthority,
+    record: &WalletActivityRecord,
+) -> bool {
+    let Ok(args) = serde_json::from_slice::<RefreshCashTransferArgs>(&envelope.transaction().args)
+    else {
+        return false;
+    };
+    let expected_compatibility =
+        compatibility_contract_digest(&SubmissionRejectionPolicy::production());
+    canonical_transaction_id(envelope.transaction()).is_ok_and(|id| id == record.tx_id)
+        && envelope.transaction_id() == record.tx_id
+        && envelope.commitment_hex() == record.envelope_commitment_hex
+        && envelope.transaction().sender_pubkey == record.sender_address
+        && args.to == record.recipient_address
+        && args.amount.to_string() == record.amount_raw_units
+        && envelope.transaction().nonce == record.nonce
+        && envelope.transaction().tip == record.tip_raw_units
+        && envelope.transaction().fee_limit == record.fee_limit_raw_units
+        && envelope.created_at_unix_ms() == record.submitted_at_unix_ms
+        && envelope.compatibility_contract_digest_hex() == expected_compatibility
+}
+
+impl WalletReconciliationPermit<'_> {
+    pub(in crate::wallet) fn load_activity(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+    ) -> Result<WalletActivityJournal, WalletRuntimeError> {
+        self.run_fail_closed(|| self.load_activity_inner(custody))
+    }
+
+    fn load_activity_inner(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+    ) -> Result<WalletActivityJournal, WalletRuntimeError> {
+        self.ensure_current()?;
+        let mut inner = self.permit.state.lock_inner()?;
+        let result = inner.session.with_seed(|wallet_id, seed| {
+            if wallet_id != self.wallet_id {
+                return Err(());
+            }
+            let authenticator = WalletJournalAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+            load_activity_journal(custody.journal_path(), &authenticator).map_err(|_| ())
+        });
+        let journal = match result {
+            Ok(Ok(journal)) => journal,
+            Ok(Err(_)) | Err(_) => return Err(WalletRuntimeError::ReconciliationUnavailable),
+        };
+        drop(inner);
+        self.ensure_current()?;
+        Ok(journal)
+    }
+
+    pub(in crate::wallet) fn discover(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+    ) -> Result<Option<RestartReconciliationPermit>, WalletRuntimeError> {
+        self.run_fail_closed(|| self.discover_inner(custody))
+    }
+
+    fn discover_inner(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+    ) -> Result<Option<RestartReconciliationPermit>, WalletRuntimeError> {
+        self.ensure_current()?;
+        let store = ReconciliationStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let envelope_store = EnvelopeStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let discovery = ReconciliationDiscoveryPermit::new(&self.permit.activation_proof)?;
+        let mut inner = self.permit.state.lock_inner()?;
+        let result = inner.session.with_seed(|wallet_id, seed| {
+            if wallet_id != self.wallet_id {
+                return Err(ReconciliationError::AuthenticationFailed);
+            }
+            let authenticator = ReconciliationAuthenticator::new(wallet_id, seed)?;
+            if let Some(reservation) = store.empty_head_reservation(&authenticator)? {
+                let envelope_authenticator = EnvelopeStoreAuthenticator::new(wallet_id, seed)
+                    .map_err(|_| ReconciliationError::StorageUnavailable)?;
+                if let Some(orphan) = envelope_store
+                    .identify_prepared_orphan(&envelope_authenticator, &reservation)
+                    .map_err(|_| ReconciliationError::AuthenticationFailed)?
+                {
+                    let journal_authenticator = WalletJournalAuthenticator::new(wallet_id, seed)
+                        .map_err(|_| ReconciliationError::StorageUnavailable)?;
+                    let journal =
+                        load_activity_journal(custody.journal_path(), &journal_authenticator)
+                            .map_err(|_| ReconciliationError::AuthenticationFailed)?;
+                    if journal.contains_transaction_or_commitment(
+                        orphan.transaction_id(),
+                        orphan.commitment_hex(),
+                    ) {
+                        return Err(ReconciliationError::AuthenticationFailed);
+                    }
+                    envelope_store
+                        .cleanup_prepared_orphan(&envelope_authenticator, orphan)
+                        .map_err(|_| ReconciliationError::StorageUnavailable)?;
+                }
+            }
+            let discovered = discovery.discover(&store, &authenticator)?;
+            let Some(restart) = discovered else {
+                return Ok(None);
+            };
+            match restart.phase_tag() {
+                ReconciliationPhaseTag::ResolvedNotAttempted
+                | ReconciliationPhaseTag::ResolvedRejected => {
+                    let envelope_authenticator =
+                        EnvelopeStoreAuthenticator::new(wallet_id, seed)
+                            .map_err(|_| ReconciliationError::StorageUnavailable)?;
+                    let binding = restart.envelope_binding();
+                    envelope_store
+                        .cleanup_terminal_binding(&envelope_authenticator, &binding)
+                        .map_err(|_| ReconciliationError::StorageUnavailable)?;
+                    Ok(None)
+                }
+                ReconciliationPhaseTag::ResolvedRecorded => Ok(None),
+                _ => Ok(Some(restart)),
+            }
+        });
+        let result = match result {
+            Ok(Ok(value)) => value,
+            Ok(Err(_)) | Err(_) => {
+                return Err(WalletRuntimeError::ReconciliationUnavailable);
+            }
+        };
+        drop(inner);
+        self.ensure_current()?;
+        Ok(result)
+    }
+
+    pub(in crate::wallet) fn resolve_prepared(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+        restart: RestartReconciliationPermit,
+    ) -> Result<(), WalletRuntimeError> {
+        self.run_fail_closed(|| self.resolve_prepared_inner(custody, restart))
+    }
+
+    fn resolve_prepared_inner(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+        restart: RestartReconciliationPermit,
+    ) -> Result<(), WalletRuntimeError> {
+        self.ensure_current()?;
+        let store = ReconciliationStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let envelope_store = EnvelopeStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let binding = restart.envelope_binding();
+        let mut inner = self.permit.state.lock_inner()?;
+        let result = inner.session.with_seed(|wallet_id, seed| {
+            if wallet_id != self.wallet_id {
+                return Err(ReconciliationError::AuthenticationFailed);
+            }
+            let authenticator = ReconciliationAuthenticator::new(wallet_id, seed)?;
+            restart.resolve_prepared(&store, &authenticator)?;
+            let envelope_authenticator = EnvelopeStoreAuthenticator::new(wallet_id, seed)
+                .map_err(|_| ReconciliationError::StorageUnavailable)?;
+            envelope_store
+                .cleanup_terminal_binding(&envelope_authenticator, &binding)
+                .map_err(|_| ReconciliationError::StorageUnavailable)
+        });
+        if !matches!(result, Ok(Ok(()))) {
+            return Err(WalletRuntimeError::ReconciliationUnavailable);
+        }
+        drop(inner);
+        self.ensure_current()
+    }
+
+    pub(in crate::wallet) fn complete_accepted_recording(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+        restart: RestartReconciliationPermit,
+    ) -> Result<(), WalletRuntimeError> {
+        self.run_fail_closed(|| self.complete_accepted_recording_inner(custody, restart))
+    }
+
+    fn complete_accepted_recording_inner(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+        restart: RestartReconciliationPermit,
+    ) -> Result<(), WalletRuntimeError> {
+        self.ensure_current()?;
+        let store = ReconciliationStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let envelope_store = EnvelopeStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let (accepted, evidence) = restart
+            .accepted_evidence()
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let mut inner = self.permit.state.lock_inner()?;
+        let result = inner.session.with_seed(|wallet_id, seed| {
+            if wallet_id != self.wallet_id || evidence.wallet_id() != wallet_id {
+                return Err(ReconciliationError::AuthenticationFailed);
+            }
+            let envelope_authenticator = EnvelopeStoreAuthenticator::new(wallet_id, seed)
+                .map_err(|_| ReconciliationError::StorageUnavailable)?;
+            let binding = evidence.envelope_binding();
+            envelope_store
+                .ensure_accepted_binding(&envelope_authenticator, &binding)
+                .map_err(|_| ReconciliationError::AuthenticationFailed)?;
+            let journal_authenticator = WalletJournalAuthenticator::new(wallet_id, seed)
+                .map_err(|_| ReconciliationError::StorageUnavailable)?;
+            append_accepted_evidence(custody.journal_path(), &journal_authenticator, &evidence)
+                .map_err(|_| ReconciliationError::StorageUnavailable)?;
+            let reconciliation_authenticator = ReconciliationAuthenticator::new(wallet_id, seed)?;
+            accepted.resolve_recorded(&store, &reconciliation_authenticator)
+        });
+        if !matches!(result, Ok(Ok(()))) {
+            return Err(WalletRuntimeError::ReconciliationUnavailable);
+        }
+        drop(inner);
+        self.ensure_current()
+    }
+
+    pub(in crate::wallet) fn reconcile_ambiguous_acceptance(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+        restart: RestartReconciliationPermit,
+        source: &impl WalletCoreReceiptSource,
+    ) -> Result<WalletReconciliationResult, WalletRuntimeError> {
+        self.run_fail_closed(|| self.reconcile_ambiguous_acceptance_inner(custody, restart, source))
+    }
+
+    fn reconcile_ambiguous_acceptance_inner(
+        &self,
+        custody: &WalletCustodyPathAuthority,
+        restart: RestartReconciliationPermit,
+        source: &impl WalletCoreReceiptSource,
+    ) -> Result<WalletReconciliationResult, WalletRuntimeError> {
+        self.ensure_current()?;
+        let store = ReconciliationStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let (restart, expectation) = restart
+            .lookup_expectation()
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let envelope_store = EnvelopeStore::for_custody(custody)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        {
+            let mut inner = self.permit.state.lock_inner()?;
+            let verified = inner.session.with_seed(|wallet_id, seed| {
+                if wallet_id != self.wallet_id {
+                    return Err(());
+                }
+                let authenticator =
+                    EnvelopeStoreAuthenticator::new(wallet_id, seed).map_err(|_| ())?;
+                let binding = expectation.envelope_binding();
+                envelope_store
+                    .ensure_ambiguous_binding(&authenticator, &binding)
+                    .map_err(|_| ())
+            });
+            if !matches!(verified, Ok(Ok(()))) {
+                return Err(WalletRuntimeError::ReconciliationUnavailable);
+            }
+        }
+        self.ensure_current()?;
+        let fingerprint = source
+            .validated_identity_fingerprint()
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let body = source
+            .transaction_lookup(expectation.transaction_id())
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let proof = prove_exact_reconciliation_lookup(&body, &expectation)
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        let second_fingerprint = source
+            .validated_identity_fingerprint()
+            .map_err(|_| WalletRuntimeError::ReconciliationUnavailable)?;
+        if second_fingerprint != fingerprint {
+            return Err(WalletRuntimeError::ReconciliationUnavailable);
+        }
+        let Some(proof) = proof else {
+            self.ensure_current()?;
+            return Ok(WalletReconciliationResult::Unresolved);
+        };
+        if self.ensure_current().is_err() {
+            return Ok(WalletReconciliationResult::AcceptedRecordingPending);
+        }
+        let mut inner = match self.permit.state.lock_inner() {
+            Ok(inner) => inner,
+            Err(_) => return Ok(WalletReconciliationResult::AcceptedRecordingPending),
+        };
+        let result = inner.session.with_seed(|wallet_id, seed| {
+            if wallet_id != self.wallet_id {
+                return Err(ReconciliationError::AuthenticationFailed);
+            }
+            let reconciliation_authenticator = ReconciliationAuthenticator::new(wallet_id, seed)?;
+            let accepted = match restart.publish_reconciled_acceptance(
+                &store,
+                &reconciliation_authenticator,
+                proof,
+                compatibility_contract_digest(&SubmissionRejectionPolicy::production()),
+            ) {
+                Ok(accepted) => accepted,
+                Err(_) => return Ok(WalletReconciliationResult::AcceptedRecordingPending),
+            };
+            let evidence = match accepted.evidence() {
+                Ok(evidence) => evidence,
+                Err(_) => return Ok(WalletReconciliationResult::AcceptedRecordingPending),
+            };
+            let envelope_authenticator = match EnvelopeStoreAuthenticator::new(wallet_id, seed) {
+                Ok(authenticator) => authenticator,
+                Err(_) => return Ok(WalletReconciliationResult::AcceptedRecordingPending),
+            };
+            let binding = evidence.envelope_binding();
+            if envelope_store
+                .ensure_accepted_binding(&envelope_authenticator, &binding)
+                .is_err()
+            {
+                return Ok(WalletReconciliationResult::AcceptedRecordingPending);
+            }
+            let journal_authenticator = match WalletJournalAuthenticator::new(wallet_id, seed) {
+                Ok(authenticator) => authenticator,
+                Err(_) => return Ok(WalletReconciliationResult::AcceptedRecordingPending),
+            };
+            if append_accepted_evidence(custody.journal_path(), &journal_authenticator, &evidence)
+                .is_err()
+            {
+                return Ok(WalletReconciliationResult::AcceptedRecordingPending);
+            }
+            if accepted
+                .resolve_recorded(&store, &reconciliation_authenticator)
+                .is_err()
+            {
+                return Ok(WalletReconciliationResult::AcceptedRecordingPending);
+            }
+            Ok(WalletReconciliationResult::ResolvedRecorded)
+        });
+        let result = match result {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) | Err(_) => WalletReconciliationResult::AcceptedRecordingPending,
+        };
+        drop(inner);
+        if self.ensure_current().is_err()
+            && matches!(result, WalletReconciliationResult::Unresolved)
+        {
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+        Ok(result)
+    }
+
+    fn run_fail_closed<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, WalletRuntimeError>,
+    ) -> Result<T, WalletRuntimeError> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {
+            Ok(result) => result,
+            Err(_) => match self.permit.state.invalidate_all() {
+                Ok(()) => Err(WalletRuntimeError::RuntimeUnavailable),
+                Err(_) => std::process::abort(),
+            },
+        }
+    }
+
+    fn ensure_current(&self) -> Result<(), WalletRuntimeError> {
+        if self.permit.kind != WalletOperationKind::Reconcile
+            || !self
+                .permit
+                .state
+                .activation
+                .is_satisfied(WalletActivationScope::Reconciliation)
+        {
+            return Err(WalletRuntimeError::ActivationUnavailable);
+        }
+        self.permit.ensure_current()
+    }
+
+    pub(in crate::wallet) fn complete<T>(mut self, value: T) -> Result<T, WalletRuntimeError> {
+        let result = self.permit.complete(value);
+        if result.is_ok() {
+            self.armed = false;
+        }
+        result
+    }
+}
+
+impl Drop for WalletReconciliationPermit<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.permit.state.invalidate_all()
+        })) {
+            Ok(Ok(())) => self.armed = false,
+            Ok(Err(_)) | Err(_) => std::process::abort(),
+        }
+    }
+}
+
+impl Drop for WalletSigningPermit<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.permit.state.invalidate_all()
+        })) {
+            Ok(Ok(())) => self.armed = false,
+            Ok(Err(_)) | Err(_) => std::process::abort(),
+        }
     }
 }
 
@@ -688,20 +2449,72 @@ mod platform {
     use super::WalletRuntimeError;
     use crate::wallet::storage_security;
     use std::{mem::size_of, os::windows::ffi::OsStrExt, ptr};
+    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, HLOCAL},
+        Foundation::{
+            CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, HLOCAL, STATUS_SUCCESS,
+        },
         Security::{
             Authorization::{
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
             },
             PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
         },
-        System::Threading::CreateMutexW,
+        System::{
+            SystemInformation::{
+                GetProductInfo, OSVERSIONINFOEXW, OSVERSIONINFOW, PRODUCT_CORE,
+                PRODUCT_CORE_COUNTRYSPECIFIC, PRODUCT_CORE_N, PRODUCT_CORE_SINGLELANGUAGE,
+                PRODUCT_EDUCATION, PRODUCT_EDUCATION_N, PRODUCT_ENTERPRISE, PRODUCT_ENTERPRISE_N,
+                PRODUCT_ENTERPRISE_S, PRODUCT_ENTERPRISE_S_N, PRODUCT_PROFESSIONAL,
+                PRODUCT_PROFESSIONAL_N, PRODUCT_PRO_WORKSTATION, PRODUCT_PRO_WORKSTATION_N,
+            },
+            SystemServices::{
+                PRODUCT_PRO_FOR_EDUCATION, PRODUCT_PRO_FOR_EDUCATION_N, VER_NT_WORKSTATION,
+            },
+            Threading::CreateMutexW,
+        },
     };
+
+    // Exact non-evaluation Windows Client edition allowlist. Enterprise E/G, Pro Single Language,
+    // Windows SE, Cloud, Server, multi-session, IoT, evaluation, unknown, and future editions are
+    // intentionally absent until reviewed.
+    const SUPPORTED_WINDOWS_CLIENT_PRODUCTS: &[u32] = &[
+        PRODUCT_CORE,
+        PRODUCT_CORE_N,
+        PRODUCT_CORE_COUNTRYSPECIFIC,
+        PRODUCT_CORE_SINGLELANGUAGE,
+        PRODUCT_PROFESSIONAL,
+        PRODUCT_PROFESSIONAL_N,
+        PRODUCT_PRO_WORKSTATION,
+        PRODUCT_PRO_WORKSTATION_N,
+        PRODUCT_PRO_FOR_EDUCATION,
+        PRODUCT_PRO_FOR_EDUCATION_N,
+        PRODUCT_ENTERPRISE,
+        PRODUCT_ENTERPRISE_N,
+        PRODUCT_ENTERPRISE_S,
+        PRODUCT_ENTERPRISE_S_N,
+        PRODUCT_EDUCATION,
+        PRODUCT_EDUCATION_N,
+    ];
+
+    // Windows 11 24H2, 25H2, and 26H1 are the only reviewed release families. Cumulative-update
+    // revisions do not change `dwBuildNumber`. New base builds remain denied until reviewed.
+    const SUPPORTED_WINDOWS_BUILD_FAMILIES: &[u32] = &[26100, 26200, 28000];
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct WindowsHostIdentity {
+        major: u32,
+        minor: u32,
+        build: u32,
+        service_pack_major: u16,
+        service_pack_minor: u16,
+        product_family: u8,
+    }
 
     pub(super) struct ProcessLock(isize);
 
     pub(super) fn acquire(base_name: &str) -> Result<ProcessLock, WalletRuntimeError> {
+        ensure_supported_wallet_host()?;
         let user_sid = storage_security::current_user_sid_string()
             .map_err(|_| WalletRuntimeError::ProcessLockUnavailable)?;
         let name = lock_name(base_name, &user_sid)?;
@@ -732,6 +2545,64 @@ mod platform {
             return Err(WalletRuntimeError::ProcessLockUnavailable);
         }
         Ok(ProcessLock(handle as isize))
+    }
+
+    fn ensure_supported_wallet_host() -> Result<(), WalletRuntimeError> {
+        let host = actual_windows_host_identity()?;
+        let mut product_type = 0;
+        // Supplying the actual version prevents `GetProductInfo` from mapping the product to an
+        // older Windows product set. The separate build-family check still denies a future Windows
+        // release that retains major/minor version 10.0.
+        // SAFETY: `product_type` is a valid writable output pointer for the duration of the call.
+        let succeeded = unsafe {
+            GetProductInfo(
+                host.major,
+                host.minor,
+                u32::from(host.service_pack_major),
+                u32::from(host.service_pack_minor),
+                &mut product_type,
+            )
+        };
+        if succeeded == 0 || !is_supported_windows_host(host, product_type) {
+            return Err(WalletRuntimeError::UnsupportedWindowsHost);
+        }
+        Ok(())
+    }
+
+    fn actual_windows_host_identity() -> Result<WindowsHostIdentity, WalletRuntimeError> {
+        let mut version = OSVERSIONINFOEXW {
+            dwOSVersionInfoSize: u32::try_from(size_of::<OSVERSIONINFOEXW>())
+                .map_err(|_| WalletRuntimeError::UnsupportedWindowsHost)?,
+            ..Default::default()
+        };
+        // SAFETY: `version` has the required size field and is a valid writable structure. The
+        // API accepts either OSVERSIONINFOW or its layout-compatible extended form.
+        let status = unsafe {
+            RtlGetVersion((&mut version as *mut OSVERSIONINFOEXW).cast::<OSVERSIONINFOW>())
+        };
+        if status != STATUS_SUCCESS {
+            return Err(WalletRuntimeError::UnsupportedWindowsHost);
+        }
+        Ok(WindowsHostIdentity {
+            major: version.dwMajorVersion,
+            minor: version.dwMinorVersion,
+            build: version.dwBuildNumber,
+            service_pack_major: version.wServicePackMajor,
+            service_pack_minor: version.wServicePackMinor,
+            product_family: version.wProductType,
+        })
+    }
+
+    fn is_supported_windows_host(host: WindowsHostIdentity, product_type: u32) -> bool {
+        host.major == 10
+            && host.minor == 0
+            && host.product_family == VER_NT_WORKSTATION as u8
+            && SUPPORTED_WINDOWS_BUILD_FAMILIES.contains(&host.build)
+            && is_supported_windows_client_product(product_type)
+    }
+
+    fn is_supported_windows_client_product(product_type: u32) -> bool {
+        SUPPORTED_WINDOWS_CLIENT_PRODUCTS.contains(&product_type)
     }
 
     fn lock_name(base_name: &str, user_sid: &str) -> Result<String, WalletRuntimeError> {
@@ -805,6 +2676,47 @@ mod platform {
         security_descriptor_sddl(user_sid)
     }
 
+    #[cfg(test)]
+    pub(super) fn supported_product_for_test(product_type: u32) -> bool {
+        is_supported_windows_client_product(product_type)
+    }
+
+    #[cfg(test)]
+    pub(super) fn supported_products_for_test() -> &'static [u32] {
+        SUPPORTED_WINDOWS_CLIENT_PRODUCTS
+    }
+
+    #[cfg(test)]
+    pub(super) fn supported_builds_for_test() -> &'static [u32] {
+        SUPPORTED_WINDOWS_BUILD_FAMILIES
+    }
+
+    #[cfg(test)]
+    pub(super) fn supported_host_for_test(
+        major: u32,
+        minor: u32,
+        build: u32,
+        product_family: u8,
+        product_type: u32,
+    ) -> bool {
+        is_supported_windows_host(
+            WindowsHostIdentity {
+                major,
+                minor,
+                build,
+                service_pack_major: 0,
+                service_pack_minor: 0,
+                product_family,
+            },
+            product_type,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn ensure_supported_host_for_test() -> Result<(), WalletRuntimeError> {
+        ensure_supported_wallet_host()
+    }
+
     impl Drop for ProcessLock {
         fn drop(&mut self) {
             let handle = self.0 as *mut std::ffi::c_void;
@@ -836,11 +2748,121 @@ mod platform {
 mod tests {
     use super::*;
     use crate::wallet::{
-        activation::all_activation_requirements_for_test,
+        activation::{
+            lifecycle_activation_requirements_for_test, signing_activation_requirements_for_test,
+        },
         secrets::{WalletPassword, WalletSeed},
         vault::EncryptedWalletVault,
     };
     use std::fs;
+    #[cfg(windows)]
+    use windows_sys::Win32::System::{
+        SystemInformation::{
+            PRODUCT_CORE, PRODUCT_CORE_COUNTRYSPECIFIC, PRODUCT_CORE_N,
+            PRODUCT_CORE_SINGLELANGUAGE, PRODUCT_EDUCATION, PRODUCT_EDUCATION_N,
+            PRODUCT_ENTERPRISE, PRODUCT_ENTERPRISE_E, PRODUCT_ENTERPRISE_EVALUATION,
+            PRODUCT_ENTERPRISE_N, PRODUCT_ENTERPRISE_N_EVALUATION, PRODUCT_ENTERPRISE_S,
+            PRODUCT_ENTERPRISE_S_EVALUATION, PRODUCT_ENTERPRISE_S_N,
+            PRODUCT_ENTERPRISE_S_N_EVALUATION, PRODUCT_PROFESSIONAL, PRODUCT_PROFESSIONAL_N,
+            PRODUCT_PRO_WORKSTATION, PRODUCT_PRO_WORKSTATION_N, PRODUCT_STANDARD_SERVER,
+        },
+        SystemServices::{
+            PRODUCT_CLOUDEDITION, PRODUCT_CLOUDEDITIONN, PRODUCT_ENTERPRISEG, PRODUCT_ENTERPRISEGN,
+            PRODUCT_IOTENTERPRISE, PRODUCT_PRO_FOR_EDUCATION, PRODUCT_PRO_FOR_EDUCATION_N,
+            PRODUCT_PRO_SINGLE_LANGUAGE, PRODUCT_SERVERRDSH, VER_NT_SERVER, VER_NT_WORKSTATION,
+        },
+    };
+
+    #[cfg(windows)]
+    #[test]
+    fn wallet_host_allowlist_is_exact_and_rejects_evaluation_and_multisession() {
+        let expected = [
+            PRODUCT_CORE,
+            PRODUCT_CORE_N,
+            PRODUCT_CORE_COUNTRYSPECIFIC,
+            PRODUCT_CORE_SINGLELANGUAGE,
+            PRODUCT_PROFESSIONAL,
+            PRODUCT_PROFESSIONAL_N,
+            PRODUCT_PRO_WORKSTATION,
+            PRODUCT_PRO_WORKSTATION_N,
+            PRODUCT_PRO_FOR_EDUCATION,
+            PRODUCT_PRO_FOR_EDUCATION_N,
+            PRODUCT_ENTERPRISE,
+            PRODUCT_ENTERPRISE_N,
+            PRODUCT_ENTERPRISE_S,
+            PRODUCT_ENTERPRISE_S_N,
+            PRODUCT_EDUCATION,
+            PRODUCT_EDUCATION_N,
+        ];
+        assert_eq!(platform::supported_products_for_test(), expected);
+        for product in expected {
+            assert!(platform::supported_product_for_test(product));
+        }
+        for product in [
+            0x00, // Unknown
+            PRODUCT_ENTERPRISE_EVALUATION,
+            PRODUCT_ENTERPRISE_N_EVALUATION,
+            PRODUCT_ENTERPRISE_S_EVALUATION,
+            PRODUCT_ENTERPRISE_S_N_EVALUATION,
+            PRODUCT_ENTERPRISE_E,
+            PRODUCT_ENTERPRISEG,
+            PRODUCT_ENTERPRISEGN,
+            PRODUCT_PRO_SINGLE_LANGUAGE,
+            PRODUCT_CLOUDEDITION,
+            PRODUCT_CLOUDEDITIONN,
+            PRODUCT_STANDARD_SERVER,
+            PRODUCT_SERVERRDSH,
+            PRODUCT_IOTENTERPRISE,
+            u32::MAX,
+        ] {
+            assert!(!platform::supported_product_for_test(product));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wallet_host_version_and_family_boundary_rejects_future_back_mapping() {
+        assert_eq!(platform::supported_builds_for_test(), [26100, 26200, 28000]);
+        for build in platform::supported_builds_for_test() {
+            assert!(platform::supported_host_for_test(
+                10,
+                0,
+                *build,
+                VER_NT_WORKSTATION as u8,
+                PRODUCT_CORE,
+            ));
+        }
+
+        // Even if a future release were back-mapped to an allowlisted Home code, its unreviewed
+        // version/build family and any non-workstation family remain fail closed.
+        assert!(!platform::supported_host_for_test(
+            11,
+            0,
+            28000,
+            VER_NT_WORKSTATION as u8,
+            PRODUCT_CORE,
+        ));
+        assert!(!platform::supported_host_for_test(
+            10,
+            0,
+            29000,
+            VER_NT_WORKSTATION as u8,
+            PRODUCT_CORE,
+        ));
+        assert!(!platform::supported_host_for_test(
+            10,
+            0,
+            26200,
+            VER_NT_SERVER as u8,
+            PRODUCT_CORE,
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn current_windows_host_is_inside_the_wallet_support_boundary() {
+        platform::ensure_supported_host_for_test().unwrap();
+    }
 
     #[test]
     fn independent_process_lock_is_exclusive_and_recoverable() {
@@ -944,6 +2966,49 @@ mod tests {
         WalletProcessLock::acquire(&base).unwrap();
     }
 
+    /// Manual real-Windows console/RDP and fast-user-switching qualification probe.
+    ///
+    /// Start the `owner` role in the first Windows session. While it remains alive, start the
+    /// `contender` role under the same Windows account in the second session; it must pass by being
+    /// denied. After terminating the owner, run `recovery`; it must acquire the same global lease.
+    #[test]
+    #[ignore = "requires coordinated processes in separate Windows sessions"]
+    fn real_windows_cross_session_wallet_ownership() {
+        let role = std::env::var("VISION_WALLET_QUALIFICATION_ROLE")
+            .expect("set VISION_WALLET_QUALIFICATION_ROLE to owner, contender, or recovery");
+        let lock_name = "com.vision.desktop.wallet-runtime.cross-session-qualification.v1";
+        match role.as_str() {
+            "owner" => {
+                let _owner = WalletProcessLock::acquire(lock_name)
+                    .expect("qualification owner could not acquire the wallet lease");
+                let hold_seconds = std::env::var("VISION_WALLET_QUALIFICATION_HOLD_SECONDS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .filter(|value| (30..=1_800).contains(value))
+                    .unwrap_or(600);
+                println!(
+                    "VISION_WALLET_QUALIFICATION_OWNER_READY pid={} hold_seconds={hold_seconds}",
+                    std::process::id()
+                );
+                std::thread::sleep(std::time::Duration::from_secs(hold_seconds));
+                println!("VISION_WALLET_QUALIFICATION_OWNER_RELEASED");
+            }
+            "contender" => {
+                assert_eq!(
+                    WalletProcessLock::acquire(lock_name).err(),
+                    Some(WalletRuntimeError::ProcessLockUnavailable)
+                );
+                println!("VISION_WALLET_QUALIFICATION_CONTENDER_DENIED");
+            }
+            "recovery" => {
+                let _recovered = WalletProcessLock::acquire(lock_name)
+                    .expect("wallet lease was not recovered after owner termination");
+                println!("VISION_WALLET_QUALIFICATION_OWNERSHIP_RECOVERED");
+            }
+            _ => panic!("unsupported qualification role"),
+        }
+    }
+
     #[test]
     fn operations_are_main_window_owned_and_mutually_exclusive() {
         let runtime = WalletRuntimeState::for_test();
@@ -970,13 +3035,15 @@ mod tests {
     }
 
     #[test]
-    fn every_missing_activation_requirement_blocks_all_sensitive_authority() {
-        for requirement in all_activation_requirements_for_test() {
-            let runtime = WalletRuntimeState::for_test_missing_activation(requirement);
+    fn lifecycle_requirements_block_lifecycle_signing_and_recovery_authority() {
+        for requirement in lifecycle_activation_requirements_for_test() {
+            let runtime = Arc::new(WalletRuntimeState::for_test_missing_activation(requirement));
             for kind in [
                 WalletOperationKind::Create,
                 WalletOperationKind::Restore,
                 WalletOperationKind::Unlock,
+                WalletOperationKind::PreparePreview,
+                WalletOperationKind::ConsumePreview,
                 WalletOperationKind::Sign,
             ] {
                 assert_eq!(
@@ -999,12 +3066,82 @@ mod tests {
     }
 
     #[test]
+    fn signing_requirements_block_only_signing_authority() {
+        for requirement in signing_activation_requirements_for_test() {
+            for kind in [
+                WalletOperationKind::Create,
+                WalletOperationKind::Restore,
+                WalletOperationKind::Unlock,
+                WalletOperationKind::PreparePreview,
+                WalletOperationKind::ConsumePreview,
+            ] {
+                let runtime = WalletRuntimeState::for_test_missing_activation(requirement);
+                runtime.begin_operation(MAIN_WINDOW_LABEL, kind).unwrap();
+            }
+
+            let runtime = WalletRuntimeState::for_test_missing_activation(requirement);
+            assert_eq!(
+                runtime
+                    .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
+                    .err(),
+                Some(WalletRuntimeError::ActivationUnavailable),
+                "missing requirement: {requirement:?}",
+            );
+
+            let runtime = Arc::new(WalletRuntimeState::for_test_missing_activation(requirement));
+            runtime
+                .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn signing_submission_and_reconciliation_cannot_start_as_ordinary_operations() {
+        let runtime = WalletRuntimeState::for_test();
+
+        for kind in [
+            WalletOperationKind::Sign,
+            WalletOperationKind::Submit,
+            WalletOperationKind::Reconcile,
+        ] {
+            assert_eq!(
+                runtime.begin_operation(MAIN_WINDOW_LABEL, kind).err(),
+                Some(WalletRuntimeError::InvalidRequest)
+            );
+        }
+    }
+
+    #[test]
     fn production_activation_policy_issues_no_sensitive_authority() {
-        let runtime = WalletRuntimeState::for_test_with_production_activation();
+        let runtime = Arc::new(WalletRuntimeState::for_test_with_production_activation());
 
         assert_eq!(
             runtime
+                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Create)
+                .err(),
+            Some(WalletRuntimeError::ActivationUnavailable),
+        );
+        assert_eq!(
+            runtime
+                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::PreparePreview)
+                .err(),
+            Some(WalletRuntimeError::ActivationUnavailable),
+        );
+        assert_eq!(
+            runtime
                 .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
+                .err(),
+            Some(WalletRuntimeError::ActivationUnavailable),
+        );
+        assert_eq!(
+            runtime
+                .begin_reconciliation_discovery(MAIN_WINDOW_LABEL)
+                .err(),
+            Some(WalletRuntimeError::ActivationUnavailable),
+        );
+        assert_eq!(
+            runtime
+                .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination,)
                 .err(),
             Some(WalletRuntimeError::ActivationUnavailable),
         );
@@ -1018,7 +3155,7 @@ mod tests {
             .unwrap();
         runtime.invalidate_all().unwrap();
         let current = runtime
-            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
+            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Unlock)
             .unwrap();
         assert_eq!(
             stale.ensure_current(),
@@ -1028,13 +3165,13 @@ mod tests {
         drop(stale);
         assert_eq!(
             runtime
-                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Unlock)
+                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Restore)
                 .err(),
             Some(WalletRuntimeError::OperationInProgress)
         );
         drop(current);
         runtime
-            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Unlock)
+            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Restore)
             .unwrap();
     }
 
@@ -1116,8 +3253,14 @@ mod tests {
 
     #[test]
     fn pending_revocation_rejects_new_authority() {
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
+        let validated_boundary_epoch = runtime.capture_boundary_epoch().unwrap();
         runtime.pending_revocations.store(1, Ordering::Release);
+
+        assert_eq!(
+            runtime.validate_boundary_epoch(validated_boundary_epoch),
+            Err(WalletRuntimeError::RuntimeUnavailable)
+        );
 
         assert_eq!(
             runtime
@@ -1129,6 +3272,10 @@ mod tests {
             runtime
                 .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination,)
                 .err(),
+            Some(WalletRuntimeError::RuntimeUnavailable)
+        );
+        assert_eq!(
+            runtime.begin_receipt_refresh(MAIN_WINDOW_LABEL).err(),
             Some(WalletRuntimeError::RuntimeUnavailable)
         );
 
@@ -1144,7 +3291,7 @@ mod tests {
 
         let runtime = WalletRuntimeState::for_test();
         let permit = runtime
-            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
+            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Unlock)
             .unwrap();
         let initial_epoch = permit.revocation_epoch;
         let held_runtime = runtime.inner.lock().unwrap();
@@ -1182,7 +3329,7 @@ mod tests {
     fn completion_cannot_escape_after_revocation() {
         let runtime = WalletRuntimeState::for_test();
         let permit = runtime
-            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
+            .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Unlock)
             .unwrap();
         runtime.invalidate_all().unwrap();
         assert_eq!(
@@ -1193,7 +3340,7 @@ mod tests {
 
     #[test]
     fn recovery_path_tokens_are_window_bound_single_use_and_expiring() {
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let selected = PathBuf::from(r"C:\safe\wallet.vision-recovery.json");
         let permit = runtime
             .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
@@ -1202,11 +3349,23 @@ mod tests {
             .complete_recovery_path_selection_at(
                 permit,
                 selected.clone(),
-                &[7; PATH_TOKEN_BYTES],
+                &[0xab; PATH_TOKEN_BYTES],
                 100,
             )
             .unwrap();
         assert_eq!(token.as_str().len(), PATH_TOKEN_HEX_BYTES);
+        let uppercase = token.as_str().to_ascii_uppercase();
+        assert_eq!(
+            runtime
+                .consume_recovery_path_at(
+                    MAIN_WINDOW_LABEL,
+                    RecoveryPathPurpose::Destination,
+                    uppercase.as_str(),
+                    101,
+                )
+                .unwrap_err(),
+            WalletRuntimeError::InvalidRequest
+        );
         assert_eq!(
             runtime
                 .consume_recovery_path_at(
@@ -1267,7 +3426,7 @@ mod tests {
 
     #[test]
     fn window_invalidation_revokes_every_path_authorization() {
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let permit = runtime
             .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Source)
             .unwrap();
@@ -1295,7 +3454,7 @@ mod tests {
 
     #[test]
     fn random_path_token_round_trip_uses_the_monotonic_runtime_clock() {
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let selected = PathBuf::from(r"C:\safe\generated.vision-recovery.json");
         let permit = runtime
             .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
@@ -1318,7 +3477,7 @@ mod tests {
 
     #[test]
     fn pending_selection_excludes_operations_and_stale_completion_cannot_win() {
-        let runtime = WalletRuntimeState::for_test();
+        let runtime = Arc::new(WalletRuntimeState::for_test());
         let stale = runtime
             .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination)
             .unwrap();
@@ -1336,7 +3495,7 @@ mod tests {
         );
 
         runtime.invalidate_all().unwrap();
-        let current = runtime
+        let mut current = runtime
             .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Source)
             .unwrap();
         assert_eq!(
@@ -1348,7 +3507,11 @@ mod tests {
                 .err(),
             Some(WalletRuntimeError::PathAuthorizationInvalid)
         );
-        runtime.cancel_recovery_path_selection(&current).unwrap();
+        assert_eq!(
+            runtime.cancel_recovery_path_selection(&mut current),
+            Err(WalletRuntimeError::PathAuthorizationInvalid),
+        );
+        drop(current);
         runtime
             .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Restore)
             .unwrap();
@@ -1357,7 +3520,7 @@ mod tests {
     #[test]
     fn poisoned_runtime_fails_closed_and_clears_authority() {
         let runtime = WalletRuntimeState::for_test();
-        let password = WalletPassword::new("correct horse battery staple".to_string());
+        let password = WalletPassword::for_test("correct horse battery staple");
         let vault = EncryptedWalletVault::encrypt_for_test(
             "poison_test",
             1,
@@ -1404,6 +3567,7 @@ mod tests {
     fn error_contract_contains_only_fixed_codes_and_messages() {
         let errors = [
             WalletRuntimeError::ProcessLockUnavailable,
+            WalletRuntimeError::UnsupportedWindowsHost,
             WalletRuntimeError::RuntimeUnavailable,
             WalletRuntimeError::ActivationUnavailable,
             WalletRuntimeError::InvalidWindow,

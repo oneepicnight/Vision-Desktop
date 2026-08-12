@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../types/core";
 import type { AppPaths, NodeConfigSnapshot } from "../types/configuration";
-import type { CoreManifest, CoreVerification } from "../types/diagnostics";
+import type { CoreManifest, CoreVerification, SupportPackageResult } from "../types/diagnostics";
 import type {
   ExplorerAddressResult,
   ExplorerLookupMode,
@@ -50,7 +50,7 @@ export function restartCore() {
 }
 
 export function generateSupportPackage() {
-  return invoke("generate_support_package");
+  return invoke<SupportPackageResult>("generate_support_package");
 }
 
 export function openLogsDirectory() {

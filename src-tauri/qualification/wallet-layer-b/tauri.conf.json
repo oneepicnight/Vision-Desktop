@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Vision Wallet Transport Qualification",
+  "version": "0.0.0-qualification",
+  "identifier": "com.vision.desktop.wallet-transport-qualification",
+  "build": {
+    "frontendDist": "assets"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "wallet-transport-qualification",
+        "title": "Vision Wallet Transport Qualification ? NOT PRODUCTION",
+        "url": "bootstrap.html",
+        "width": 1060,
+        "height": 760,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "capabilities": [
+        {
+          "identifier": "wallet-layer-b-qualification",
+          "description": "Test-only access to seven non-custody transport classifiers.",
+          "windows": [
+            "wallet-transport-qualification",
+            "wallet-transport-qualification-other"
+          ],
+          "platforms": ["windows"],
+          "local": true,
+          "remote": {
+            "urls": ["http://127.0.0.1:*/*"]
+          },
+          "permissions": [
+            "allow-wallet-get-status",
+            "allow-wallet-select-recovery-destination",
+            "allow-wallet-create",
+            "allow-wallet-select-recovery-source",
+            "allow-wallet-restore",
+            "allow-wallet-unlock",
+            "allow-wallet-lock"
+          ]
+        }
+      ],
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://qualification-report.localhost http://qualification-control.localhost; img-src 'none'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": [],
+    "icon": ["../../icons/icon.png"],
+    "resources": {}
+  }
+}

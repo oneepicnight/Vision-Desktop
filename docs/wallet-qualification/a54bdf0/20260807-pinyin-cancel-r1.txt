@@ -1,0 +1,49 @@
+EVIDENCE_START=2026-08-07T13:19:29.3033533-04:00
+OPERATOR_WINDOWS_IDENTITY=LAPTOP-SNC6K2SH\bighe
+WORKTREE=C:\Vision\Vision-Desktop-qualification-a54bdf0
+COMMIT=a54bdf06be75b762755b96c87294c82af1dd6920
+TREE=42b5332fb163bdd187c44b658f3626a32c31b843
+CLEAN=True
+WINDOWS_PRODUCT_LABEL=Windows 10 Home
+WINDOWS_DISPLAY_VERSION=25H2
+WINDOWS_BUILD=26200.8655
+DISPLAY=1920x1200@165Hz
+SCENARIO=cancel
+EVIDENCE_LABEL=primary-pinyin-cancel-a54bdf0-20260807-r1
+INPUT_PROFILE=microsoft-pinyin
+COMMAND=cargo test --manifest-path src-tauri/Cargo.toml wallet::transaction_confirmation::tests::real_windows_transaction_confirmation_operator_harness -- --exact --ignored --nocapture --test-threads=1
+   Compiling vision-desktop v0.1.0-alpha.1 (C:\Vision\Vision-Desktop-qualification-a54bdf0\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.63s
+     Running unittests src\lib.rs (src-tauri\target\debug\deps\vision_desktop_lib-f5e58dee17c65d07.exe)
+
+running 1 test
+test wallet::transaction_confirmation::tests::real_windows_transaction_confirmation_operator_harness ... VISION_WALLET_CONFIRMATION_QUALIFICATION_READY scenario=cancel label=primary-pinyin-cancel-a54bdf0-20260807-r1 input_profile=microsoft-pinyin keyboard_layout=00000804 expected_dpi_context=PerMonitorV2 pid=23828
+Inspect the complete dialog, then click Cancel or close the window.
+VISION_WALLET_CONFIRMATION_DPI_CONTEXT process=PerMonitorV2:34 thread=PerMonitorV2:34 owner=PerMonitorV2:34 dialog=PerMonitorV2:34 confirm=PerMonitorV2:34 cancel=PerMonitorV2:34 owner_dpi=120 dialog_dpi=120
+VISION_WALLET_CONFIRMATION_QUALIFICATION_PASS scenario=cancel label=primary-pinyin-cancel-a54bdf0-20260807-r1 input_profile=microsoft-pinyin keyboard_layout=00000804 dpi_context=PerMonitorV2 confirmation_dpi=120 confirm_focus_verified=true accepted_input_device=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 240 filtered out; finished in 5.39s
+
+     Running unittests src\main.rs (src-tauri\target\debug\deps\vision_desktop-c8612cefb9559f2c.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\tauri_acl.rs (src-tauri\target\debug\deps\tauri_acl-f44b433aaf3f9463.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests\webview_security.rs (src-tauri\target\debug\deps\webview_security-0c4362b3f7e5a7bc.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+EVIDENCE_END=2026-08-07T13:19:43.1851073-04:00
+EXIT_CODE=0
+OPERATOR_OBSERVATION=All exact values and both buttons were visible; no composition, candidate, prediction, conversion, guide, or soft-keyboard UI appeared; physical cancellation produced no confirmation.
+NO_SCREENSHOTS_CAPTURED=true

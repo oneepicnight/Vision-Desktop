@@ -44,4 +44,10 @@ The account address is encoded as a URL path segment by the Desktop backend. Req
 - Real Core launch remains blocked by the separately documented frozen-RC2 loopback-bind limitation.
 - Balance denomination and precision metadata are not exposed.
 - Transaction and receipt history are not exposed through the current Desktop service boundary.
-- The embedded Rust-managed custody model is now selected and documented in `WALLET_SECURITY_ARCHITECTURE.md`, but custody remains unimplemented and disabled until its Core compatibility and vault security gates pass.
+- The embedded Rust-managed custody model and private lifecycle primitives are implemented but
+  unregistered, inactive, and inaccessible to React. User-facing custody remains disabled until the
+  native boundary, transaction authority path, private-loopback Core compatibility, and independent
+  security gates pass.
+
+The required future spending sequence and its non-negotiable authority boundaries are specified in
+`WALLET_TRANSACTION_AUTHORITY_BOUNDARY.md`.

@@ -1,0 +1,1092 @@
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "transaction previews remain private until their later command boundary is approved"
+    )
+)]
+#![cfg_attr(
+    test,
+    allow(
+        dead_code,
+        reason = "production preview wrappers stay unregistered while private helpers are tested"
+    )
+)]
+
+use super::{
+    amount::{format_vision_amount, parse_vision_amount},
+    core_client::{
+        WalletCoreClientError, WalletCoreReadClient, WalletCoreReadSource,
+        SUPPORTED_WALLET_CORE_CONTRACT,
+    },
+    lifecycle::WalletCustodyPathAuthority,
+    public_request::WalletTransferPreviewRequest,
+    runtime::{
+        WalletOperationKind, WalletRuntimeError, WalletRuntimeState, WalletSigningPermit,
+        TRANSACTION_PREVIEW_TTL_MS,
+    },
+    transaction::{
+        build_unsigned_cash_transfer, canonical_transaction_id, CashTransferDraft,
+        ConfirmedCashTransfer, VisionTransaction, WalletTransactionError,
+    },
+};
+use crate::supervisor::SupervisorState;
+use std::time::Instant;
+
+const NORMAL_RECOVERY_STATE: &str = "normal";
+const REORGANIZATION_WARNING: &str =
+    "A mined transaction may be reorganized and is never presented as irreversible.";
+
+/// Complete unsigned intent retained only by the Rust wallet runtime.
+///
+/// It intentionally implements neither Clone, Debug, nor serialization.
+pub(in crate::wallet) struct BoundTransferPreview {
+    sender_address: String,
+    sender_public_key: String,
+    recipient_address: String,
+    amount_raw_units: u128,
+    charged_fee_raw_units: u64,
+    fee_limit_raw_units: u64,
+    total_debit_raw_units: u128,
+    balance_raw_units: u128,
+    nonce: u64,
+    transaction_id: String,
+    canonical_tip_height: u64,
+    canonical_tip_hash: String,
+    core_contract: String,
+    status_version: String,
+    core_identity_fingerprint: [u8; 32],
+    unsigned_transaction: VisionTransaction,
+}
+
+impl BoundTransferPreview {
+    pub(in crate::wallet) fn sender_address(&self) -> &str {
+        self.sender_address.as_str()
+    }
+
+    pub(in crate::wallet) fn sender_public_key(&self) -> &str {
+        self.sender_public_key.as_str()
+    }
+
+    pub(in crate::wallet) fn matches_core_identity(&self, fingerprint: &[u8; 32]) -> bool {
+        self.core_identity_fingerprint == *fingerprint
+    }
+
+    pub(in crate::wallet) fn core_identity_fingerprint(&self) -> &[u8; 32] {
+        &self.core_identity_fingerprint
+    }
+
+    pub(in crate::wallet) fn confirmed_cash_transfer(&self) -> ConfirmedCashTransfer<'_> {
+        ConfirmedCashTransfer {
+            unsigned_transaction: &self.unsigned_transaction,
+            sender_address: self.sender_address.as_str(),
+            recipient_address: self.recipient_address.as_str(),
+            amount_raw_units: self.amount_raw_units,
+            charged_fee_raw_units: self.charged_fee_raw_units,
+            fee_limit_raw_units: self.fee_limit_raw_units,
+            total_debit_raw_units: self.total_debit_raw_units,
+            nonce: self.nonce,
+            transaction_id: self.transaction_id.as_str(),
+            core_contract: self.core_contract.as_str(),
+            status_version: self.status_version.as_str(),
+        }
+    }
+    pub(in crate::wallet) fn confirmation_fields(&self) -> TransferConfirmationFields<'_> {
+        TransferConfirmationFields {
+            sender_address: self.sender_address.as_str(),
+            recipient_address: self.recipient_address.as_str(),
+            amount_raw_units: self.amount_raw_units,
+            charged_fee_raw_units: self.charged_fee_raw_units,
+            fee_limit_raw_units: self.fee_limit_raw_units,
+            total_debit_raw_units: self.total_debit_raw_units,
+            nonce: self.nonce,
+            transaction_id: self.transaction_id.as_str(),
+        }
+    }
+}
+
+/// Borrowed, public-only fields rendered by the Rust-owned native confirmation window.
+///
+/// This view intentionally implements neither Clone, Debug, nor serialization.
+pub(in crate::wallet) struct TransferConfirmationFields<'a> {
+    pub sender_address: &'a str,
+    pub recipient_address: &'a str,
+    pub amount_raw_units: u128,
+    pub charged_fee_raw_units: u64,
+    pub fee_limit_raw_units: u64,
+    pub total_debit_raw_units: u128,
+    pub nonce: u64,
+    pub transaction_id: &'a str,
+}
+
+/// Public-only preview data for a future reviewed command boundary.
+///
+/// It deliberately has no unrestricted Debug implementation while it remains timing-correlated
+/// wallet activity. The opaque handle is not signing authority.
+pub(in crate::wallet) struct PreparedTransferPreview {
+    pub handle: String,
+    pub sender_address: String,
+    pub recipient_address: String,
+    pub amount: String,
+    pub amount_raw_units: u128,
+    pub charged_fee: String,
+    pub charged_fee_raw_units: u64,
+    pub maximum_fee: String,
+    pub fee_limit_raw_units: u64,
+    pub total_debit: String,
+    pub total_debit_raw_units: u128,
+    pub balance: String,
+    pub balance_raw_units: u128,
+    pub nonce: u64,
+    pub transaction_id: String,
+    pub canonical_tip_height: u64,
+    pub canonical_tip_hash: String,
+    pub core_contract: String,
+    pub status_version: String,
+    pub data_age_ms: u64,
+    pub expires_after_ms: u64,
+    pub warning: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::wallet) enum WalletPreviewError {
+    InvalidRequest,
+    WalletUnavailable,
+    OperationInProgress,
+    CompatibilityUnavailable,
+    CoreUnavailable,
+    CoreRejected,
+    CoreRecovering,
+    AccountUnavailable,
+    InsufficientBalance,
+    ArithmeticRejected,
+    RuntimeUnavailable,
+    ActivityUnavailable,
+}
+
+impl WalletPreviewError {
+    pub(in crate::wallet) const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::WalletUnavailable => "wallet_unavailable",
+            Self::OperationInProgress => "wallet_operation_in_progress",
+            Self::CompatibilityUnavailable => "wallet_core_compatibility_unavailable",
+            Self::CoreUnavailable => "wallet_core_unavailable",
+            Self::CoreRejected => "wallet_core_response_rejected",
+            Self::CoreRecovering => "wallet_core_recovering",
+            Self::AccountUnavailable => "wallet_account_unavailable",
+            Self::InsufficientBalance => "insufficient_balance",
+            Self::ArithmeticRejected => "wallet_amount_arithmetic_rejected",
+            Self::RuntimeUnavailable => "wallet_runtime_unavailable",
+            Self::ActivityUnavailable => "wallet_activity_unavailable",
+        }
+    }
+}
+
+/// A consumed preview whose runtime operation and Core generation remain live through native
+/// confirmation. Dropping it destroys the intent and releases the operation without producing
+/// confirmation authority.
+pub(in crate::wallet) struct PendingTransferConfirmation<'a, S: WalletCoreReadSource> {
+    permit: super::runtime::WalletOperationPermit<'a>,
+    source: S,
+    intent: BoundTransferPreview,
+}
+
+impl<'a, S: WalletCoreReadSource> PendingTransferConfirmation<'a, S> {
+    pub(in crate::wallet) fn fields(&self) -> TransferConfirmationFields<'_> {
+        self.intent.confirmation_fields()
+    }
+
+    pub(in crate::wallet) fn authority_is_current(&self) -> bool {
+        self.validate_current().is_ok()
+    }
+
+    pub(in crate::wallet) fn promote_with_native_approval(
+        self,
+        approval: super::transaction_confirmation::NativeConfirmationApproval,
+    ) -> Result<(WalletSigningPermit<'a>, S, BoundTransferPreview), WalletPreviewError> {
+        self.validate_current()?;
+        let Self {
+            permit,
+            source,
+            intent,
+        } = self;
+        let signing_permit = permit
+            .promote_to_signing(
+                approval,
+                intent.sender_address(),
+                intent.sender_public_key(),
+            )
+            .map_err(map_runtime_error)?;
+        let fingerprint = source
+            .validated_identity_fingerprint()
+            .map_err(map_core_error)?;
+        signing_permit.ensure_current().map_err(map_runtime_error)?;
+        if !intent.matches_core_identity(&fingerprint) {
+            return Err(WalletPreviewError::CoreUnavailable);
+        }
+        Ok((signing_permit, source, intent))
+    }
+
+    fn validate_current(&self) -> Result<(), WalletPreviewError> {
+        let fingerprint = self
+            .source
+            .validated_identity_fingerprint()
+            .map_err(map_core_error)?;
+        self.permit.ensure_current().map_err(map_runtime_error)?;
+        if !self.intent.matches_core_identity(&fingerprint) {
+            return Err(WalletPreviewError::CoreUnavailable);
+        }
+        Ok(())
+    }
+}
+
+pub(in crate::wallet) struct WalletTransactionPreviewEngine<'a> {
+    runtime: &'a WalletRuntimeState,
+}
+
+impl<'a> WalletTransactionPreviewEngine<'a> {
+    pub(in crate::wallet) fn new(runtime: &'a WalletRuntimeState) -> Self {
+        Self { runtime }
+    }
+
+    pub(in crate::wallet) fn prepare(
+        &self,
+        supervisor: &'a SupervisorState,
+        owner_window: &str,
+        request: WalletTransferPreviewRequest,
+        custody: &WalletCustodyPathAuthority,
+    ) -> Result<PreparedTransferPreview, WalletPreviewError> {
+        let permit = self
+            .runtime
+            .begin_operation(owner_window, WalletOperationKind::PreparePreview)
+            .map_err(map_runtime_error)?;
+        let client = WalletCoreReadClient::from_supervisor(supervisor).map_err(map_core_error)?;
+        prepare_with_source_and_custody(&permit, request, &client, custody)
+    }
+
+    pub(in crate::wallet) fn consume(
+        &self,
+        supervisor: &'a SupervisorState,
+        owner_window: &str,
+        handle: &str,
+    ) -> Result<PendingTransferConfirmation<'a, WalletCoreReadClient<'a>>, WalletPreviewError> {
+        let permit = self
+            .runtime
+            .begin_operation(owner_window, WalletOperationKind::ConsumePreview)
+            .map_err(map_runtime_error)?;
+        let intent = permit
+            .consume_transaction_preview(handle)
+            .map_err(map_runtime_error)?;
+        let client = WalletCoreReadClient::from_supervisor(supervisor).map_err(map_core_error)?;
+        bind_consumed_preview(permit, intent, client)
+    }
+
+    pub(in crate::wallet) fn cancel(
+        &self,
+        owner_window: &str,
+        handle: &str,
+    ) -> Result<(), WalletPreviewError> {
+        let permit = self
+            .runtime
+            .begin_operation(owner_window, WalletOperationKind::ConsumePreview)
+            .map_err(map_runtime_error)?;
+        let intent = permit
+            .consume_transaction_preview(handle)
+            .map_err(map_runtime_error)?;
+        drop(intent);
+        permit.complete(()).map_err(map_runtime_error)
+    }
+}
+
+fn consume_with_source(
+    permit: &super::runtime::WalletOperationPermit<'_>,
+    handle: &str,
+    source: &impl WalletCoreReadSource,
+) -> Result<BoundTransferPreview, WalletPreviewError> {
+    let intent = permit
+        .consume_transaction_preview(handle)
+        .map_err(map_runtime_error)?;
+    validate_consumed_preview(permit, &intent, source)?;
+    permit.complete(intent).map_err(map_runtime_error)
+}
+
+fn validate_consumed_preview(
+    permit: &super::runtime::WalletOperationPermit<'_>,
+    intent: &BoundTransferPreview,
+    source: &impl WalletCoreReadSource,
+) -> Result<(), WalletPreviewError> {
+    let identity_before_release = source
+        .validated_identity_fingerprint()
+        .map_err(map_core_error)?;
+    permit.ensure_current().map_err(map_runtime_error)?;
+    if !intent.matches_core_identity(&identity_before_release) {
+        return Err(WalletPreviewError::CoreUnavailable);
+    }
+
+    let identity_after_consumption = source
+        .validated_identity_fingerprint()
+        .map_err(map_core_error)?;
+    permit.ensure_current().map_err(map_runtime_error)?;
+    if identity_before_release != identity_after_consumption
+        || !intent.matches_core_identity(&identity_after_consumption)
+    {
+        return Err(WalletPreviewError::CoreUnavailable);
+    }
+
+    Ok(())
+}
+
+fn bind_consumed_preview<'a>(
+    permit: super::runtime::WalletOperationPermit<'a>,
+    intent: BoundTransferPreview,
+    source: WalletCoreReadClient<'a>,
+) -> Result<PendingTransferConfirmation<'a, WalletCoreReadClient<'a>>, WalletPreviewError> {
+    validate_consumed_preview(&permit, &intent, &source)?;
+    Ok(PendingTransferConfirmation {
+        permit,
+        source,
+        intent,
+    })
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn bind_consumed_preview_for_test<'a, S: WalletCoreReadSource>(
+    permit: super::runtime::WalletOperationPermit<'a>,
+    intent: BoundTransferPreview,
+    source: S,
+) -> Result<PendingTransferConfirmation<'a, S>, WalletPreviewError> {
+    validate_consumed_preview(&permit, &intent, &source)?;
+    Ok(PendingTransferConfirmation {
+        permit,
+        source,
+        intent,
+    })
+}
+
+fn prepare_with_source(
+    permit: &super::runtime::WalletOperationPermit<'_>,
+    request: WalletTransferPreviewRequest,
+    source: &impl WalletCoreReadSource,
+) -> Result<PreparedTransferPreview, WalletPreviewError> {
+    prepare_with_source_inner(permit, request, source, None)
+}
+
+fn prepare_with_source_and_custody(
+    permit: &super::runtime::WalletOperationPermit<'_>,
+    request: WalletTransferPreviewRequest,
+    source: &impl WalletCoreReadSource,
+    custody: &WalletCustodyPathAuthority,
+) -> Result<PreparedTransferPreview, WalletPreviewError> {
+    prepare_with_source_inner(permit, request, source, Some(custody))
+}
+
+fn prepare_with_source_inner(
+    permit: &super::runtime::WalletOperationPermit<'_>,
+    request: WalletTransferPreviewRequest,
+    source: &impl WalletCoreReadSource,
+    custody: Option<&WalletCustodyPathAuthority>,
+) -> Result<PreparedTransferPreview, WalletPreviewError> {
+    let account = permit.current_public_account().map_err(map_runtime_error)?;
+    let (recipient, amount) = request.into_parts();
+    let amount_raw_units =
+        parse_vision_amount(amount.as_str()).map_err(|_| WalletPreviewError::InvalidRequest)?;
+    if amount_raw_units == 0 {
+        return Err(WalletPreviewError::InvalidRequest);
+    }
+    let recipient_address = recipient.into_string();
+    if recipient_address == account.address {
+        return Err(WalletPreviewError::InvalidRequest);
+    }
+
+    permit.ensure_current().map_err(map_runtime_error)?;
+    let observation_started_at = Instant::now();
+    let core_account = source
+        .account_snapshot(&account.address)
+        .map_err(map_core_error)?;
+    permit.ensure_current().map_err(map_runtime_error)?;
+    let status = source.status().map_err(map_core_error)?;
+    permit.ensure_current().map_err(map_runtime_error)?;
+
+    if core_account.address != account.address {
+        return Err(WalletPreviewError::CoreRejected);
+    }
+    if !core_account.exists {
+        return Err(WalletPreviewError::AccountUnavailable);
+    }
+    if status.recovery_state != NORMAL_RECOVERY_STATE {
+        return Err(WalletPreviewError::CoreRecovering);
+    }
+
+    let draft = CashTransferDraft::for_current_nonce(
+        core_account.nonce,
+        recipient_address.clone(),
+        amount_raw_units,
+    );
+    let charged_fee_raw_units = draft
+        .charged_fee_raw_units()
+        .map_err(map_transaction_error)?;
+    let total_debit_raw_units = amount_raw_units
+        .checked_add(u128::from(charged_fee_raw_units))
+        .ok_or(WalletPreviewError::ArithmeticRejected)?;
+    if core_account.balance < total_debit_raw_units {
+        return Err(WalletPreviewError::InsufficientBalance);
+    }
+
+    let unsigned_transaction =
+        build_unsigned_cash_transfer(account.public_key.clone(), &account.address, &draft)
+            .map_err(map_transaction_error)?;
+    let transaction_id =
+        canonical_transaction_id(&unsigned_transaction).map_err(map_transaction_error)?;
+    if let Some(custody) = custody {
+        permit
+            .ensure_envelope_store_accepts_transaction(custody, &transaction_id)
+            .map_err(|_| WalletPreviewError::ActivityUnavailable)?;
+    }
+    let amount_display = format_vision_amount(amount_raw_units);
+    let charged_fee_display = format_vision_amount(u128::from(charged_fee_raw_units));
+    let fee_limit_display = format_vision_amount(u128::from(draft.fee_limit_raw_units()));
+    let total_debit_display = format_vision_amount(total_debit_raw_units);
+    let balance_display = format_vision_amount(core_account.balance);
+    let fee_limit_raw_units = draft.fee_limit_raw_units();
+    let status_version = status.version;
+    let canonical_tip_height = status.canonical_tip_height;
+    let canonical_tip_hash = status.canonical_tip_hash;
+    let core_contract = SUPPORTED_WALLET_CORE_CONTRACT.to_string();
+    let core_identity_fingerprint = source
+        .validated_identity_fingerprint()
+        .map_err(map_core_error)?;
+    permit.ensure_current().map_err(map_runtime_error)?;
+
+    let intent = BoundTransferPreview {
+        sender_address: account.address.clone(),
+        sender_public_key: account.public_key,
+        recipient_address: recipient_address.clone(),
+        amount_raw_units,
+        charged_fee_raw_units,
+        fee_limit_raw_units,
+        total_debit_raw_units,
+        balance_raw_units: core_account.balance,
+        nonce: core_account.nonce,
+        transaction_id: transaction_id.clone(),
+        canonical_tip_height,
+        canonical_tip_hash: canonical_tip_hash.clone(),
+        core_contract: core_contract.clone(),
+        status_version: status_version.clone(),
+        core_identity_fingerprint,
+        unsigned_transaction,
+    };
+    let receipt = permit
+        .complete_transaction_preview(intent)
+        .map_err(map_runtime_error)?;
+    let (handle, _issued_at_monotonic_ms) = receipt.into_parts();
+    let data_age_ms =
+        u64::try_from(observation_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    Ok(PreparedTransferPreview {
+        handle,
+        sender_address: account.address,
+        recipient_address,
+        amount: amount_display,
+        amount_raw_units,
+        charged_fee: charged_fee_display,
+        charged_fee_raw_units,
+        maximum_fee: fee_limit_display,
+        fee_limit_raw_units,
+        total_debit: total_debit_display,
+        total_debit_raw_units,
+        balance: balance_display,
+        balance_raw_units: core_account.balance,
+        nonce: core_account.nonce,
+        transaction_id,
+        canonical_tip_height,
+        canonical_tip_hash,
+        core_contract,
+        status_version,
+        data_age_ms,
+        expires_after_ms: TRANSACTION_PREVIEW_TTL_MS,
+        warning: REORGANIZATION_WARNING.to_string(),
+    })
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn prepare_with_source_for_test(
+    permit: &super::runtime::WalletOperationPermit<'_>,
+    request: WalletTransferPreviewRequest,
+    source: &impl WalletCoreReadSource,
+) -> Result<PreparedTransferPreview, WalletPreviewError> {
+    prepare_with_source(permit, request, source)
+}
+
+fn map_runtime_error(error: WalletRuntimeError) -> WalletPreviewError {
+    match error {
+        WalletRuntimeError::InvalidWindow | WalletRuntimeError::InvalidRequest => {
+            WalletPreviewError::WalletUnavailable
+        }
+        WalletRuntimeError::OperationInProgress => WalletPreviewError::OperationInProgress,
+        WalletRuntimeError::ActivationUnavailable => WalletPreviewError::CompatibilityUnavailable,
+        WalletRuntimeError::ProcessLockUnavailable
+        | WalletRuntimeError::UnsupportedWindowsHost
+        | WalletRuntimeError::RuntimeUnavailable
+        | WalletRuntimeError::SecureRandomUnavailable
+        | WalletRuntimeError::PathAuthorizationInvalid
+        | WalletRuntimeError::PathAuthorizationExpired
+        | WalletRuntimeError::RecoverySelectionCancelled
+        | WalletRuntimeError::RecoveryDestinationInvalid
+        | WalletRuntimeError::RecoveryDestinationExists
+        | WalletRuntimeError::RecoverySourceInvalid
+        | WalletRuntimeError::ReconciliationUnavailable => WalletPreviewError::RuntimeUnavailable,
+    }
+}
+
+fn map_core_error(error: WalletCoreClientError) -> WalletPreviewError {
+    match error {
+        WalletCoreClientError::CompatibilityUnavailable => {
+            WalletPreviewError::CompatibilityUnavailable
+        }
+        WalletCoreClientError::CoreUnavailable
+        | WalletCoreClientError::CoreIdentityChanged
+        | WalletCoreClientError::PeerIdentityRejected
+        | WalletCoreClientError::TransportFailed => WalletPreviewError::CoreUnavailable,
+        WalletCoreClientError::InvalidAddress
+        | WalletCoreClientError::ResponseRejected
+        | WalletCoreClientError::ResponseTooLarge
+        | WalletCoreClientError::AccountIdentityMismatch
+        | WalletCoreClientError::AccountStateRejected => WalletPreviewError::CoreRejected,
+    }
+}
+
+fn map_transaction_error(error: WalletTransactionError) -> WalletPreviewError {
+    match error {
+        WalletTransactionError::FeeArithmeticOverflow => WalletPreviewError::ArithmeticRejected,
+        WalletTransactionError::ActivationUnavailable
+        | WalletTransactionError::InvalidSender
+        | WalletTransactionError::InvalidRecipient
+        | WalletTransactionError::ZeroAmount
+        | WalletTransactionError::TransferToSelf
+        | WalletTransactionError::FeeLimitTooLow
+        | WalletTransactionError::FeeExceedsLimit
+        | WalletTransactionError::ConfirmedIntentMismatch
+        | WalletTransactionError::SignatureUnavailable
+        | WalletTransactionError::SignatureVerificationFailed
+        | WalletTransactionError::SerializationUnavailable => WalletPreviewError::InvalidRequest,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wallet::{
+        account::derive_account_identity,
+        core_client::{WalletCoreAccountSnapshot, WalletCoreStatus},
+        envelope_store::{EnvelopeEntryInput, EnvelopeStore, EnvelopeStoreAuthenticator},
+        journal::{append_accepted_submission, WalletJournalAuthenticator},
+        lifecycle::WalletCustodyPathAuthority,
+        reconciliation::{ReconciliationAuthenticator, ReconciliationStore},
+        secrets::{WalletPassword, WalletSeed},
+        submission::WalletSubmissionOutcome,
+        transaction::{canonical_transaction_id, sign_cash_transfer_for_test, CashTransferDraft},
+        vault::EncryptedWalletVault,
+    };
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        thread,
+        time::Duration,
+    };
+
+    const MAIN: &str = "main";
+    const PASSWORD: &str = "correct horse battery staple";
+
+    struct FakeCore {
+        address: String,
+        exists: bool,
+        balance: u128,
+        nonce: u64,
+        recovery_state: String,
+        identity_fingerprint: [u8; 32],
+        replacement_fingerprint: Option<[u8; 32]>,
+        identity_error_on_call: Option<usize>,
+        identity_calls: AtomicUsize,
+        identity_delay: Duration,
+    }
+
+    impl WalletCoreReadSource for FakeCore {
+        fn account_snapshot(
+            &self,
+            _address: &str,
+        ) -> Result<WalletCoreAccountSnapshot, WalletCoreClientError> {
+            Ok(WalletCoreAccountSnapshot {
+                address: self.address.clone(),
+                exists: self.exists,
+                balance: self.balance,
+                nonce: self.nonce,
+            })
+        }
+
+        fn status(&self) -> Result<WalletCoreStatus, WalletCoreClientError> {
+            Ok(WalletCoreStatus {
+                version: "3".to_string(),
+                canonical_tip_height: 42,
+                canonical_tip_hash: "a".repeat(64),
+                peer_count: 2,
+                recovery_state: self.recovery_state.clone(),
+            })
+        }
+        fn validated_identity_fingerprint(&self) -> Result<[u8; 32], WalletCoreClientError> {
+            let call = self.identity_calls.fetch_add(1, Ordering::SeqCst);
+            if !self.identity_delay.is_zero() {
+                thread::sleep(self.identity_delay);
+            }
+            if self.identity_error_on_call == Some(call) {
+                return Err(WalletCoreClientError::CoreUnavailable);
+            }
+            Ok(if call > 0 {
+                self.replacement_fingerprint
+                    .unwrap_or(self.identity_fingerprint)
+            } else {
+                self.identity_fingerprint
+            })
+        }
+    }
+
+    fn unlocked_runtime(seed_byte: u8) -> (WalletRuntimeState, String) {
+        let runtime = WalletRuntimeState::for_test();
+        let seed = WalletSeed::for_test(seed_byte);
+        let identity = derive_account_identity(&seed);
+        let password = WalletPassword::for_test(PASSWORD);
+        let vault =
+            EncryptedWalletVault::encrypt_for_test("primary", 1_700_000_000_000, &seed, &password)
+                .unwrap();
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::Unlock)
+            .unwrap();
+        let status = permit
+            .run_authorized(|activation| runtime.unlock_vault(activation, &vault, &password))
+            .unwrap()
+            .unwrap();
+        permit.complete(status).unwrap();
+        drop(permit);
+        (runtime, identity.address)
+    }
+
+    fn request(recipient: &str, amount: &str) -> WalletTransferPreviewRequest {
+        serde_json::from_value(serde_json::json!({
+            "recipient": recipient,
+            "amount": amount
+        }))
+        .unwrap()
+    }
+
+    fn source(address: &str) -> FakeCore {
+        FakeCore {
+            address: address.to_string(),
+            exists: true,
+            balance: 10_000_000_000,
+            nonce: 7,
+            recovery_state: NORMAL_RECOVERY_STATE.to_string(),
+            identity_fingerprint: [0x42; 32],
+            replacement_fingerprint: None,
+            identity_error_on_call: None,
+            identity_calls: AtomicUsize::new(0),
+            identity_delay: Duration::ZERO,
+        }
+    }
+
+    fn prepare(
+        runtime: &WalletRuntimeState,
+        core: &FakeCore,
+        recipient: &str,
+        amount: &str,
+    ) -> PreparedTransferPreview {
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+            .unwrap();
+        prepare_with_source(&permit, request(recipient, amount), core).unwrap()
+    }
+
+    fn consume(
+        runtime: &WalletRuntimeState,
+        core: &FakeCore,
+        handle: &str,
+    ) -> Result<BoundTransferPreview, WalletPreviewError> {
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::ConsumePreview)
+            .map_err(map_runtime_error)?;
+        consume_with_source(&permit, handle, core)
+    }
+
+    #[test]
+    fn prepares_complete_exact_public_preview_and_private_unsigned_intent() {
+        let (runtime, sender) = unlocked_runtime(7);
+        let recipient = "2".repeat(64);
+        let preview = prepare(&runtime, &source(&sender), &recipient, "2.5");
+        assert_eq!(preview.sender_address, sender);
+        assert_eq!(preview.recipient_address, recipient);
+        assert_eq!(preview.amount, "2.5");
+        assert_eq!(preview.amount_raw_units, 2_500_000_000);
+        assert_eq!(preview.charged_fee, "0.000000001");
+        assert_eq!(preview.charged_fee_raw_units, 1);
+        assert_eq!(preview.maximum_fee, "0.000000201");
+        assert_eq!(preview.fee_limit_raw_units, 201);
+        assert_eq!(preview.total_debit, "2.500000001");
+        assert_eq!(preview.total_debit_raw_units, 2_500_000_001);
+        assert_eq!(preview.balance, "10");
+        assert_eq!(preview.balance_raw_units, 10_000_000_000);
+        assert_eq!(preview.nonce, 7);
+        assert_eq!(preview.transaction_id.len(), 64);
+        assert_eq!(preview.canonical_tip_height, 42);
+        assert_eq!(preview.canonical_tip_hash, "a".repeat(64));
+        assert_eq!(preview.core_contract, SUPPORTED_WALLET_CORE_CONTRACT);
+        assert_eq!(preview.status_version, "3");
+        assert_eq!(preview.expires_after_ms, TRANSACTION_PREVIEW_TTL_MS);
+        assert!(preview.warning.contains("reorganized"));
+
+        let intent = consume(&runtime, &source(&sender), &preview.handle).unwrap();
+        assert!(intent.unsigned_transaction.sig.is_empty());
+        assert_eq!(intent.transaction_id, preview.transaction_id);
+        assert_eq!(intent.recipient_address, preview.recipient_address);
+        assert_eq!(intent.amount_raw_units, preview.amount_raw_units);
+        assert_eq!(intent.charged_fee_raw_units, 1);
+        assert_eq!(intent.fee_limit_raw_units, 201);
+        assert_eq!(intent.total_debit_raw_units, preview.total_debit_raw_units);
+        assert_eq!(intent.balance_raw_units, preview.balance_raw_units);
+        assert_eq!(intent.nonce, 7);
+        assert_eq!(intent.canonical_tip_height, 42);
+        assert_eq!(intent.core_identity_fingerprint, [0x42; 32]);
+        assert_eq!(intent.canonical_tip_hash, "a".repeat(64));
+        assert_eq!(intent.core_contract, SUPPORTED_WALLET_CORE_CONTRACT);
+        assert_eq!(intent.status_version, "3");
+    }
+
+    #[test]
+    fn preview_handle_is_single_use_and_cancel_consumes_it() {
+        let (runtime, sender) = unlocked_runtime(8);
+        let preview = prepare(&runtime, &source(&sender), &"3".repeat(64), "1");
+        let engine = WalletTransactionPreviewEngine::new(&runtime);
+        engine.cancel(MAIN, &preview.handle).unwrap();
+        assert_eq!(
+            consume(&runtime, &source(&sender), &preview.handle)
+                .err()
+                .unwrap(),
+            WalletPreviewError::WalletUnavailable
+        );
+    }
+
+    #[test]
+    fn preview_expires_after_the_short_monotonic_ttl() {
+        let (runtime, sender) = unlocked_runtime(18);
+        let preview = prepare(&runtime, &source(&sender), &"8".repeat(64), "1");
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::ConsumePreview)
+            .unwrap();
+        assert_eq!(
+            permit
+                .consume_transaction_preview_at_for_test(&preview.handle, u64::MAX)
+                .err()
+                .unwrap(),
+            WalletRuntimeError::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn newer_preview_and_runtime_revocation_invalidate_prior_authority() {
+        let (runtime, sender) = unlocked_runtime(9);
+        let first = prepare(&runtime, &source(&sender), &"4".repeat(64), "1");
+        let second = prepare(&runtime, &source(&sender), &"5".repeat(64), "2");
+        assert!(consume(&runtime, &source(&sender), &first.handle).is_err());
+        assert!(consume(&runtime, &source(&sender), &second.handle).is_err());
+
+        let third = prepare(&runtime, &source(&sender), &"6".repeat(64), "3");
+        runtime.invalidate_all().unwrap();
+        assert!(consume(&runtime, &source(&sender), &third.handle).is_err());
+    }
+
+    #[test]
+    fn consumption_rejects_a_stopped_core_and_consumes_the_handle() {
+        let (runtime, sender) = unlocked_runtime(19);
+        let preview = prepare(&runtime, &source(&sender), &"9".repeat(64), "1");
+        let mut stopped = source(&sender);
+        stopped.identity_error_on_call = Some(0);
+
+        assert_eq!(
+            consume(&runtime, &stopped, &preview.handle).err().unwrap(),
+            WalletPreviewError::CoreUnavailable
+        );
+        assert_eq!(
+            consume(&runtime, &source(&sender), &preview.handle)
+                .err()
+                .unwrap(),
+            WalletPreviewError::WalletUnavailable
+        );
+    }
+
+    #[test]
+    fn consumption_rejects_a_restarted_core_between_identity_checks() {
+        let (runtime, sender) = unlocked_runtime(20);
+        let preview = prepare(&runtime, &source(&sender), &"a".repeat(64), "1");
+        let mut restarted = source(&sender);
+        restarted.replacement_fingerprint = Some([0x43; 32]);
+
+        assert_eq!(
+            consume(&runtime, &restarted, &preview.handle)
+                .err()
+                .unwrap(),
+            WalletPreviewError::CoreUnavailable
+        );
+    }
+
+    #[test]
+    fn consumption_rejects_a_replacement_generation_fingerprint() {
+        let (runtime, sender) = unlocked_runtime(21);
+        let preview = prepare(&runtime, &source(&sender), &"b".repeat(64), "1");
+        let mut replacement = source(&sender);
+        replacement.identity_fingerprint = [0x44; 32];
+
+        assert_eq!(
+            consume(&runtime, &replacement, &preview.handle)
+                .err()
+                .unwrap(),
+            WalletPreviewError::CoreUnavailable
+        );
+    }
+
+    #[test]
+    fn preview_reports_monotonic_age_of_authoritative_observations() {
+        let (runtime, sender) = unlocked_runtime(22);
+        let mut delayed = source(&sender);
+        delayed.identity_delay = Duration::from_millis(20);
+
+        let preview = prepare(&runtime, &delayed, &"c".repeat(64), "1");
+
+        assert!(preview.data_age_ms >= 10);
+    }
+
+    #[test]
+    fn rejects_zero_self_transfer_missing_account_recovery_and_insufficient_balance() {
+        let (runtime, sender) = unlocked_runtime(10);
+        let recipient = "7".repeat(64);
+        let normal = source(&sender);
+        assert_eq!(
+            prepare_with_source(
+                &runtime
+                    .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+                    .unwrap(),
+                request(&recipient, "0"),
+                &normal,
+            )
+            .err()
+            .unwrap(),
+            WalletPreviewError::InvalidRequest
+        );
+        assert!(prepare_with_source(
+            &runtime
+                .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+                .unwrap(),
+            request(&sender, "1"),
+            &normal,
+        )
+        .is_err());
+
+        let mut missing = source(&sender);
+        missing.exists = false;
+        missing.balance = 0;
+        assert_eq!(
+            prepare_with_source(
+                &runtime
+                    .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+                    .unwrap(),
+                request(&recipient, "1"),
+                &missing,
+            )
+            .err()
+            .unwrap(),
+            WalletPreviewError::AccountUnavailable
+        );
+
+        let mut recovering = source(&sender);
+        recovering.recovery_state = "recovering".to_string();
+        assert_eq!(
+            prepare_with_source(
+                &runtime
+                    .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+                    .unwrap(),
+                request(&recipient, "1"),
+                &recovering,
+            )
+            .err()
+            .unwrap(),
+            WalletPreviewError::CoreRecovering
+        );
+
+        let mut poor = source(&sender);
+        poor.balance = 1;
+        assert_eq!(
+            prepare_with_source(
+                &runtime
+                    .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+                    .unwrap(),
+                request(&recipient, "1"),
+                &poor,
+            )
+            .err()
+            .unwrap(),
+            WalletPreviewError::InsufficientBalance
+        );
+    }
+
+    #[test]
+    fn preview_source_contains_no_tauri_signing_submission_or_seed_access() {
+        let source = include_str!("preview.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["#[tauri", "::command]"].concat()));
+        assert!(!production.contains(&["Wallet", "Seed"].concat()));
+        assert!(!production.contains("sign_cash_transfer"));
+        assert!(!production.contains(&["PO", "ST "].concat()));
+        assert!(!production.contains("submit"));
+    }
+
+    #[test]
+    fn real_preview_path_rejects_staging_only_envelope_storage_before_installing_a_handle() {
+        let (runtime, sender) = unlocked_runtime(31);
+        let directory = tempfile::tempdir().unwrap();
+        crate::wallet::storage_security::protect_directory(directory.path()).unwrap();
+        let custody =
+            WalletCustodyPathAuthority::issue_for_test(&directory.path().join("wallet.vault.json"));
+        let staging = directory
+            .path()
+            .join(".wallet-signed-envelopes-stage-interrupted.tmp");
+        std::fs::write(&staging, b"interrupted").unwrap();
+        crate::wallet::storage_security::protect_file(&staging).unwrap();
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+            .unwrap();
+        assert_eq!(
+            prepare_with_source_and_custody(
+                &permit,
+                request(&"d".repeat(64), "1"),
+                &source(&sender),
+                &custody,
+            )
+            .err(),
+            Some(WalletPreviewError::ActivityUnavailable)
+        );
+    }
+
+    #[test]
+    fn real_preview_path_rejects_journal_identifier_when_envelope_store_is_missing() {
+        let seed = WalletSeed::for_test(32);
+        let (runtime, sender) = unlocked_runtime(32);
+        let recipient = "e".repeat(64);
+        let directory = tempfile::tempdir().unwrap();
+        crate::wallet::storage_security::protect_directory(directory.path()).unwrap();
+        let custody =
+            WalletCustodyPathAuthority::issue_for_test(&directory.path().join("wallet.vault.json"));
+        let transaction = sign_cash_transfer_for_test(
+            &seed,
+            &CashTransferDraft {
+                nonce: 7,
+                recipient: recipient.clone(),
+                amount_raw_units: 1_000_000_000,
+                tip_raw_units: 0,
+                fee_limit_raw_units: 201,
+            },
+        )
+        .unwrap();
+        let transaction_id = canonical_transaction_id(&transaction).unwrap();
+        let journal_authenticator = WalletJournalAuthenticator::new("primary", &seed).unwrap();
+        append_accepted_submission(
+            custody.journal_path(),
+            &journal_authenticator,
+            &transaction,
+            &WalletSubmissionOutcome::Accepted {
+                tx_id: transaction_id,
+                current_nonce: 7,
+            },
+            1,
+        )
+        .unwrap();
+        assert!(!directory
+            .path()
+            .join("wallet.signed-envelopes.v1.enc")
+            .exists());
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+            .unwrap();
+        assert_eq!(
+            prepare_with_source_and_custody(
+                &permit,
+                request(&recipient, "1"),
+                &source(&sender),
+                &custody,
+            )
+            .err(),
+            Some(WalletPreviewError::ActivityUnavailable)
+        );
+    }
+
+    #[test]
+    fn real_preview_path_rejects_a_full_authenticated_store_before_installing_a_handle() {
+        let seed = WalletSeed::for_test(33);
+        let (runtime, sender) = unlocked_runtime(33);
+        let directory = tempfile::tempdir().unwrap();
+        crate::wallet::storage_security::protect_directory(directory.path()).unwrap();
+        let custody = WalletCustodyPathAuthority::issue_for_test_with_envelope_limit(
+            &directory.path().join("wallet.vault.json"),
+            1,
+        );
+        let stored_transaction = sign_cash_transfer_for_test(
+            &seed,
+            &CashTransferDraft {
+                nonce: 1,
+                recipient: "c".repeat(64),
+                amount_raw_units: 7,
+                tip_raw_units: 0,
+                fee_limit_raw_units: 201,
+            },
+        )
+        .unwrap();
+        let exact_body = serde_json::to_vec(&stored_transaction).unwrap();
+        let transaction_id = canonical_transaction_id(&stored_transaction).unwrap();
+        let mut digest =
+            blake3::Hasher::new_derive_key("com.vision.desktop.wallet-signed-envelope-digest.v1");
+        digest.update(&exact_body);
+        let body_digest = digest.finalize().to_hex();
+        let store = EnvelopeStore::for_custody(&custody).unwrap();
+        let authenticator = EnvelopeStoreAuthenticator::new("primary", &seed).unwrap();
+        let reconciliation = ReconciliationStore::for_custody(&custody).unwrap();
+        let reconciliation_authenticator =
+            ReconciliationAuthenticator::new("primary", &seed).unwrap();
+        let reservation = reconciliation
+            .reserve_prepared(&reconciliation_authenticator)
+            .unwrap();
+        store
+            .publish_prepared(
+                &authenticator,
+                EnvelopeEntryInput {
+                    wallet_id: "primary",
+                    attempt_id: &"11".repeat(32),
+                    transaction_id: &transaction_id,
+                    transaction: &stored_transaction,
+                    exact_body: &exact_body,
+                    signed_body_digest_hex: body_digest.as_str(),
+                    compatibility_contract_digest_hex: &"33".repeat(32),
+                    created_at_unix_ms: 1,
+                },
+                &reservation,
+            )
+            .unwrap();
+
+        let permit = runtime
+            .begin_operation(MAIN, WalletOperationKind::PreparePreview)
+            .unwrap();
+        assert_eq!(
+            prepare_with_source_and_custody(
+                &permit,
+                request(&"d".repeat(64), "1"),
+                &source(&sender),
+                &custody,
+            )
+            .err(),
+            Some(WalletPreviewError::ActivityUnavailable)
+        );
+    }
+}

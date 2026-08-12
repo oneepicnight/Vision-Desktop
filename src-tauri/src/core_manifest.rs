@@ -32,6 +32,32 @@ pub struct CoreVerification {
     pub matches: bool,
 }
 
+#[derive(Deserialize)]
+struct WalletManifestEnvelope {
+    wallet_core_api: Option<WalletCoreApiManifest>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WalletCoreApiManifest {
+    contract: String,
+    bind_host: String,
+    peer_binding: String,
+    fee_policy: WalletFeePolicyManifest,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WalletFeePolicyManifest {
+    tip_raw: u128,
+    charged_base_raw: u128,
+    fee_limit_raw: u128,
+}
+
+pub(crate) struct WalletCoreCompatibility {
+    manifest_sha256: [u8; 32],
+}
+
 pub fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -68,6 +94,36 @@ pub fn load_core_manifest_from(path: &Path) -> Result<CoreManifest, String> {
 
 pub fn load_core_manifest() -> Result<CoreManifest, String> {
     load_core_manifest_from(&bundled_core_manifest_path())
+}
+
+fn parse_wallet_core_compatibility(bytes: &[u8]) -> Result<WalletCoreCompatibility, ()> {
+    let envelope: WalletManifestEnvelope = serde_json::from_slice(bytes).map_err(|_| ())?;
+    let contract = envelope.wallet_core_api.ok_or(())?;
+    if contract.contract != "vision-wallet-read-v1"
+        || contract.bind_host != "127.0.0.1"
+        || contract.peer_binding != "windows_tcp_owner_pid_v1"
+        || contract.fee_policy.tip_raw != 0
+        || contract.fee_policy.charged_base_raw != 1
+        || contract.fee_policy.fee_limit_raw != 201
+    {
+        return Err(());
+    }
+
+    let digest = Sha256::digest(bytes);
+    let mut manifest_sha256 = [0_u8; 32];
+    manifest_sha256.copy_from_slice(&digest);
+    Ok(WalletCoreCompatibility { manifest_sha256 })
+}
+
+pub(crate) fn load_wallet_core_compatibility() -> Result<WalletCoreCompatibility, ()> {
+    let bytes = fs::read(bundled_core_manifest_path()).map_err(|_| ())?;
+    parse_wallet_core_compatibility(&bytes)
+}
+
+impl WalletCoreCompatibility {
+    pub(crate) fn manifest_sha256(&self) -> [u8; 32] {
+        self.manifest_sha256
+    }
 }
 
 pub fn sha256_file(path: &Path) -> Result<String, String> {
@@ -135,5 +191,41 @@ mod tests {
             bundled_path(root, CORE_MANIFEST_RELATIVE),
             root.join("bundled/core/windows-x64/manifest.json")
         );
+    }
+
+    #[test]
+    fn current_manifest_does_not_enable_wallet_core_authority() {
+        assert!(load_wallet_core_compatibility().is_err());
+    }
+
+    #[test]
+    fn wallet_core_contract_requires_exact_peer_and_fee_policy() {
+        let valid = br#"{
+            "wallet_core_api": {
+                "contract": "vision-wallet-read-v1",
+                "bind_host": "127.0.0.1",
+                "peer_binding": "windows_tcp_owner_pid_v1",
+                "fee_policy": {
+                    "tip_raw": 0,
+                    "charged_base_raw": 1,
+                    "fee_limit_raw": 201
+                }
+            }
+        }"#;
+        assert!(parse_wallet_core_compatibility(valid).is_ok());
+
+        for invalid in [
+            String::from_utf8(valid.to_vec())
+                .unwrap()
+                .replace("127.0.0.1", "localhost"),
+            String::from_utf8(valid.to_vec())
+                .unwrap()
+                .replace("windows_tcp_owner_pid_v1", "pid_only"),
+            String::from_utf8(valid.to_vec())
+                .unwrap()
+                .replace("\"fee_limit_raw\": 201", "\"fee_limit_raw\": 202"),
+        ] {
+            assert!(parse_wallet_core_compatibility(invalid.as_bytes()).is_err());
+        }
     }
 }

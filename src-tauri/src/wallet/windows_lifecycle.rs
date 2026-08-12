@@ -1,9 +1,10 @@
 use super::runtime::{WalletRuntimeError, WalletRuntimeState};
 use std::{ffi::c_void, mem, os::windows::ffi::OsStrExt, ptr, sync::Arc};
 use windows_sys::Win32::{
-    Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
+    Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
     System::{
         LibraryLoader::GetModuleHandleW,
+        Power::{RegisterSuspendResumeNotification, UnregisterSuspendResumeNotification},
         RemoteDesktop::{
             WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
             NOTIFY_FOR_THIS_SESSION,
@@ -11,10 +12,10 @@ use windows_sys::Win32::{
     },
     UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, RegisterClassExW,
-        SetWindowLongPtrW, UnregisterClassW, CREATESTRUCTW, GWLP_USERDATA, PBT_APMSTANDBY,
-        PBT_APMSUSPEND, WM_ENDSESSION, WM_NCCREATE, WM_NCDESTROY, WM_POWERBROADCAST,
-        WM_QUERYENDSESSION, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_OVERLAPPED, WTS_SESSION_LOCK,
+        SetWindowLongPtrW, UnregisterClassW, CREATESTRUCTW, DEVICE_NOTIFY_WINDOW_HANDLE,
+        GWLP_USERDATA, PBT_APMSTANDBY, PBT_APMSUSPEND, WM_ENDSESSION, WM_NCCREATE, WM_NCDESTROY,
+        WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_OVERLAPPED, WTS_SESSION_LOCK,
     },
 };
 
@@ -27,6 +28,7 @@ const CLASS_PREFIX: &str = "VisionDesktopWalletLifecycle";
 pub(crate) struct WindowsWalletLifecycle {
     window: isize,
     instance: isize,
+    suspend_resume_notification: isize,
     class_name: Vec<u16>,
 }
 
@@ -112,9 +114,32 @@ impl WindowsWalletLifecycle {
             return Err(WalletRuntimeError::RuntimeUnavailable);
         }
 
+        // A window does not automatically receive Desktop Activity Moderator notifications on
+        // Modern Standby systems. Opt in explicitly so S0 low-power idle and traditional S3/S4
+        // transitions both deliver PBT_APMSUSPEND before desktop execution is paused.
+        // SAFETY: `window` is a live top-level window and the notification handle is retained
+        // until it is unregistered before window destruction.
+        let suspend_resume_notification = unsafe {
+            RegisterSuspendResumeNotification(
+                window.cast::<c_void>() as HANDLE,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            )
+        };
+        if suspend_resume_notification == 0 {
+            // SAFETY: session notification registration succeeded and all retained handles are
+            // still live. Destroying the window releases its Arc through WM_NCDESTROY.
+            unsafe {
+                WTSUnRegisterSessionNotification(window);
+                DestroyWindow(window);
+                UnregisterClassW(class_name.as_ptr(), instance);
+            }
+            return Err(WalletRuntimeError::RuntimeUnavailable);
+        }
+
         Ok(Self {
             window: window as isize,
             instance: instance as isize,
+            suspend_resume_notification,
             class_name,
         })
     }
@@ -134,13 +159,45 @@ impl Drop for WindowsWalletLifecycle {
             // invalidation and releases the window-owned runtime reference.
             // SAFETY: the handles and class name were retained unchanged from registration.
             unsafe {
+                UnregisterSuspendResumeNotification(self.suspend_resume_notification);
                 WTSUnRegisterSessionNotification(window);
                 DestroyWindow(window);
                 UnregisterClassW(self.class_name.as_ptr(), instance);
             }
             self.window = 0;
+            self.suspend_resume_notification = 0;
         }
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(in crate::wallet) enum WalletNativeSecurityEventForTest {
+    Sleep,
+    Shutdown,
+}
+
+#[cfg(test)]
+pub(in crate::wallet) fn dispatch_native_security_event_for_test(
+    runtime: Arc<WalletRuntimeState>,
+    event: WalletNativeSecurityEventForTest,
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+    static NEXT_CLASS: AtomicU64 = AtomicU64::new(1);
+    let class_name = wide_null(&format!(
+        "{CLASS_PREFIX}.receipt-refresh.{}.{}",
+        std::process::id(),
+        NEXT_CLASS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let lifecycle = WindowsWalletLifecycle::register_with_class(runtime, class_name).unwrap();
+    let (message, wparam) = match event {
+        WalletNativeSecurityEventForTest::Sleep => (WM_POWERBROADCAST, PBT_APMSUSPEND as usize),
+        WalletNativeSecurityEventForTest::Shutdown => (WM_QUERYENDSESSION, 0),
+    };
+    // SAFETY: the lifecycle owner retains this exact live hidden window for the synchronous call.
+    unsafe { SendMessageW(lifecycle.window(), message, wparam, 0) };
 }
 
 unsafe extern "system" fn lifecycle_window_proc(
@@ -238,7 +295,8 @@ mod tests {
     use crate::wallet::runtime::{RecoveryPathPurpose, WalletOperationKind};
     use std::path::PathBuf;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SendMessageW, PBT_APMRESUMEAUTOMATIC, WTS_SESSION_UNLOCK,
+        DispatchMessageW, PeekMessageW, SendMessageW, TranslateMessage, MSG,
+        PBT_APMRESUMEAUTOMATIC, PM_REMOVE, WTS_SESSION_UNLOCK,
     };
 
     #[test]
@@ -332,5 +390,72 @@ mod tests {
             runtime.consume_recovery_path("main", RecoveryPathPurpose::Source, token.as_str()),
             Err(WalletRuntimeError::PathAuthorizationInvalid)
         );
+    }
+
+    /// Manual real-Windows qualification probe.
+    ///
+    /// Run this ignored release-profile test interactively, wait for the READY line, then perform
+    /// exactly one real Windows session lock or suspend/hibernate cycle. The hidden listener and
+    /// message pump are the production implementations; only the synthetic pre-existing authority
+    /// is test-only. No secret, vault, command, or WebView permission is involved.
+    #[test]
+    #[ignore = "requires an operator to trigger a real Windows lock or power transition"]
+    fn real_windows_security_event_revokes_runtime_authority() {
+        let expected_event = std::env::var("VISION_WALLET_QUALIFICATION_EVENT")
+            .expect("set VISION_WALLET_QUALIFICATION_EVENT to session_lock, suspend, or hibernate");
+        assert!(
+            matches!(
+                expected_event.as_str(),
+                "session_lock" | "suspend" | "hibernate"
+            ),
+            "unsupported qualification event"
+        );
+        let timeout_seconds = std::env::var("VISION_WALLET_QUALIFICATION_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (30..=1_800).contains(value))
+            .unwrap_or(600);
+
+        let runtime = Arc::new(WalletRuntimeState::for_test());
+        let lifecycle = WindowsWalletLifecycle::register(Arc::clone(&runtime)).unwrap();
+        let authority = runtime
+            .begin_operation("main", WalletOperationKind::Unlock)
+            .unwrap();
+        authority.ensure_current().unwrap();
+
+        println!(
+            "VISION_WALLET_QUALIFICATION_READY event={expected_event} pid={} timeout_seconds={timeout_seconds}",
+            std::process::id()
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds);
+        while authority.ensure_current().is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "real Windows security event did not revoke wallet authority before timeout"
+            );
+            let mut message = MSG::default();
+            // SAFETY: this test owns the thread's hidden lifecycle window and pumps only messages
+            // already queued by Windows for this thread.
+            while unsafe { PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0
+            {
+                unsafe {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        assert_eq!(
+            authority.ensure_current(),
+            Err(WalletRuntimeError::RuntimeUnavailable)
+        );
+        drop(authority);
+        runtime
+            .begin_operation("main", WalletOperationKind::Create)
+            .expect("runtime must remain locked and usable after explicit reauthorization");
+        runtime.invalidate_all().unwrap();
+        drop(lifecycle);
+        println!("VISION_WALLET_QUALIFICATION_PASS event={expected_event}");
     }
 }

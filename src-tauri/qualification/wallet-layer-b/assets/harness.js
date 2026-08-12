@@ -1,0 +1,817 @@
+(() => {
+  'use strict'
+
+  const COMMANDS = [
+    'wallet_get_status',
+    'wallet_select_recovery_destination',
+    'wallet_create',
+    'wallet_select_recovery_source',
+    'wallet_restore',
+    'wallet_unlock',
+    'wallet_lock'
+  ]
+  const HANDLE = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+  const PUBLIC_CANARY = 'PUBLIC_LAYER_B_CANARY'
+  const selectedCase = window.__VISION_LAYER_B_CASE__
+  const nativeFetch = window.fetch.bind(window)
+  const output = document.getElementById('output')
+  const status = document.getElementById('status')
+  const runButton = document.getElementById('run')
+  let sequence = 0
+  let transcriptChain = Promise.resolve()
+
+  function write(record) {
+    const line = JSON.stringify(record)
+    console.log(`LAYER_B_CASE ${line}`)
+    output.textContent += `${line}\n`
+    output.scrollTop = output.scrollHeight
+    const caseSelector = record.caseSelector || `${record.id}--${record.route}`
+    const body = {
+      marker: 'layer_b_browser_observation',
+      case: caseSelector,
+      client_api: record.route || 'matrix-controller',
+      command: record.command || 'matrix',
+      outcome: record.outcome,
+      expected: record.expected,
+      result: record.inconclusive ? 'inconclusive' : (record.passed ? 'passed' : 'failed'),
+      transport_evidence: record.transportEvidence || 'not_applicable',
+      fallback_intercepted: record.fallbackIntercepted === true
+    }
+    transcriptChain = transcriptChain.then(async () => {
+      const url = window.__TAURI_INTERNALS__?.convertFileSrc
+        ? window.__TAURI_INTERNALS__.convertFileSrc('observation', 'qualification-report')
+        : 'http://qualification-report.localhost/observation'
+      const response = await nativeFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+        body: JSON.stringify(body)
+      })
+      if (!response.ok) throw new Error('qualification transcript rejected')
+    })
+  }
+
+  function routeHeaders(_route, panic = false) {
+    const headers = {}
+    if (typeof panic === 'string') headers['x-vision-qualification-panic'] = panic
+    else if (panic) headers['x-vision-qualification-panic'] = 'body'
+    return headers
+  }
+
+  function fixedOutcome(value, accepted) {
+    if (accepted && value && value.marker === 'layer_b_accepted') {
+      const allowedRoutes = new Set(['custom_protocol_proven', 'post_message_proven'])
+      return {
+        outcome: 'layer_b_accepted',
+        transportEvidence: allowedRoutes.has(value.route) ? value.route : 'transport_route_inconclusive'
+      }
+    }
+    if (!accepted && value && typeof value === 'object' && typeof value.code === 'string') {
+      const allowed = new Set([
+        'invalid_request',
+        'qualification_invalid_window',
+        'qualification_response_unavailable',
+        'qualification_runtime_unavailable',
+        'qualification_transport_inconclusive'
+      ])
+      return {
+        outcome: allowed.has(value.code) ? value.code : 'unclassified_error',
+        transportEvidence: 'not_applicable'
+      }
+    }
+    return {
+      outcome: accepted ? 'unexpected_success_shape' : 'framework_error_redacted',
+      transportEvidence: 'not_applicable'
+    }
+  }
+
+  function lowLevel(route, method, command, payload, panic = false) {
+    return new Promise((resolve, reject) => {
+      const internals = window.__TAURI_INTERNALS__
+      const callback = internals.transformCallback(resolve, true)
+      const error = internals.transformCallback(reject, true)
+      internals[method]({
+        cmd: command,
+        callback,
+        error,
+        payload,
+        options: { headers: routeHeaders(route, panic) }
+      })
+    })
+  }
+
+  async function transport(route, command, payload, panic = false) {
+    switch (route) {
+      case 'official-invoke':
+        return window.__TAURI__.core.invoke(command, payload, {
+          headers: routeHeaders(route, panic)
+        })
+      case 'internals-invoke':
+        return window.__TAURI_INTERNALS__.invoke(command, payload, {
+          headers: routeHeaders(route, panic)
+        })
+      case 'internals-ipc':
+        return lowLevel(route, 'ipc', command, payload, panic)
+      case 'internals-post-message':
+        return lowLevel(route, 'postMessage', command, payload, panic)
+      default:
+        throw new Error('unsupported qualification route')
+    }
+  }
+
+  function isSelected(id, route) {
+    return selectedCase === `${id}--${route}`
+  }
+
+  async function postRevocationProof(caseSelector, command, payload) {
+    try {
+      const value = await transport('internals-post-message', command, payload)
+      const observed = fixedOutcome(value, true)
+      const passed = false
+      write({
+        sequence: ++sequence,
+        id: `${caseSelector}-post-revocation-proof`,
+        caseSelector: `${caseSelector}-post-revocation-proof`,
+        route: 'internals-post-message',
+        command,
+        outcome: observed.outcome,
+        expected: 'qualification_runtime_unavailable',
+        transportEvidence: observed.transportEvidence,
+        passed
+      })
+      return passed
+    } catch (error) {
+      const observed = fixedOutcome(error, false)
+      const passed = observed.outcome === 'qualification_runtime_unavailable'
+      write({
+        sequence: ++sequence,
+        id: `${caseSelector}-post-revocation-proof`,
+        caseSelector: `${caseSelector}-post-revocation-proof`,
+        route: 'internals-post-message',
+        command,
+        outcome: observed.outcome,
+        expected: 'qualification_runtime_unavailable',
+        transportEvidence: observed.transportEvidence,
+        passed
+      })
+      return passed
+    }
+  }
+
+  async function runCase(id, route, command, payload, expected, panic = false, evidence = {}) {
+    if (!isSelected(id, route)) return null
+    sequence += 1
+    const caseSelector = `${id}--${route}`
+    let primaryPassed
+    let primaryInconclusive
+    try {
+      const value = await transport(route, command, payload, panic)
+      const observed = fixedOutcome(value, true)
+      primaryInconclusive = observed.outcome === 'qualification_transport_inconclusive'
+      primaryPassed = observed.outcome === expected
+      if (evidence.requirePostMessage === true) {
+        primaryPassed = primaryPassed && observed.transportEvidence === 'post_message_proven'
+      }
+      if (evidence.requireFallbackInterception === true) {
+        primaryPassed = primaryPassed && evidence.fallbackIntercepted() === true
+      }
+      write({
+        sequence,
+        id,
+        route,
+        command,
+        outcome: observed.outcome,
+        expected,
+        transportEvidence: observed.transportEvidence,
+        fallbackIntercepted: evidence.fallbackIntercepted?.() === true,
+        passed: primaryPassed,
+        inconclusive: primaryInconclusive
+      })
+    } catch (error) {
+      const observed = fixedOutcome(error, false)
+      primaryInconclusive = observed.outcome === 'qualification_transport_inconclusive'
+      primaryPassed = observed.outcome === expected
+      write({
+        sequence,
+        id,
+        route,
+        command,
+        outcome: observed.outcome,
+        expected,
+        transportEvidence: observed.transportEvidence,
+        fallbackIntercepted: evidence.fallbackIntercepted?.() === true,
+        passed: primaryPassed,
+        inconclusive: primaryInconclusive
+      })
+    }
+    if (primaryInconclusive || ['invalid_request', 'qualification_invalid_window', 'qualification_response_unavailable', 'qualification_runtime_unavailable'].includes(expected)) {
+      const revoked = await postRevocationProof(caseSelector, command, exactPayload(command))
+      return primaryInconclusive && revoked ? 'inconclusive' : (revoked && primaryPassed)
+    }
+    return primaryPassed
+  }
+
+  async function runConcurrentBatch(command) {
+    const id = `wrapper-${command}-concurrent-batch`
+    const route = 'official-invoke'
+    if (!isSelected(id, route)) return null
+    const caseSelector = `${id}--${route}`
+    const pending = Array.from(
+      { length: 8 },
+      () => transport(route, command, exactPayload(command))
+    )
+    const settled = await Promise.allSettled(pending)
+    const observed = settled.map((result) => result.status === 'fulfilled'
+      ? fixedOutcome(result.value, true)
+      : fixedOutcome(result.reason, false))
+    const inconclusive = observed.some((result) => result.outcome === 'qualification_transport_inconclusive')
+    const provenRoutes = new Set(observed.map((result) => result.transportEvidence))
+    const oneProvenRoute = provenRoutes.size === 1 &&
+      ['custom_protocol_proven', 'post_message_proven'].includes(observed[0]?.transportEvidence)
+    const passed = observed.length === 8 && observed.every((result) =>
+      result.outcome === 'layer_b_accepted') && oneProvenRoute
+    write({
+      sequence: ++sequence,
+      id,
+      caseSelector,
+      route,
+      command,
+      outcome: passed
+        ? 'layer_b_accepted'
+        : (inconclusive ? 'qualification_transport_inconclusive' : 'unclassified_error'),
+      expected: 'layer_b_accepted',
+      transportEvidence: passed ? observed[0].transportEvidence : 'transport_route_inconclusive',
+      passed,
+      inconclusive
+    })
+    if (inconclusive) {
+      return (await postRevocationProof(caseSelector, command, exactPayload(command))) ? 'inconclusive' : false
+    }
+    return passed
+  }
+
+  function exactPayload(command) {
+    if (command === 'wallet_create') {
+      return {
+        request: {
+          wallet_id: 'layer_b_create',
+          label: 'Layer B Create',
+          recovery_destination_handle: HANDLE
+        }
+      }
+    }
+    if (command === 'wallet_restore') {
+      return {
+        request: {
+          wallet_id: 'layer_b_restore',
+          label: 'Layer B Restore',
+          recovery_source_handle: HANDLE
+        }
+      }
+    }
+    return {}
+  }
+
+  function nextCommand(command) {
+    return COMMANDS[(COMMANDS.indexOf(command) + 1) % COMMANDS.length]
+  }
+
+  async function runAcceptedSequence(command, family) {
+    const id = `wrapper-${command}-${family}`
+    const route = 'official-invoke'
+    if (!isSelected(id, route)) return null
+    const commands = family === 'sequential-repeat'
+      ? [command, command]
+      : [nextCommand(command), command]
+    const observed = []
+    for (const current of commands) {
+      try {
+        observed.push(fixedOutcome(await transport(route, current, exactPayload(current)), true))
+      } catch (error) {
+        observed.push(fixedOutcome(error, false))
+      }
+    }
+    const routes = new Set(observed.map((item) => item.transportEvidence))
+    const proven = routes.size === 1 &&
+      ['custom_protocol_proven', 'post_message_proven'].includes(observed[0]?.transportEvidence)
+    const inconclusive = observed.some((item) => item.outcome === 'qualification_transport_inconclusive')
+    const passed = observed.length === 2 && proven &&
+      observed.every((item) => item.outcome === 'layer_b_accepted')
+    const caseSelector = `${id}--${route}`
+    write({
+      sequence: ++sequence,
+      id,
+      caseSelector,
+      route,
+      command,
+      outcome: passed
+        ? 'layer_b_accepted'
+        : (inconclusive ? 'qualification_transport_inconclusive' : 'unclassified_error'),
+      expected: 'layer_b_accepted',
+      transportEvidence: passed ? observed[0].transportEvidence : 'transport_route_inconclusive',
+      passed,
+      inconclusive
+    })
+    if (inconclusive) {
+      return (await postRevocationProof(caseSelector, command, exactPayload(command))) ? 'inconclusive' : false
+    }
+    return passed
+  }
+
+  function adversarialPayload(command, family) {
+    const requestCommand = command === 'wallet_create' || command === 'wallet_restore'
+    const request = exactPayload(command).request
+    switch (family) {
+      case 'raw-empty': return ''
+      case 'raw-json-looking': return '{}'
+      case 'raw-arbitrary': return 'not-json'
+      case 'raw-bytes': return new TextEncoder().encode('{}')
+      case 'json-null': return null
+      case 'json-boolean': return true
+      case 'json-number': return 42
+      case 'json-string': return PUBLIC_CANARY
+      case 'json-array': return []
+      case 'shape-mismatch': return requestCommand ? {} : { request: exactPayload('wallet_create').request }
+      case 'missing-top-level': return requestCommand ? {} : { missing: true }
+      case 'extra-top-level': return requestCommand ? { request, extra: true } : { extra: true }
+      case 'wrong-case-top-level': return requestCommand ? { Request: request } : { Request: {} }
+      case 'secret-like-top-level': return { password: PUBLIC_CANARY }
+      case 'wrong-command-envelope': {
+        if (command === 'wallet_create') return exactPayload('wallet_restore')
+        return exactPayload('wallet_create')
+      }
+      case 'malformed-nested': return { request: false }
+      case 'oversized-nested': return { request: { ...request, label: 'x'.repeat(1025) } }
+      case 'unknown-nested': return { request: { ...request, extra: true } }
+      case 'secret-like-nested': return { request: { ...request, password: PUBLIC_CANARY } }
+      case 'post-revocation': return { extra: true }
+      default: return exactPayload(command)
+    }
+  }
+
+  function duplicateFamilies(command) {
+    const request = exactPayload(command).request
+    const handleName = command === 'wallet_restore'
+      ? 'recovery_source_handle'
+      : 'recovery_destination_handle'
+    const conflicting = { wallet_id: 'conflict', label: 'Conflict', [handleName]: HANDLE }
+    return [
+      ['identical', `{"request":${JSON.stringify(request)},"request":${JSON.stringify(request)}}`],
+      ['conflicting', `{"request":${JSON.stringify(request)},"request":${JSON.stringify(conflicting)}}`],
+      ['valid-then-malformed', `{"request":${JSON.stringify(request)},"request":false}`],
+      ['malformed-then-valid', `{"request":false,"request":${JSON.stringify(request)}}`],
+      ['public-then-secret-like', `{"request":${JSON.stringify(request)},"password":"${PUBLIC_CANARY}"}`],
+      ['exact-and-wrong-case', `{"request":${JSON.stringify(request)},"Request":${JSON.stringify(request)}}`],
+      ['three-repeated', `{"request":false,"request":null,"request":${JSON.stringify(request)}}`],
+      ['escaped-equivalent', `{"request":false,"reque\\u0073t":${JSON.stringify(request)}}`],
+      ['bounded-whitespace', `{"request":false,${' '.repeat(4096)}"request":${JSON.stringify(request)}}`]
+    ]
+  }
+
+  function nestedDuplicateFamilies(command) {
+    const handleName = command === 'wallet_restore'
+      ? 'recovery_source_handle'
+      : 'recovery_destination_handle'
+    const suffix = `"label":"Nested","${handleName}":"${HANDLE}"`
+    return [
+      ['identical', `{"request":{"wallet_id":"nested","wallet_id":"nested",${suffix}}}`],
+      ['conflicting', `{"request":{"wallet_id":"first","wallet_id":"second",${suffix}}}`],
+      ['valid-then-malformed', `{"request":{"wallet_id":"nested","wallet_id":false,${suffix}}}`],
+      ['malformed-then-valid', `{"request":{"wallet_id":false,"wallet_id":"nested",${suffix}}}`],
+      ['public-then-secret-like', `{"request":{"wallet_id":"nested",${suffix},"password":"${PUBLIC_CANARY}"}}`],
+      ['exact-and-wrong-case', `{"request":{"wallet_id":"nested","Wallet_Id":"wrong-case",${suffix}}}`],
+      ['three-repeated', `{"request":{"wallet_id":false,"wallet_id":null,"wallet_id":"nested",${suffix}}}`],
+      ['escaped-equivalent', `{"request":{"wallet_id":false,"wallet_\\u0069d":"nested",${suffix}}}`],
+      ['bounded-whitespace', `{"request":{"wallet_id":false,${' '.repeat(4096)}"wallet_id":"nested",${suffix}}}`]
+    ]
+  }
+
+  async function directFetchProbe(kind, body, contentType) {
+    if (!isSelected(`${kind}-missing-invoke-key`, kind)) return null
+    const command = 'wallet_create'
+    const url = window.__TAURI_INTERNALS__.convertFileSrc(command, 'ipc')
+    const headers = {
+      'Content-Type': contentType,
+      'Tauri-Callback': '1000001',
+      'Tauri-Error': '1000002'
+    }
+    try {
+      const response = await fetch(url, { method: 'POST', headers, body })
+      write({
+        sequence: ++sequence,
+        id: `${kind}-missing-invoke-key`,
+        route: kind,
+        command,
+        outcome: response.ok ? 'unexpected_success' : 'framework_rejection',
+        expected: 'framework_rejection',
+        passed: !response.ok
+      })
+      return !response.ok
+    } catch {
+      write({
+        sequence: ++sequence,
+        id: `${kind}-missing-invoke-key`,
+        route: kind,
+        command,
+        outcome: 'transport_rejection',
+        expected: 'transport_rejection',
+        passed: true
+      })
+      return true
+    }
+  }
+
+  function directXhrProbe(body) {
+    if (!isSelected('direct-xhr-missing-invoke-key', 'direct-xhr')) return Promise.resolve(null)
+    return new Promise((resolve) => {
+      const command = 'wallet_create'
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', window.__TAURI_INTERNALS__.convertFileSrc(command, 'ipc'))
+      xhr.setRequestHeader('Content-Type', 'application/json')
+      xhr.setRequestHeader('Tauri-Callback', '1000003')
+      xhr.setRequestHeader('Tauri-Error', '1000004')
+      xhr.onloadend = () => {
+        const passed = xhr.status < 200 || xhr.status >= 300
+        write({
+          sequence: ++sequence,
+          id: 'direct-xhr-missing-invoke-key',
+          route: 'direct-xhr',
+          command,
+          outcome: passed ? 'framework_rejection' : 'unexpected_success',
+          expected: 'framework_rejection',
+          passed
+        })
+        resolve(passed)
+      }
+      xhr.onerror = () => {
+        write({
+          sequence: ++sequence,
+          id: 'direct-xhr-missing-invoke-key',
+          route: 'direct-xhr',
+          command,
+          outcome: 'transport_rejection',
+          expected: 'transport_rejection',
+          passed: true
+        })
+        resolve(true)
+      }
+      xhr.send(body)
+    })
+  }
+
+  async function forcePostMessageFallback() {
+    if (!isSelected('forced-post-message-fallback', 'internals-post-message')) return null
+    const originalFetch = window.fetch
+    let intercepted = false
+    window.fetch = (...args) => {
+      const url = String(args[0])
+      if (!intercepted && url.includes('ipc.localhost')) {
+        intercepted = true
+        return Promise.reject(new Error('qualification-forced-custom-protocol-failure'))
+      }
+      return originalFetch(...args)
+    }
+    try {
+      return await runCase(
+        'forced-post-message-fallback',
+        'internals-post-message',
+        'wallet_get_status',
+        {},
+        'layer_b_accepted',
+        false,
+        {
+          requirePostMessage: true,
+          requireFallbackInterception: true,
+          fallbackIntercepted: () => intercepted
+        }
+      )
+    } finally {
+      window.fetch = originalFetch
+    }
+  }
+
+  async function controlScenario(id, path, expected, command = 'wallet_get_status') {
+    if (!isSelected(id, 'official-invoke')) return null
+    if (path) {
+      const url = window.__TAURI_INTERNALS__.convertFileSrc(path, 'qualification-control')
+      const response = await nativeFetch(url, { method: 'POST' })
+      if (!response.ok) {
+        write({
+          sequence: ++sequence,
+          id,
+          route: 'official-invoke',
+          command,
+          outcome: 'case_not_observed',
+          expected,
+          passed: false,
+          inconclusive: true
+        })
+        return false
+      }
+      const control = await response.json()
+      if (control.phase === 'reloading') {
+        status.textContent = 'Waiting for the replacement window generation'
+        return new Promise(() => {})
+      }
+      if (control.phase !== 'ready') {
+        write({
+          sequence: ++sequence,
+          id,
+          route: 'official-invoke',
+          command,
+          outcome: 'case_not_observed',
+          expected,
+          passed: false,
+          inconclusive: true
+        })
+        return false
+      }
+    }
+    return runCase(id, 'official-invoke', command, exactPayload(command), expected)
+  }
+
+  async function appendGeneratedWrapperCases(results) {
+    const generalFamilies = [
+      'raw-empty',
+      'raw-json-looking',
+      'raw-arbitrary',
+      'raw-bytes',
+      'json-null',
+      'json-boolean',
+      'json-number',
+      'json-string',
+      'json-array',
+      'shape-mismatch',
+      'missing-top-level',
+      'extra-top-level',
+      'wrong-case-top-level',
+      'secret-like-top-level',
+      'wrong-command-envelope'
+    ]
+    const nestedFamilies = [
+      'malformed-nested',
+      'oversized-nested',
+      'unknown-nested',
+      'secret-like-nested'
+    ]
+    const windowFamilies = [
+      ['window-other-local', null, 'qualification_invalid_window'],
+      ['window-remote-origin', null, 'qualification_invalid_window'],
+      ['window-recreated-main', 'recreate', 'qualification_invalid_window'],
+      ['window-reloaded-generation', 'reload', 'qualification_invalid_window'],
+      ['window-destruction-race', 'destroy-race', 'qualification_runtime_unavailable'],
+      ['window-revocation-race', 'revocation-race', 'qualification_runtime_unavailable']
+    ]
+    for (const command of COMMANDS) {
+      results.push(await runCase(
+        `wrapper-${command}-exact`,
+        'official-invoke',
+        command,
+        exactPayload(command),
+        'layer_b_accepted'
+      ))
+      for (const family of generalFamilies) {
+        results.push(await runCase(
+          `wrapper-${command}-${family}`,
+          'official-invoke',
+          command,
+          adversarialPayload(command, family),
+          'invalid_request'
+        ))
+      }
+      if (command === 'wallet_create' || command === 'wallet_restore') {
+        for (const family of nestedFamilies) {
+          results.push(await runCase(
+            `wrapper-${command}-${family}`,
+            'official-invoke',
+            command,
+            adversarialPayload(command, family),
+            'invalid_request'
+          ))
+        }
+      }
+      const mismatchedInvokedCommand = nextCommand(command)
+      results.push(await runCase(
+        `wrapper-${command}-declared-invoked-mismatch`,
+        'official-invoke',
+        mismatchedInvokedCommand,
+        exactPayload(command),
+        'invalid_request'
+      ))
+      for (const [family, path, expected] of windowFamilies) {
+        results.push(await controlScenario(
+          `wrapper-${command}-${family}`,
+          path,
+          expected,
+          command
+        ))
+      }
+      for (const panicPoint of ['metadata', 'body', 'response', 'observation']) {
+        results.push(await runCase(
+          `wrapper-${command}-panic-${panicPoint}`,
+          'internals-post-message',
+          command,
+          exactPayload(command),
+          'qualification_runtime_unavailable',
+          panicPoint
+        ))
+      }
+      results.push(await runCase(
+        `wrapper-${command}-panic-fixed-error`,
+        'internals-post-message',
+        command,
+        { extra: true },
+        'qualification_runtime_unavailable',
+        'fixed-error'
+      ))
+      results.push(await runAcceptedSequence(command, 'sequential-repeat'))
+      results.push(await runConcurrentBatch(command))
+      results.push(await runAcceptedSequence(command, 'reordered-invoke'))
+      results.push(await runCase(
+        `wrapper-${command}-post-revocation`,
+        'official-invoke',
+        command,
+        adversarialPayload(command, 'post-revocation'),
+        'invalid_request'
+      ))
+    }
+  }
+
+  async function runMatrix() {
+    runButton.disabled = true
+    status.textContent = 'Running'
+    output.textContent = ''
+    sequence = 0
+    const results = []
+
+    await appendGeneratedWrapperCases(results)
+
+    results.push(await controlScenario('window-other-local', null, 'qualification_invalid_window'))
+    results.push(await controlScenario('window-remote-origin', null, 'qualification_invalid_window'))
+    results.push(await controlScenario('window-recreated-main', 'recreate', 'qualification_invalid_window'))
+    results.push(await controlScenario('window-reloaded-generation', 'reload', 'qualification_invalid_window'))
+    results.push(await controlScenario('window-destruction-race', 'destroy-race', 'qualification_runtime_unavailable'))
+    results.push(await controlScenario('window-revocation-race', 'revocation-race', 'qualification_runtime_unavailable'))
+
+    for (const command of COMMANDS) {
+      results.push(await runCase(`exact-${command}`, 'official-invoke', command, exactPayload(command), 'layer_b_accepted'))
+    }
+
+    for (const route of ['internals-invoke', 'internals-ipc']) {
+      results.push(await runCase(`exact-status-${route}`, route, 'wallet_get_status', {}, 'layer_b_accepted'))
+    }
+
+    for (const [id, payload] of [
+      ['raw-empty', ''],
+      ['raw-json-looking', '{}'],
+      ['raw-arbitrary', 'not-json'],
+      ['raw-bytes', new TextEncoder().encode('{}')]
+    ]) {
+      results.push(await runCase(id, 'official-invoke', 'wallet_get_status', payload, 'invalid_request'))
+    }
+
+    for (const [id, payload] of [
+      ['json-null', null],
+      ['json-boolean', true],
+      ['json-number', 42],
+      ['json-string', PUBLIC_CANARY],
+      ['json-array', []],
+      ['extra-top-level', { extra: true }],
+      ['wrong-case-top-level', { Request: {} }],
+      ['secret-like-top-level', { password: PUBLIC_CANARY }],
+      ['key-name-canary-top-level', { PUBLIC_SECRET_KEY_NAME_CANARY: PUBLIC_CANARY }],
+      ['oversized-key-top-level', { ['k'.repeat(65)]: PUBLIC_CANARY }],
+      ['excessive-key-count-top-level', Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`field_${index}`, null]))]
+    ]) {
+      results.push(await runCase(id, 'official-invoke', 'wallet_get_status', payload, 'invalid_request'))
+    }
+
+    for (const [id, payload] of [
+      ['create-empty', {}],
+      ['create-request-empty', { request: {} }],
+      ['create-request-wrong-type', { request: false }],
+      ['create-unknown-field', { request: { ...exactPayload('wallet_create').request, extra: true } }],
+      ['create-secret-like-field', { request: { ...exactPayload('wallet_create').request, password: PUBLIC_CANARY } }],
+      ['create-invalid-handle', { request: { ...exactPayload('wallet_create').request, recovery_destination_handle: 'a' } }],
+      ['restore-wrong-handle-name', { request: exactPayload('wallet_create').request }]
+    ]) {
+      const command = id.startsWith('restore') ? 'wallet_restore' : 'wallet_create'
+      results.push(await runCase(id, 'official-invoke', command, payload, 'invalid_request'))
+    }
+
+    results.push(await runCase('unknown-command', 'official-invoke', 'wallet_unknown', {}, 'framework_error_redacted'))
+
+    for (const command of ['wallet_create', 'wallet_restore']) {
+      const commandName = command === 'wallet_create' ? 'create' : 'restore'
+      for (const [family, text] of duplicateFamilies(command)) {
+        for (const route of ['official-invoke', 'internals-invoke', 'internals-ipc']) {
+          results.push(await runCase(`duplicate-${commandName}-${family}-string`, route, command, text, 'invalid_request'))
+          results.push(await runCase(`duplicate-${commandName}-${family}-bytes`, route, command, new TextEncoder().encode(text), 'invalid_request'))
+          const normalized = JSON.parse(text)
+          const expected = validNormalizedRequest(command, normalized) ? 'layer_b_accepted' : 'invalid_request'
+          results.push(await runCase(`duplicate-${commandName}-${family}-object-normalized`, route, command, normalized, expected))
+        }
+      }
+
+      for (const [family, text] of nestedDuplicateFamilies(command)) {
+        for (const route of ['official-invoke', 'internals-invoke', 'internals-ipc']) {
+          results.push(await runCase(`nested-duplicate-${commandName}-${family}-string`, route, command, text, 'invalid_request'))
+          results.push(await runCase(`nested-duplicate-${commandName}-${family}-bytes`, route, command, new TextEncoder().encode(text), 'invalid_request'))
+          const normalized = JSON.parse(text)
+          const expected = validNormalizedRequest(command, normalized) ? 'layer_b_accepted' : 'invalid_request'
+          results.push(await runCase(`nested-duplicate-${commandName}-${family}-object-normalized`, route, command, normalized, expected))
+        }
+      }
+    }
+
+    const directDuplicate = duplicateFamilies('wallet_create')[0][1]
+    results.push(await directFetchProbe('direct-fetch-text', directDuplicate, 'application/json'))
+    results.push(await directFetchProbe('direct-fetch-bytes', new TextEncoder().encode(directDuplicate), 'application/octet-stream'))
+    results.push(await directXhrProbe(directDuplicate))
+    results.push(await forcePostMessageFallback())
+
+    for (const panicPoint of ['metadata', 'body', 'response', 'observation']) {
+      results.push(await runCase(
+        `contained-${panicPoint}-panic`,
+        'internals-post-message',
+        'wallet_get_status',
+        {},
+        'qualification_runtime_unavailable',
+        panicPoint
+      ))
+    }
+    results.push(await runCase(
+      'contained-fixed-error-panic',
+      'internals-post-message',
+      'wallet_get_status',
+      { extra: true },
+      'qualification_runtime_unavailable',
+      'fixed-error'
+    ))
+    const executed = results.filter((result) => result !== null)
+    const passed = executed.filter((result) => result === true).length
+    const hasInconclusive = executed.some((result) => result === 'inconclusive')
+    const failed = executed.filter((result) => result === false).length
+    const inconclusive = executed.length !== 1 || hasInconclusive
+    write({
+      marker: 'layer_b_matrix_complete',
+      caseSelector: selectedCase,
+      id: selectedCase,
+      route: 'matrix-controller',
+      command: 'matrix',
+      outcome: inconclusive ? 'matrix_inconclusive' : 'matrix_complete',
+      expected: 'matrix_complete',
+      passed: !inconclusive && failed === 0,
+      inconclusive
+    })
+    await transcriptChain
+    status.textContent = inconclusive
+      ? 'Harness case inconclusive: selected case was not observed exactly once'
+      : (failed === 0 ? 'Harness case passed' : 'Harness case failed')
+    runButton.disabled = false
+  }
+
+  function validNormalizedRequest(command, value) {
+    const request = value && typeof value === 'object' ? value.request : null
+    const handleName = command === 'wallet_restore'
+      ? 'recovery_source_handle'
+      : 'recovery_destination_handle'
+    return Boolean(
+      value && Object.keys(value).length === 1 && request && typeof request === 'object' &&
+      Object.keys(request).length === 3 &&
+      typeof request.wallet_id === 'string' &&
+      typeof request.label === 'string' &&
+      typeof request[handleName] === 'string' &&
+      request[handleName].length === 64
+    )
+  }
+
+  runButton.addEventListener('click', () => {
+    runMatrix().catch(() => {
+      write({ marker: 'layer_b_matrix_aborted', error: 'fixed_unclassified_harness_failure' })
+      status.textContent = 'Harness matrix aborted'
+      runButton.disabled = false
+    })
+  })
+
+  if (typeof selectedCase !== 'string' || selectedCase.length === 0) {
+    status.textContent = 'No sanctioned case selected'
+    runButton.disabled = true
+  } else {
+    setTimeout(() => {
+      runMatrix().catch(() => {
+        write({
+          marker: 'layer_b_matrix_aborted',
+          caseSelector: selectedCase,
+          id: selectedCase,
+          route: 'matrix-controller',
+          command: 'matrix',
+          outcome: 'case_not_observed',
+          expected: 'matrix_complete',
+          passed: false,
+          inconclusive: true
+        })
+        status.textContent = 'Harness case aborted and is inconclusive'
+      })
+    }, 0)
+  }
+})()

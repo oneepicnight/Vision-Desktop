@@ -15,6 +15,11 @@ export type CoreVerification = {
   matches: boolean;
 };
 
+export type SupportPackageResult = {
+  zip_sha256: string;
+  assessment: string;
+};
+
 export type DiagnosticsState = {
   manifest: CoreManifest | null;
   verification: CoreVerification | null;

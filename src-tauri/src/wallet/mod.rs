@@ -46,6 +46,8 @@ mod session;
 mod signing;
 mod storage_security;
 mod submission;
+#[cfg(all(test, windows))]
+mod test_request_ledger;
 mod transaction;
 #[cfg(windows)]
 mod transaction_confirmation;

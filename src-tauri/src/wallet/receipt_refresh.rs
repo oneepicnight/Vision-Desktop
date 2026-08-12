@@ -293,6 +293,7 @@ mod tests {
         secrets::{WalletPassword, WalletSeed},
         storage_security,
         submission::{compatibility_contract_digest, SubmissionRejectionPolicy},
+        test_request_ledger::TestRequestLedger,
         transaction::{
             canonical_transaction_id, sign_cash_transfer_for_test, CashTransferDraft,
             VisionTransaction,
@@ -319,6 +320,7 @@ mod tests {
         seed: WalletSeed,
         transaction: VisionTransaction,
         transaction_id: String,
+        request_ledger: TestRequestLedger,
     }
 
     struct FakeReceiptSource {
@@ -336,6 +338,7 @@ mod tests {
         identity_error_at: Cell<Option<usize>>,
         status_error: Cell<bool>,
         lookup_error: Cell<bool>,
+        request_ledger: TestRequestLedger,
     }
 
     struct PanicObserver {
@@ -365,6 +368,10 @@ mod tests {
 
     impl FakeReceiptSource {
         fn new(body: Vec<u8>) -> Self {
+            Self::with_ledger(body, TestRequestLedger::default())
+        }
+
+        fn with_ledger(body: Vec<u8>, request_ledger: TestRequestLedger) -> Self {
             Self {
                 body: RefCell::new(body),
                 identity_calls: Cell::new(0),
@@ -380,6 +387,7 @@ mod tests {
                 identity_error_at: Cell::new(None),
                 status_error: Cell::new(false),
                 lookup_error: Cell::new(false),
+                request_ledger,
             }
         }
 
@@ -443,16 +451,47 @@ mod tests {
     impl WalletCoreReceiptSource for FakeReceiptSource {
         fn transaction_lookup(
             &self,
-            _transaction_id: &str,
+            transaction_id: &str,
         ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError> {
             self.lookup_calls.set(self.lookup_calls.get() + 1);
             if self.lookup_error.get() {
+                self.request_ledger.record(
+                    "GET",
+                    format!("/transactions/{transaction_id}"),
+                    transaction_id,
+                    &[],
+                    "transport_failed",
+                );
                 return Err(WalletCoreClientError::TransportFailed);
             }
             if self.revoke_on_lookup.get() {
                 self.revoke_now();
             }
-            Ok(Zeroizing::new(self.body.borrow().clone()))
+            let body = self.body.borrow().clone();
+            let outcome = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    let found = value.get("found")?.as_bool()?;
+                    if !found {
+                        return Some("not_found");
+                    }
+                    Some(
+                        if value.get("block_hash").is_some_and(|hash| !hash.is_null()) {
+                            "mined"
+                        } else {
+                            "pending"
+                        },
+                    )
+                })
+                .unwrap_or("malformed");
+            self.request_ledger.record(
+                "GET",
+                format!("/transactions/{transaction_id}"),
+                transaction_id,
+                &[],
+                outcome,
+            );
+            Ok(Zeroizing::new(body))
         }
     }
 
@@ -482,6 +521,14 @@ mod tests {
             assert_eq!(transaction.sender_pubkey, identity.address);
             let transaction_id = canonical_transaction_id(&transaction).unwrap();
             let exact_body = Zeroizing::new(serde_json::to_vec(&transaction).unwrap());
+            let request_ledger = TestRequestLedger::default();
+            request_ledger.record(
+                "POST",
+                "/transactions",
+                &transaction_id,
+                exact_body.as_slice(),
+                "accepted",
+            );
             let mut body_hasher = blake3::Hasher::new_derive_key(
                 "com.vision.desktop.wallet-signed-envelope-digest.v1",
             );
@@ -559,6 +606,7 @@ mod tests {
                 seed,
                 transaction,
                 transaction_id,
+                request_ledger,
             }
         }
 
@@ -630,11 +678,10 @@ mod tests {
     fn receipt_state_machine_records_pending_mined_advancement_reorg_and_loss() {
         let fixture = Fixture::new();
         let pending = WalletReceiptObservation::Pending;
-        let source = FakeReceiptSource::new(lookup_body(
-            &fixture.transaction,
-            &fixture.transaction_id,
-            &pending,
-        ));
+        let source = FakeReceiptSource::with_ledger(
+            lookup_body(&fixture.transaction, &fixture.transaction_id, &pending),
+            fixture.request_ledger.clone(),
+        );
         let first = fixture.refresh(&source, SUBMITTED_AT + 1).unwrap();
         assert_eq!(first.change, WalletReceiptChange::FirstObservation);
         assert_eq!(first.record.observation, pending);
@@ -689,13 +736,68 @@ mod tests {
         source.replace_body(lookup_body(
             &fixture.transaction,
             &fixture.transaction_id,
+            &WalletReceiptObservation::Pending,
+        ));
+        assert_eq!(
+            fixture
+                .refresh(&source, SUBMITTED_AT + 60_000)
+                .unwrap()
+                .change,
+            WalletReceiptChange::Reorganized
+        );
+
+        source.replace_body(lookup_body(
+            &fixture.transaction,
+            &fixture.transaction_id,
             &WalletReceiptObservation::NotFound,
         ));
         assert_eq!(
-            fixture.refresh(&source, SUBMITTED_AT + 5).unwrap().change,
+            fixture
+                .refresh(&source, SUBMITTED_AT + 86_400_000)
+                .unwrap()
+                .change,
             WalletReceiptChange::ObservationLost
         );
-        assert_eq!(source.lookup_calls.get(), 5);
+        assert_eq!(
+            fixture
+                .refresh(&source, SUBMITTED_AT + 172_800_000)
+                .unwrap()
+                .change,
+            WalletReceiptChange::Unchanged
+        );
+
+        let exact_body = serde_json::to_vec(&fixture.transaction).unwrap();
+        fixture
+            .request_ledger
+            .assert_single_post_for_intent(&fixture.transaction_id, &exact_body);
+        let requests = fixture.request_ledger.snapshot();
+        let lookups: Vec<_> = requests
+            .iter()
+            .filter(|record| {
+                record.method == "GET" && record.transaction_id == fixture.transaction_id
+            })
+            .collect();
+        assert_eq!(
+            lookups
+                .iter()
+                .map(|record| record.outcome)
+                .collect::<Vec<_>>(),
+            vec![
+                "pending",
+                "mined",
+                "mined",
+                "mined",
+                "pending",
+                "not_found",
+                "not_found",
+            ]
+        );
+        assert!(lookups
+            .iter()
+            .enumerate()
+            .all(|(index, record)| record.attempt_number == index + 1
+                && record.route == format!("/transactions/{}", fixture.transaction_id)));
+        assert_eq!(source.lookup_calls.get(), 7);
     }
 
     #[test]

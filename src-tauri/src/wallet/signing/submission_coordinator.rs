@@ -469,6 +469,7 @@ mod tests {
         },
         secrets::{WalletPassword, WalletSeed},
         submission::{SubmissionRejectionPolicy, WalletSubmissionOutcome},
+        test_request_ledger::TestRequestLedger,
         transaction::{
             canonical_transaction_id, sign_cash_transfer_for_test, CashTransferDraft,
             VisionTransaction,
@@ -477,7 +478,7 @@ mod tests {
         vault::EncryptedWalletVault,
     };
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     };
 
@@ -508,6 +509,8 @@ mod tests {
         revoke_on_identity_call: Option<(usize, Arc<WalletRuntimeState>)>,
         lookup_body: Arc<Mutex<Option<Vec<u8>>>>,
         journal_failure_path: Option<std::path::PathBuf>,
+        account_nonce: Arc<AtomicU64>,
+        request_ledger: TestRequestLedger,
     }
 
     impl WalletCoreReadSource for FakeSubmissionCore {
@@ -519,7 +522,7 @@ mod tests {
                 address: self.address.clone(),
                 exists: true,
                 balance: 10_000_000_000,
-                nonce: 7,
+                nonce: self.account_nonce.load(Ordering::SeqCst),
             })
         }
 
@@ -555,17 +558,48 @@ mod tests {
     impl WalletCoreReceiptSource for FakeSubmissionCore {
         fn transaction_lookup(
             &self,
-            _transaction_id: &str,
+            transaction_id: &str,
         ) -> Result<Zeroizing<Vec<u8>>, WalletCoreClientError> {
             if matches!(self.mode, ResponseMode::PanicDuringLookup) {
+                self.request_ledger.record(
+                    "GET",
+                    format!("/transactions/{transaction_id}"),
+                    transaction_id,
+                    &[],
+                    "panic",
+                );
                 panic!("injected restart reconciliation lookup panic");
             }
-            self.lookup_body
-                .lock()
-                .unwrap()
-                .clone()
-                .map(Zeroizing::new)
-                .ok_or(WalletCoreClientError::TransportFailed)
+            let body = self.lookup_body.lock().unwrap().clone();
+            match body {
+                Some(body) => {
+                    let outcome = serde_json::from_slice::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|value| value.get("found").and_then(serde_json::Value::as_bool))
+                        .map_or(
+                            "malformed",
+                            |found| if found { "found" } else { "not_found" },
+                        );
+                    self.request_ledger.record(
+                        "GET",
+                        format!("/transactions/{transaction_id}"),
+                        transaction_id,
+                        &[],
+                        outcome,
+                    );
+                    Ok(Zeroizing::new(body))
+                }
+                None => {
+                    self.request_ledger.record(
+                        "GET",
+                        format!("/transactions/{transaction_id}"),
+                        transaction_id,
+                        &[],
+                        "transport_failed",
+                    );
+                    Err(WalletCoreClientError::TransportFailed)
+                }
+            }
         }
     }
 
@@ -577,14 +611,16 @@ mod tests {
         ) -> Result<WalletCoreHttpResponse, WalletCoreClientError> {
             let previous = self.writes.fetch_add(1, Ordering::SeqCst);
             assert_eq!(previous, 0, "the write capability was reused");
+            let transaction: VisionTransaction = serde_json::from_slice(exact_body).unwrap();
+            let tx_id = canonical_transaction_id(&transaction).unwrap();
             if matches!(self.mode, ResponseMode::PanicDuringWrite) {
+                self.request_ledger
+                    .record("POST", "/transactions", &tx_id, exact_body, "panic");
                 panic!("injected private submission write panic");
             }
             if let Some(path) = &self.journal_failure_path {
                 std::fs::create_dir(path).unwrap();
             }
-            let transaction: VisionTransaction = serde_json::from_slice(exact_body).unwrap();
-            let tx_id = canonical_transaction_id(&transaction).unwrap();
             if !matches!(self.mode, ResponseMode::TransportFailure) {
                 *self.lookup_body.lock().unwrap() = Some(
                     serde_json::to_vec(&serde_json::json!({
@@ -602,9 +638,23 @@ mod tests {
                 self.mode,
                 ResponseMode::TransportFailure | ResponseMode::AcceptedResponseLost
             ) {
+                self.request_ledger.record(
+                    "POST",
+                    "/transactions",
+                    &tx_id,
+                    exact_body,
+                    "transport_failed",
+                );
                 return Err(WalletCoreClientError::TransportFailed);
             }
             if matches!(self.mode, ResponseMode::Malformed) {
+                self.request_ledger.record(
+                    "POST",
+                    "/transactions",
+                    &tx_id,
+                    exact_body,
+                    "malformed_response",
+                );
                 return Ok(WalletCoreHttpResponse {
                     status: 200,
                     body: Zeroizing::new(br#"{"unknown":true}"#.to_vec()),
@@ -638,6 +688,17 @@ mod tests {
                     "decision": {"kind": "accept"}
                 })
             };
+            self.request_ledger.record(
+                "POST",
+                "/transactions",
+                &tx_id,
+                exact_body,
+                if code.is_some() {
+                    "rejected"
+                } else {
+                    "accepted"
+                },
+            );
             Ok(WalletCoreHttpResponse {
                 status: if code.is_some() { 422 } else { 200 },
                 body: Zeroizing::new(serde_json::to_vec(&body).unwrap()),
@@ -682,6 +743,29 @@ mod tests {
             mode,
             None,
             None,
+            TestRequestLedger::default(),
+        )
+    }
+
+    fn pending_with_ledger<'a>(
+        runtime: &'a WalletRuntimeState,
+        sender: &str,
+        recipient: &str,
+        writes: Arc<AtomicUsize>,
+        lookup_body: Arc<Mutex<Option<Vec<u8>>>>,
+        mode: ResponseMode,
+        request_ledger: TestRequestLedger,
+    ) -> PendingTransferConfirmation<'a, FakeSubmissionCore> {
+        pending_with_options(
+            runtime,
+            sender,
+            recipient,
+            writes,
+            lookup_body,
+            mode,
+            None,
+            None,
+            request_ledger,
         )
     }
 
@@ -704,6 +788,7 @@ mod tests {
             mode,
             revoke_on_identity_call,
             None,
+            TestRequestLedger::default(),
         )
     }
 
@@ -717,8 +802,10 @@ mod tests {
         mode: ResponseMode,
         revoke_on_identity_call: Option<(usize, Arc<WalletRuntimeState>)>,
         journal_failure_path: Option<std::path::PathBuf>,
+        request_ledger: TestRequestLedger,
     ) -> PendingTransferConfirmation<'a, FakeSubmissionCore> {
         let identity_calls = Arc::new(AtomicUsize::new(0));
+        let account_nonce = Arc::new(AtomicU64::new(7));
         let prepare_source = FakeSubmissionCore {
             address: sender.to_string(),
             writes: writes.clone(),
@@ -728,6 +815,8 @@ mod tests {
             revoke_on_identity_call: revoke_on_identity_call.clone(),
             lookup_body: lookup_body.clone(),
             journal_failure_path: journal_failure_path.clone(),
+            account_nonce: Arc::clone(&account_nonce),
+            request_ledger: request_ledger.clone(),
         };
         let request: WalletTransferPreviewRequest = serde_json::from_value(serde_json::json!({
             "recipient": recipient,
@@ -757,6 +846,8 @@ mod tests {
                 revoke_on_identity_call,
                 lookup_body,
                 journal_failure_path,
+                account_nonce,
+                request_ledger,
             },
         )
         .unwrap()
@@ -870,6 +961,7 @@ mod tests {
             ResponseMode::Accepted,
             None,
             Some(custody.journal_path().to_path_buf()),
+            TestRequestLedger::default(),
         );
         let result = super::super::sign_and_submit_after_native_approval(
             pending,
@@ -944,6 +1036,8 @@ mod tests {
                     revoke_on_identity_call: None,
                     lookup_body,
                     journal_failure_path: None,
+                    account_nonce: Arc::new(AtomicU64::new(7)),
+                    request_ledger: TestRequestLedger::default(),
                 };
                 assert!(matches!(
                     reconciliation
@@ -1005,6 +1099,8 @@ mod tests {
             revoke_on_identity_call: None,
             lookup_body,
             journal_failure_path: None,
+            account_nonce: Arc::new(AtomicU64::new(7)),
+            request_ledger: TestRequestLedger::default(),
         };
         assert!(matches!(
             reconciliation
@@ -1059,6 +1155,8 @@ mod tests {
             revoke_on_identity_call: None,
             lookup_body,
             journal_failure_path: None,
+            account_nonce: Arc::new(AtomicU64::new(7)),
+            request_ledger: TestRequestLedger::default(),
         };
         assert_eq!(
             reconciliation
@@ -1130,17 +1228,20 @@ mod tests {
     }
 
     #[test]
-    fn restart_not_found_remains_ambiguous_and_never_writes_again() {
+    fn repeated_not_found_nonce_movement_and_elapsed_polls_never_retry() {
         let (runtime, sender) = unlocked_runtime();
         let writes = Arc::new(AtomicUsize::new(0));
         let lookup_body = Arc::new(Mutex::new(None));
-        let pending = pending(
+        let request_ledger = TestRequestLedger::default();
+        let recipient = "b".repeat(64);
+        let pending = pending_with_ledger(
             &runtime,
             &sender,
-            &"b".repeat(64),
+            &recipient,
             writes.clone(),
             lookup_body.clone(),
             ResponseMode::TransportFailure,
+            request_ledger.clone(),
         );
         let directory = tempfile::tempdir().unwrap();
         let custody = custody(&directory);
@@ -1153,15 +1254,13 @@ mod tests {
             &SubmissionRejectionPolicy::production(),
         )
         .unwrap_or_else(|error| panic!("submission failed: {}", signing_error_name(error)));
-        assert!(matches!(
-            result,
-            PrivateSubmissionResult::OutcomeUnknown { .. }
-        ));
-        let record = fs_read_record(&directory);
-        let transaction_id = record["transaction_id"].as_str().unwrap();
+        let transaction_id = match result {
+            PrivateSubmissionResult::OutcomeUnknown { transaction_id } => transaction_id,
+            _ => panic!("transport ambiguity must remain outcome_unknown"),
+        };
         *lookup_body.lock().unwrap() = Some(
             serde_json::to_vec(&serde_json::json!({
-                "tx_id": transaction_id,
+                "tx_id": &transaction_id,
                 "found": false,
                 "block_hash": null,
                 "block_height": null,
@@ -1170,8 +1269,6 @@ mod tests {
             }))
             .unwrap(),
         );
-        let reconciliation = runtime.begin_reconciliation_discovery(MAIN).unwrap();
-        let restart = reconciliation.discover(&custody).unwrap().unwrap();
         let source = FakeSubmissionCore {
             address: sender,
             writes: writes.clone(),
@@ -1181,14 +1278,49 @@ mod tests {
             revoke_on_identity_call: None,
             lookup_body,
             journal_failure_path: None,
+            // A later canonical nonce must never justify retrying an ambiguous envelope.
+            account_nonce: Arc::new(AtomicU64::new(99)),
+            request_ledger: request_ledger.clone(),
         };
-        assert!(matches!(
-            reconciliation
-                .reconcile_ambiguous_acceptance(&custody, restart, &source)
-                .unwrap(),
-            WalletReconciliationResult::Unresolved
-        ));
-        reconciliation.complete(()).unwrap();
+
+        // Repeated polls stand in for arbitrarily long elapsed time. Only authenticated,
+        // read-only exact-envelope lookup is permitted after the single write attempt.
+        for _elapsed_poll_ms in [1_u64, 60_000, 86_400_000] {
+            let reconciliation = runtime.begin_reconciliation_discovery(MAIN).unwrap();
+            let restart = reconciliation.discover(&custody).unwrap().unwrap();
+            assert!(matches!(
+                reconciliation
+                    .reconcile_ambiguous_acceptance(&custody, restart, &source)
+                    .unwrap(),
+                WalletReconciliationResult::Unresolved
+            ));
+            reconciliation.complete(()).unwrap();
+        }
+
+        let expected_transaction = sign_cash_transfer_for_test(
+            &WalletSeed::for_test(0x41),
+            &CashTransferDraft {
+                nonce: 7,
+                recipient,
+                amount_raw_units: 2_500_000_000,
+                tip_raw_units: 0,
+                fee_limit_raw_units: 201,
+            },
+        )
+        .unwrap();
+        let expected_body = serde_json::to_vec(&expected_transaction).unwrap();
+        request_ledger.assert_single_post_for_intent(&transaction_id, &expected_body);
+        let lookups: Vec<_> = request_ledger
+            .snapshot()
+            .into_iter()
+            .filter(|record| record.method == "GET" && record.transaction_id == transaction_id)
+            .collect();
+        assert_eq!(lookups.len(), 3);
+        assert!(lookups
+            .iter()
+            .enumerate()
+            .all(|(index, record)| record.attempt_number == index + 1
+                && record.outcome == "not_found"));
         assert_eq!(writes.load(Ordering::SeqCst), 1);
         assert_eq!(
             fs_read_record(&directory)["phase"]["kind"],
@@ -1214,6 +1346,7 @@ mod tests {
             ResponseMode::Accepted,
             None,
             Some(journal_path.clone()),
+            TestRequestLedger::default(),
         );
         let result = super::super::sign_and_submit_after_native_approval(
             pending,
@@ -1403,6 +1536,8 @@ mod tests {
             revoke_on_identity_call: None,
             lookup_body,
             journal_failure_path: None,
+            account_nonce: Arc::new(AtomicU64::new(7)),
+            request_ledger: TestRequestLedger::default(),
         };
         assert_eq!(
             reconciliation

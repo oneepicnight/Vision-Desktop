@@ -29,7 +29,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.ico"],
+    "icon": ["icons/icon.ico", "icons/icon.png"],
     "resources": {
       "../bundled/core/windows-x64/vision-core.exe": "bundled/core/windows-x64/vision-core.exe",
       "../bundled/core/windows-x64/manifest.json": "bundled/core/windows-x64/manifest.json"

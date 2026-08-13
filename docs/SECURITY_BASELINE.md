@@ -2,7 +2,10 @@
 
 Security rules implemented from the first milestone:
 
-- Core API must bind to loopback only. Frozen RC2 cannot currently satisfy this, so real Core launch is blocked by the Desktop supervisor.
+- Core API must bind to loopback only. The currently bundled frozen RC2 cannot satisfy this, so
+  real Core launch remains blocked by the Desktop supervisor. A newer Core source revision is not
+  trusted until its exact Windows artifact passes the Desktop intake checklist and is independently
+  accepted.
 - Desktop frontend cannot execute arbitrary shell commands.
 - Tauri command list is explicit and narrow.
 - Backend commands validate inputs.
@@ -15,6 +18,9 @@ Security rules implemented from the first milestone:
 - No automatic firewall or router changes are performed.
 - Rust dependencies are audited against RustSec on relevant changes, weekly, and on manual request.
 - Frontend production and development dependencies are audited from `package-lock.json` on relevant changes, weekly, and on manual request. Moderate, high, and critical npm advisories fail the job; low-severity findings remain visible.
+- Pull requests and `main` pushes run a Windows application quality gate covering locked frontend
+  installation, TypeScript, state tests, the production frontend build, Rust formatting, strict
+  Clippy, the serialized Rust suite, and committed-diff whitespace validation.
 - The production WebView's script connection policy has no general network source. Its `connect-src` is limited to Tauri IPC, while local Vite and loopback development sources exist only in `devCsp`.
 - Frontend TypeScript cannot call Core directly; automated tests keep Tauri core access centralized in `src/services/coreApi.ts`.
 - Windows rejects tested duplicate Vision Desktop launches per application identity. Duplicate-launch arguments and working directories are discarded, while the existing main window is restored and focused on a best-effort basis. Source review identified a narrow mutex/receiver startup interval in the official plugin, so the independent runtime lock below closes the custody exclusion boundary.

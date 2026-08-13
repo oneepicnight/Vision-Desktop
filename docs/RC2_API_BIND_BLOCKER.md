@@ -20,6 +20,18 @@ The Desktop supervisor currently refuses to launch the frozen RC2 Core binary in
 
 No Vision Core source was modified. No consensus behavior was changed. No protocol version was changed.
 
+## Current Status — 2026-08-13
+
+Vision-Core commit `223e2f745ebb5f7eb0d48c88397684b9037767bc` contains the separately
+reviewed wallet API and loopback-binding source work. That source progress does not remove this
+Desktop blocker by itself. The previously built Windows artifact is not accepted for Desktop
+integration because its downstream deterministic lifecycle and no-retry qualification was
+inconclusive.
+
+The Desktop manifest and bundled binary remain frozen RC2. Real launch remains blocked until a new
+exact artifact passes `CORE_ARTIFACT_INTAKE_CHECKLIST.md`, receives independent downstream
+acceptance, and is integrated through a separately reviewed Desktop change.
+
 ## Required Core Runtime Follow-Up
 
 A future Core runtime-only change, with consensus behavior unchanged, should add an explicit HTTP bind setting such as:

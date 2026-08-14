@@ -1,4 +1,4 @@
-name: Vision Desktop quality gate
+name: Vision Desktop hosted quality gate
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   quality:
-    name: Windows application quality gate
+    name: Windows hosted application quality gate
     runs-on: windows-latest
     timeout-minutes: 45
 
@@ -74,8 +74,12 @@ jobs:
       - name: Run strict Rust linting
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
-      - name: Run serialized Rust suite
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+      - name: Compile every Rust test target
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets --no-run
+
+      - name: Run hosted-safe Rust suite
+        shell: pwsh
+        run: ./scripts/run-hosted-windows-rust-tests.ps1
 
       - name: Check repository whitespace
         shell: pwsh

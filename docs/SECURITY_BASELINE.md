@@ -18,9 +18,12 @@ Security rules implemented from the first milestone:
 - No automatic firewall or router changes are performed.
 - Rust dependencies are audited against RustSec on relevant changes, weekly, and on manual request.
 - Frontend production and development dependencies are audited from `package-lock.json` on relevant changes, weekly, and on manual request. Moderate, high, and critical npm advisories fail the job; low-severity findings remain visible.
-- Pull requests and `main` pushes run a Windows application quality gate covering locked frontend
+- Pull requests and `main` pushes run a GitHub-hosted Windows quality gate covering locked frontend
   installation, TypeScript, state tests, the production frontend build, Rust formatting, strict
-  Clippy, the serialized Rust suite, and committed-diff whitespace validation.
+  Clippy, compilation of every Rust test target, an explicit hosted-safe Rust test allowlist, and
+  committed-diff whitespace validation. GitHub's Windows Server runners are outside the supported
+  wallet-custody host matrix and cannot qualify custody behavior; the complete serialized Rust
+  suite remains a separate mandatory gate on a supported Windows 11 Client workstation.
 - The production WebView's script connection policy has no general network source. Its `connect-src` is limited to Tauri IPC, while local Vite and loopback development sources exist only in `devCsp`.
 - Frontend TypeScript cannot call Core directly; automated tests keep Tauri core access centralized in `src/services/coreApi.ts`.
 - Windows rejects tested duplicate Vision Desktop launches per application identity. Duplicate-launch arguments and working directories are discarded, while the existing main window is restored and focused on a best-effort basis. Source review identified a narrow mutex/receiver startup interval in the official plugin, so the independent runtime lock below closes the custody exclusion boundary.

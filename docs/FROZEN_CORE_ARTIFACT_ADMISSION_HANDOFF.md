@@ -50,12 +50,15 @@ process handle, creation identity, supervisor generation, manifest fingerprint, 
 admitted file identities. Stop and restart invalidate older authority.
 
 The supervisor now also retains the acceptance-record guard and a Windows Job Object configured with
-`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Assignment occurs immediately after process creation. Normal
-stop preserves supervisor ownership until job termination and child-exit confirmation both succeed;
-failed termination or wait leaves the owned record installed. Admission cleanup reports failure,
-window teardown requests an explicit stop, and OS handle closure kills the contained process after
-forced Desktop termination. IPv6 listener enumeration rejects `::`, `::1`, competing-owner, and
-dual-stack listeners on the administrative port.
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. `CreateProcessW` receives the job through
+`PROC_THREAD_ATTRIBUTE_JOB_LIST`, making containment part of process creation instead of a later
+assignment. The attribute list also limits inherited handles to the three redirected standard
+streams. No unassigned child or failed-assignment cleanup path exists. Normal stop preserves
+supervisor ownership until job termination and child-exit confirmation both succeed; failed
+termination or wait leaves the owned record installed. Window teardown requests an explicit stop,
+and OS handle closure kills the contained process after forced Desktop termination. IPv6 listener
+enumeration rejects `::`, `::1`, competing-owner, and dual-stack listeners on the administrative
+port.
 
 ## Staging and controlled validation
 
@@ -85,12 +88,12 @@ The controlled test passed and no Vision Core process remained afterward.
 Committed adversarial tests additionally cover directory reparse points, pre-existing write handles,
 before-open path substitution, rename/delete races, post-hash write/replacement denial, wrong size and
 digest revalidation, unavailable and mismatched process images, manifest/acceptance replacement,
-injected job-termination/child-kill/child-wait failure, ordinary job closure, and forced owner-process
-termination.
+injected job-termination/child-wait failure, atomic job membership on process-creation return,
+ordinary contained-owner drop, and forced owner-process termination.
 
 Corrective validation passed on Windows against the exact staged resources:
 
-- full serialized Rust suite: 361 passed, 0 failed, 5 operator-only ignored;
+- full serialized Rust suite: 363 passed, 0 failed, 5 operator-only ignored;
 - live exact-Core launch, private listener, restart-generation, and cleanup test: passed;
 - strict Clippy and Rust formatting: passed;
 - Tauri authority: 7 passed; WebView isolation: 2 passed;

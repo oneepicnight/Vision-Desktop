@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::{
+    ffi::OsString,
     fs::{self, OpenOptions},
     net::TcpListener,
     path::PathBuf,
-    process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
@@ -32,7 +32,7 @@ use crate::{
 };
 #[cfg(windows)]
 use crate::{
-    core_job::CoreProcessJob,
+    core_job::ContainedCoreProcess,
     core_manifest::{admit_bundled_core_resources, VerifiedCoreResources},
     core_resource::CoreFileIdentity,
 };
@@ -43,9 +43,8 @@ pub struct SupervisorState {
 }
 
 pub struct OwnedCoreProcess {
-    child: Child,
     #[cfg(windows)]
-    job: CoreProcessJob,
+    child: ContainedCoreProcess,
     #[cfg(windows)]
     resources: VerifiedCoreResources,
     pid: u32,
@@ -204,68 +203,75 @@ impl SupervisorState {
         let binary = resources.executable_path();
         #[cfg(not(windows))]
         let binary = std::path::Path::new("");
-        let mut command = Command::new(binary);
-        command
-            .env("VISION_DATA_DIR", &cfg.data_dir)
-            .env(
-                &resources.manifest().api.http_port_environment,
-                cfg.api_port.to_string(),
-            )
-            .env("VISION_P2P_PORT", cfg.p2p_port.to_string())
-            .env("VISION_MINING", cfg.mining_enabled.to_string())
-            .env("VISION_MINING_THREADS", "1")
-            .env("VISION_MINER_ADDRESS", &cfg.miner_reward_address)
-            .env("VISION_SEED_PEERS", seed_peers)
-            .env(
-                "VISION_ALLOW_PRIVATE_PEERS",
-                (!matches!(cfg.mode, crate::config::NodeMode::InternetNetwork)).to_string(),
-            )
-            .env("VISION_ALPHA_AIRDROP_ENABLED", "false")
-            .env("RUST_LOG", "info")
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
+        let mut environment = vec![
+            (
+                OsString::from("VISION_DATA_DIR"),
+                cfg.data_dir.as_os_str().to_owned(),
+            ),
+            (
+                OsString::from(&resources.manifest().api.http_port_environment),
+                OsString::from(cfg.api_port.to_string()),
+            ),
+            (
+                OsString::from("VISION_P2P_PORT"),
+                OsString::from(cfg.p2p_port.to_string()),
+            ),
+            (
+                OsString::from("VISION_MINING"),
+                OsString::from(cfg.mining_enabled.to_string()),
+            ),
+            (OsString::from("VISION_MINING_THREADS"), OsString::from("1")),
+            (
+                OsString::from("VISION_MINER_ADDRESS"),
+                OsString::from(&cfg.miner_reward_address),
+            ),
+            (
+                OsString::from("VISION_SEED_PEERS"),
+                OsString::from(seed_peers),
+            ),
+            (
+                OsString::from("VISION_ALLOW_PRIVATE_PEERS"),
+                OsString::from(
+                    (!matches!(cfg.mode, crate::config::NodeMode::InternetNetwork)).to_string(),
+                ),
+            ),
+            (
+                OsString::from("VISION_ALPHA_AIRDROP_ENABLED"),
+                OsString::from("false"),
+            ),
+            (OsString::from("RUST_LOG"), OsString::from("info")),
+        ];
         if let Some(advertised_host) = &cfg.advertised_host {
-            command
-                .env("VISION_P2P_ADVERTISED_HOST", advertised_host)
-                .env(
-                    "VISION_P2P_ADVERTISED_PORT",
-                    cfg.advertised_port.unwrap_or(cfg.p2p_port).to_string(),
-                );
+            environment.push((
+                OsString::from("VISION_P2P_ADVERTISED_HOST"),
+                OsString::from(advertised_host),
+            ));
+            environment.push((
+                OsString::from("VISION_P2P_ADVERTISED_PORT"),
+                OsString::from(cfg.advertised_port.unwrap_or(cfg.p2p_port).to_string()),
+            ));
         }
-        #[cfg(windows)]
-        let job = CoreProcessJob::new_kill_on_close()
-            .map_err(|_| "Core process containment is unavailable".to_string())?;
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("failed to start Vision Core: {e}"))?;
+        let child = ContainedCoreProcess::spawn(binary, &[], &environment, stdout, stderr)
+            .map_err(|_| "Core process containment or launch failed".to_string())?;
 
         let pid = child.id();
         #[cfg(windows)]
-        if job.assign_process(child.as_raw_handle()).is_err() {
-            return match terminate_unassigned_child(&mut child) {
-                Ok(()) => Err("Vision Core process containment failed".to_string()),
-                Err(()) => Err("Vision Core containment cleanup failed".to_string()),
-            };
-        }
-        #[cfg(windows)]
         let admission = resources
             .verify_running_process_image(child.as_raw_handle())
-            .and_then(|_| wait_for_private_api_listener(&mut child, pid, cfg.api_port))
+            .and_then(|_| wait_for_private_api_listener(&child, pid, cfg.api_port))
             .and_then(|_| resources.revalidate());
         #[cfg(test)]
         if let Err(error) = &admission {
             eprintln!("Core admission test failure: {error}");
         }
         if admission.is_err() {
-            return match terminate_assigned_child(&job, &mut child) {
+            return match terminate_contained_child(&child) {
                 Ok(()) => Err("Vision Core failed private artifact admission".to_string()),
                 Err(()) => Err("Vision Core admission cleanup failed".to_string()),
             };
         }
         let owned = OwnedCoreProcess {
             child,
-            #[cfg(windows)]
-            job,
             #[cfg(windows)]
             resources,
             pid,
@@ -310,7 +316,7 @@ impl SupervisorState {
             .map_err(|_| "supervisor lock poisoned".to_string())?;
         if let Some(owned) = guard.as_mut() {
             match owned.child.try_wait().map_err(|e| e.to_string())? {
-                Some(status) => Ok(owned.state("crashed".to_string(), status.code())),
+                Some(exit_code) => Ok(owned.state("crashed".to_string(), Some(exit_code))),
                 None => Ok(owned.state("running".to_string(), None)),
             }
         } else {
@@ -543,30 +549,20 @@ fn process_is_alive(handle: &OwnedHandle) -> Result<bool, CoreAuthorityError> {
 #[cfg(all(windows, test))]
 thread_local! {
     static FAIL_NEXT_JOB_TERMINATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static FAIL_NEXT_CHILD_KILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_NEXT_CHILD_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(windows)]
-fn terminate_job_checked(job: &CoreProcessJob) -> Result<(), ()> {
+fn terminate_process_job_checked(child: &ContainedCoreProcess) -> Result<(), ()> {
     #[cfg(test)]
     if FAIL_NEXT_JOB_TERMINATION.with(|flag| flag.replace(false)) {
         return Err(());
     }
-    job.terminate().map_err(|_| ())
+    child.terminate().map_err(|_| ())
 }
 
 #[cfg(windows)]
-fn kill_child_checked(child: &mut Child) -> Result<(), ()> {
-    #[cfg(test)]
-    if FAIL_NEXT_CHILD_KILL.with(|flag| flag.replace(false)) {
-        return Err(());
-    }
-    child.kill().map_err(|_| ())
-}
-
-#[cfg(windows)]
-fn wait_child_checked(child: &mut Child) -> Result<(), ()> {
+fn wait_child_checked(child: &ContainedCoreProcess) -> Result<(), ()> {
     #[cfg(test)]
     if FAIL_NEXT_CHILD_WAIT.with(|flag| flag.replace(false)) {
         return Err(());
@@ -575,20 +571,14 @@ fn wait_child_checked(child: &mut Child) -> Result<(), ()> {
 }
 
 #[cfg(windows)]
-fn terminate_unassigned_child(child: &mut Child) -> Result<(), ()> {
-    kill_child_checked(child)?;
-    wait_child_checked(child)
-}
-
-#[cfg(windows)]
-fn terminate_assigned_child(job: &CoreProcessJob, child: &mut Child) -> Result<(), ()> {
-    terminate_job_checked(job)?;
+fn terminate_contained_child(child: &ContainedCoreProcess) -> Result<(), ()> {
+    terminate_process_job_checked(child)?;
     wait_child_checked(child)
 }
 
 #[cfg(windows)]
 fn wait_for_private_api_listener(
-    child: &mut Child,
+    child: &ContainedCoreProcess,
     expected_pid: u32,
     expected_port: u16,
 ) -> Result<(), String> {
@@ -787,9 +777,9 @@ impl OwnedCoreProcess {
         {
             return Ok(());
         }
-        terminate_job_checked(&self.job)
+        terminate_process_job_checked(&self.child)
             .map_err(|_| "Owned Vision Core termination failed".to_string())?;
-        wait_child_checked(&mut self.child)
+        wait_child_checked(&self.child)
             .map_err(|_| "Owned Vision Core exit confirmation failed".to_string())
     }
 
@@ -809,15 +799,6 @@ impl OwnedCoreProcess {
     }
 }
 
-#[cfg(windows)]
-impl Drop for OwnedCoreProcess {
-    fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() && self.job.terminate().is_ok() {
-            let _ = self.child.wait();
-        }
-    }
-}
-
 pub fn tail_file(path: &PathBuf, max_bytes: usize) -> Result<String, String> {
     let bytes = fs::read(path).unwrap_or_default();
     let start = bytes.len().saturating_sub(max_bytes);
@@ -827,6 +808,31 @@ pub fn tail_file(path: &PathBuf, max_bytes: usize) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn contained_test_process() -> ContainedCoreProcess {
+        let executable = PathBuf::from(std::env::var_os("WINDIR").unwrap())
+            .join("System32")
+            .join("ping.exe");
+        let stdout = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+            .unwrap();
+        let stderr = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+            .unwrap();
+        ContainedCoreProcess::spawn(
+            &executable,
+            &[OsString::from("-t"), OsString::from("127.0.0.1")],
+            &[],
+            stdout,
+            stderr,
+        )
+        .unwrap()
+    }
 
     #[cfg(windows)]
     fn isolated_config(root: &std::path::Path) -> NodeConfig {
@@ -946,51 +952,16 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn admission_cleanup_reports_injected_termination_and_wait_failures() {
-        use std::process::Stdio;
-
-        let mut assigned = Command::new("cmd.exe")
-            .args(["/d", "/s", "/c", "ping -t 127.0.0.1 > nul"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let job = CoreProcessJob::new_kill_on_close().unwrap();
-        job.assign_process(assigned.as_raw_handle()).unwrap();
+        let assigned = contained_test_process();
         FAIL_NEXT_JOB_TERMINATION.with(|flag| flag.set(true));
-        assert_eq!(terminate_assigned_child(&job, &mut assigned), Err(()));
+        assert_eq!(terminate_contained_child(&assigned), Err(()));
         assert!(assigned.try_wait().unwrap().is_none());
-        terminate_assigned_child(&job, &mut assigned).unwrap();
+        terminate_contained_child(&assigned).unwrap();
 
-        let mut wait_failure = Command::new("cmd.exe")
-            .args(["/d", "/s", "/c", "ping -t 127.0.0.1 > nul"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let wait_job = CoreProcessJob::new_kill_on_close().unwrap();
-        wait_job
-            .assign_process(wait_failure.as_raw_handle())
-            .unwrap();
+        let wait_failure = contained_test_process();
         FAIL_NEXT_CHILD_WAIT.with(|flag| flag.set(true));
-        assert_eq!(
-            terminate_assigned_child(&wait_job, &mut wait_failure),
-            Err(())
-        );
-        wait_child_checked(&mut wait_failure).unwrap();
-
-        let mut unassigned = Command::new("cmd.exe")
-            .args(["/d", "/s", "/c", "ping -t 127.0.0.1 > nul"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        FAIL_NEXT_CHILD_KILL.with(|flag| flag.set(true));
-        assert_eq!(terminate_unassigned_child(&mut unassigned), Err(()));
-        assert!(unassigned.try_wait().unwrap().is_none());
-        terminate_unassigned_child(&mut unassigned).unwrap();
+        assert_eq!(terminate_contained_child(&wait_failure), Err(()));
+        wait_child_checked(&wait_failure).unwrap();
     }
 
     #[cfg(windows)]

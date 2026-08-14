@@ -8,10 +8,11 @@ Security rules implemented from the first milestone:
   owned by the supervised PID and generation. Every IPv6 listener on the same administrative port
   is rejected. A separately hash-pinned downstream acceptance record is required without changing
   the original Core evidence package. Any mismatch fails closed.
-- Each Core child is immediately assigned to a retained Windows Job Object configured with
-  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Stop preserves the owned process record until job termination
-  and child-exit confirmation succeed. Window teardown requests an explicit stop, while abnormal
-  Desktop termination closes the job handle and terminates the contained process.
+- Each Core child is atomically created inside a retained Windows Job Object through
+  `PROC_THREAD_ATTRIBUTE_JOB_LIST`, with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` already configured.
+  No runnable or unowned pre-assignment process exists. Stop preserves the owned process record until
+  job termination and child-exit confirmation succeed. Window teardown requests an explicit stop,
+  while abnormal Desktop termination closes the job handle and terminates the contained process.
 - Desktop frontend cannot execute arbitrary shell commands.
 - Tauri command list is explicit and narrow.
 - Backend commands validate inputs.

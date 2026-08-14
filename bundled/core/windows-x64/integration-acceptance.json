@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "record_type": "vision-desktop-core-integration-acceptance-v1",
+  "decision_date": "2026-08-14",
+  "vision_desktop_integration_authorized": true,
+  "authorized_scope": "isolated_artifact_admission_and_controlled_compatibility_validation",
+  "authorization_basis": "explicit_vision_desktop_owner_authorization",
+  "authorizing_principal": "Vision Desktop owner",
+  "authorization_reference": "explicit integration authorization following frozen artifact acceptance",
+  "source_commit": "890c98a02c7147e166805fe52002d22d1fcd81f9",
+  "source_tree": "2ae583bbfc887490b8af1398aead7b916796700c",
+  "candidate_sha256": "8082d57c0f4a5cb82af9696fe4d53aeb65fcb280c062afe81abdcfe78e12ed28",
+  "candidate_size_bytes": 4486144,
+  "evidence_manifest_sha256": "35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a",
+  "runtime_manifest_sha256": "cf713d116acca7a848d0537968f81373ee14a965fb3855a6480a59f4971536ec",
+  "accepted_evidence_limitations": [
+    "authenticated_ci_archive_covers_223e2f745ebb5f7eb0d48c88397684b9037767bc_not_the_exact_candidate",
+    "exact_candidate_runtime_and_deterministic_compatibility_qualification_remain_required"
+  ],
+  "conditions": [
+    "original_evidence_package_remains_unmodified",
+    "candidate_bytes_must_not_change",
+    "wallet_authority_remains_disabled",
+    "independent_desktop_implementation_acceptance_required_before_activation"
+  ]
+}

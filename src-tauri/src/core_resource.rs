@@ -297,7 +297,7 @@ fn invalid_core_path() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::{io::Write, process::Command, thread};
 
     #[test]
     fn guarded_file_rejects_hard_links_and_blocks_replacement() {
@@ -322,5 +322,82 @@ mod tests {
     fn guarded_file_rejects_relative_and_unc_paths() {
         assert!(GuardedCoreFile::open(Path::new("relative.exe")).is_err());
         assert!(GuardedCoreFile::open(Path::new(r"\\server\share\vision-core.exe")).is_err());
+    }
+
+    #[test]
+    fn guarded_file_rejects_reparse_ancestors_and_preexisting_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        let junction = directory.path().join("junction");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("manifest.json"), b"manifest").unwrap();
+        let status = Command::new("cmd.exe")
+            .args([
+                "/d",
+                "/s",
+                "/c",
+                "mklink",
+                "/J",
+                junction.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(GuardedCoreFile::open(&junction.join("manifest.json")).is_err());
+
+        let regular = directory.path().join("vision-core.exe");
+        std::fs::write(&regular, b"candidate").unwrap();
+        let writer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&regular)
+            .unwrap();
+        assert!(GuardedCoreFile::open(&regular).is_err());
+        drop(writer);
+        GuardedCoreFile::open(&regular).unwrap();
+    }
+
+    #[test]
+    fn path_swaps_and_post_hash_replacement_never_preserve_an_approved_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let resource = directory.path().join("manifest.json");
+        let displaced = directory.path().join("manifest.original.json");
+        std::fs::write(&resource, b"approved").unwrap();
+        let approved_digest = hex::encode(Sha256::digest(b"approved"));
+
+        std::fs::rename(&resource, &displaced).unwrap();
+        std::fs::write(&resource, b"replaced").unwrap();
+        let mut swapped = GuardedCoreFile::open(&resource).unwrap();
+        assert!(swapped.revalidate(8, &approved_digest).is_err());
+        drop(swapped);
+
+        std::fs::remove_file(&resource).unwrap();
+        std::fs::rename(&displaced, &resource).unwrap();
+        let mut guarded = GuardedCoreFile::open(&resource).unwrap();
+        assert_eq!(guarded.sha256_lower().unwrap(), approved_digest);
+
+        let rename_from = resource.clone();
+        let rename_to = directory.path().join("raced.json");
+        let rename = thread::spawn(move || std::fs::rename(rename_from, rename_to));
+        let delete_path = resource.clone();
+        let delete = thread::spawn(move || std::fs::remove_file(delete_path));
+        assert!(rename.join().unwrap().is_err());
+        assert!(delete.join().unwrap().is_err());
+        assert!(OpenOptions::new().write(true).open(&resource).is_err());
+        guarded.revalidate(8, &approved_digest).unwrap();
+    }
+
+    #[test]
+    fn revalidation_fails_for_changed_size_digest_and_unavailable_process_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let resource = directory.path().join("manifest.json");
+        std::fs::write(&resource, b"approved").unwrap();
+        let mut guarded = GuardedCoreFile::open(&resource).unwrap();
+        let digest = guarded.sha256_lower().unwrap();
+        assert!(guarded.revalidate(7, &digest).is_err());
+        assert!(guarded.revalidate(8, &"0".repeat(64)).is_err());
+        assert!(running_process_image_identity(std::ptr::null_mut()).is_err());
     }
 }

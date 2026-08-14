@@ -5,7 +5,13 @@ Security rules implemented from the first milestone:
 - Core API must bind to literal IPv4 loopback only. The supervisor admits only the exact frozen
   Vision Core v1.0.4 artifact and manifest, retains non-reparse handles without write/rename/delete
   sharing, compares the running image's file identity, and requires one exact loopback listener
-  owned by the supervised PID and generation. Any mismatch fails closed.
+  owned by the supervised PID and generation. Every IPv6 listener on the same administrative port
+  is rejected. A separately hash-pinned downstream acceptance record is required without changing
+  the original Core evidence package. Any mismatch fails closed.
+- Each Core child is immediately assigned to a retained Windows Job Object configured with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Stop preserves the owned process record until job termination
+  and child-exit confirmation succeed. Window teardown requests an explicit stop, while abnormal
+  Desktop termination closes the job handle and terminates the contained process.
 - Desktop frontend cannot execute arbitrary shell commands.
 - Tauri command list is explicit and narrow.
 - Backend commands validate inputs.

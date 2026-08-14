@@ -36,7 +36,8 @@ The implementation is a private foundation, not an active wallet release:
 - React has no custody, password, recovery, signing, or submission invoke path;
 - lifecycle, signing, and submission independent-review constants remain `false`;
 - production `duplicate_key_rejection_proven` remains `false`;
-- the current bundled Core manifest cannot create production wallet authority;
+- the admitted Core can create only the private generation-bound Core connection authority; it does
+  not create wallet lifecycle, signing, submission, command, or frontend authority;
 - wallet activation, publication, sending, and recovery export remain prohibited.
 
 ## Core dependency state
@@ -48,24 +49,32 @@ not be reused.
 A later independently accepted Windows artifact is frozen with candidate SHA-256
 `8082d57c0f4a5cb82af9696fe4d53aeb65fcb280c062afe81abdcfe78e12ed28` and accepted Core
 evidence/release manifest SHA-256
-`35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a`. No Desktop integration,
-runtime-manifest change, artifact copy, launch-policy change, or activation has occurred. The
-accepted files are not present in the current Desktop checkout and must be verified from their
-immutable evidence package before implementation.
+`35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a`. The original evidence
+correctly retains `vision_desktop_integration_authorized: false`; it was not edited or relabeled.
+A separate explicit owner-authorization record with SHA-256
+`2576e87f46dd7cd878a5aa39daebc11e027d23bbeeeca54e5db6110cec9e3449` binds the exact candidate,
+source commit/tree, evidence manifest, runtime manifest, allowed admission/validation scope, and
+continued wallet-disable conditions.
+
+The isolated Desktop artifact-admission implementation now exists on
+`feat/frozen-core-artifact-admission`. It stages the ignored executable only after both immutable
+records and the complete evidence inventory validate; pins the runtime manifest; retains guarded
+resource handles; verifies running-image identity; rejects IPv4/IPv6 exposure; contains the child in
+a kill-on-close Windows Job Object; and invalidates Core authority across stop/restart. This
+implementation remains pending independent corrective acceptance and is not wallet activation.
 
 ## Next hard gate
 
-The next step is independent review of `FROZEN_CORE_ARTIFACT_INTEGRATION_DESIGN.md`. After design
-approval, Desktop must execute `CORE_ARTIFACT_INTAKE_CHECKLIST.md` without rebuilding, signing,
-substituting, or otherwise changing the artifact.
+The next step is independent re-review of the exact corrective artifact-admission commit and its
+validation evidence. Desktop must continue to execute `CORE_ARTIFACT_INTAKE_CHECKLIST.md` without
+rebuilding, signing, substituting, or otherwise changing the artifact.
 
-Only after artifact intake and independent acceptance may a separate Desktop integration change:
+Only after artifact admission receives independent acceptance may a separate atomic exposure change:
 
-1. update the compatibility manifest and verified binary identity;
-2. prove production loopback and peer/process-generation binding;
-3. rerun the full Windows application and wallet security suites;
-4. prepare the complete unpublished atomic twelve-command candidate;
-5. qualify that exact frozen candidate before any publication decision.
+1. prepare the complete unpublished atomic twelve-command candidate without partial exposure;
+2. independently review its commands, permissions, capabilities, frontend, and activation policy;
+3. qualify the exact unchanged packaged artifact on the supported Windows matrix;
+4. accept the resulting evidence before any publication decision.
 
 No step automatically enables the wallet. Every authority change remains a separately reviewed,
 all-or-nothing release gate.

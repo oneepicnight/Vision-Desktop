@@ -32,7 +32,8 @@
     "icon": ["icons/icon.ico"],
     "resources": {
       "../bundled/core/windows-x64/vision-core.exe": "bundled/core/windows-x64/vision-core.exe",
-      "../bundled/core/windows-x64/manifest.json": "bundled/core/windows-x64/manifest.json"
+      "../bundled/core/windows-x64/manifest.json": "bundled/core/windows-x64/manifest.json",
+      "../bundled/core/windows-x64/integration-acceptance.json": "bundled/core/windows-x64/integration-acceptance.json"
     },
     "windows": {
       "nsis": {

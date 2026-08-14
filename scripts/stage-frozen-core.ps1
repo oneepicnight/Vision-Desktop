@@ -8,6 +8,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $expectedManifestHash = '35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a'
+$expectedAcceptanceHash = '2576e87f46dd7cd878a5aa39daebc11e027d23bbeeeca54e5db6110cec9e3449'
+$expectedRuntimeManifestHash = 'cf713d116acca7a848d0537968f81373ee14a965fb3855a6480a59f4971536ec'
 $expectedCandidateHash = '8082d57c0f4a5cb82af9696fe4d53aeb65fcb280c062afe81abdcfe78e12ed28'
 $expectedCandidateSize = 4486144
 $expectedSourceCommit = '890c98a02c7147e166805fe52002d22d1fcd81f9'
@@ -37,12 +39,39 @@ function Resolve-ContainedPath([string]$Root, [string]$RelativePath) {
 
 $evidence = Resolve-FixedLocalDirectory $EvidenceRoot
 $repository = Resolve-FixedLocalDirectory $RepositoryRoot
+$acceptancePath = Join-Path $repository 'bundled\core\windows-x64\integration-acceptance.json'
 $manifestPath = Join-Path $evidence 'FINAL_ARTIFACT_MANIFEST.json'
 $sidecarPath = Join-Path $evidence 'FINAL_ARTIFACT_MANIFEST.sha256'
 
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
     -not (Test-Path -LiteralPath $sidecarPath -PathType Leaf)) {
     throw 'The accepted evidence manifest or detached checksum is missing.'
+}
+if (-not (Test-Path -LiteralPath $acceptancePath -PathType Leaf)) {
+    throw 'The separate Vision Desktop integration acceptance record is missing.'
+}
+
+$actualAcceptanceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $acceptancePath).Hash.ToLowerInvariant()
+if ($actualAcceptanceHash -ne $expectedAcceptanceHash) {
+    throw 'The Vision Desktop integration acceptance record is not the independently pinned record.'
+}
+$acceptance = Get-Content -Raw -LiteralPath $acceptancePath | ConvertFrom-Json
+if ($acceptance.schema_version -ne 1 -or
+    $acceptance.record_type -ne 'vision-desktop-core-integration-acceptance-v1' -or
+    $acceptance.vision_desktop_integration_authorized -ne $true -or
+    $acceptance.authorized_scope -ne 'isolated_artifact_admission_and_controlled_compatibility_validation' -or
+    $acceptance.authorizing_principal -ne 'Vision Desktop owner' -or
+    $acceptance.authorization_reference -ne 'explicit integration authorization following frozen artifact acceptance' -or
+    $acceptance.source_commit -ne $expectedSourceCommit -or
+    $acceptance.source_tree -ne $expectedSourceTree -or
+    $acceptance.candidate_sha256 -ne $expectedCandidateHash -or
+    [int64]$acceptance.candidate_size_bytes -ne $expectedCandidateSize -or
+    $acceptance.evidence_manifest_sha256 -ne $expectedManifestHash -or
+    $acceptance.runtime_manifest_sha256 -ne $expectedRuntimeManifestHash -or
+    $acceptance.accepted_evidence_limitations.Count -ne 2 -or
+    $acceptance.accepted_evidence_limitations[0] -ne 'authenticated_ci_archive_covers_223e2f745ebb5f7eb0d48c88397684b9037767bc_not_the_exact_candidate' -or
+    $acceptance.accepted_evidence_limitations[1] -ne 'exact_candidate_runtime_and_deterministic_compatibility_qualification_remain_required') {
+    throw 'The Vision Desktop integration acceptance record does not authorize this exact frozen identity.'
 }
 
 $actualManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant()
@@ -63,6 +92,10 @@ if ($manifest.schema -ne 'vision-core-wallet-compatibility-final-artifact-manife
     [int64]$manifest.candidate.size_bytes -ne $expectedCandidateSize -or
     $manifest.candidate.pe_architecture -ne 'x86_64') {
     throw 'The evidence manifest does not describe the frozen candidate.'
+}
+if ($manifest.downstream_authority.vision_desktop_integration_authorized -ne $false -or
+    $manifest.downstream_authority.statement -ne 'Vision Desktop integration requires separate explicit authorization.') {
+    throw 'The immutable evidence package no longer retains its original downstream-authority boundary.'
 }
 
 $verifiedBytes = [int64]0

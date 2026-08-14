@@ -1,6 +1,8 @@
 pub mod api;
 pub mod commands;
 pub mod config;
+#[cfg(windows)]
+mod core_job;
 pub mod core_manifest;
 #[cfg(windows)]
 mod core_resource;
@@ -124,6 +126,9 @@ pub fn run() {
             {
                 if let Some(runtime) = window.try_state::<Arc<wallet::WalletRuntimeState>>() {
                     let _ = runtime.invalidate_all();
+                }
+                if let Some(supervisor) = window.try_state::<SupervisorState>() {
+                    let _ = supervisor.stop();
                 }
             }
         })

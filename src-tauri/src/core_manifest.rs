@@ -23,10 +23,15 @@ pub const EXPECTED_RUNTIME_MANIFEST_SHA256: &str =
     "cf713d116acca7a848d0537968f81373ee14a965fb3855a6480a59f4971536ec";
 pub const ACCEPTED_EVIDENCE_MANIFEST_SHA256: &str =
     "35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a";
+pub const EXPECTED_INTEGRATION_ACCEPTANCE_SHA256: &str =
+    "2576e87f46dd7cd878a5aa39daebc11e027d23bbeeeca54e5db6110cec9e3449";
 pub const CORE_MANIFEST_RELATIVE: &str = "bundled/core/windows-x64/manifest.json";
 pub const CORE_BINARY_RELATIVE: &str = "bundled/core/windows-x64/vision-core.exe";
+pub const CORE_INTEGRATION_ACCEPTANCE_RELATIVE: &str =
+    "bundled/core/windows-x64/integration-acceptance.json";
 
 const MAX_RUNTIME_MANIFEST_BYTES: usize = 16 * 1024;
+const MAX_INTEGRATION_ACCEPTANCE_BYTES: usize = 4 * 1024;
 const EXPECTED_SCHEMA_VERSION: u32 = 1;
 const EXPECTED_SOURCE_COMMIT: &str = "890c98a02c7147e166805fe52002d22d1fcd81f9";
 const EXPECTED_SOURCE_TREE: &str = "2ae583bbfc887490b8af1398aead7b916796700c";
@@ -100,6 +105,27 @@ pub struct WalletSubmissionSemanticsManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CoreIntegrationAcceptance {
+    schema_version: u32,
+    record_type: String,
+    decision_date: String,
+    vision_desktop_integration_authorized: bool,
+    authorized_scope: String,
+    authorization_basis: String,
+    authorizing_principal: String,
+    authorization_reference: String,
+    source_commit: String,
+    source_tree: String,
+    candidate_sha256: String,
+    candidate_size_bytes: u64,
+    evidence_manifest_sha256: String,
+    runtime_manifest_sha256: String,
+    accepted_evidence_limitations: Vec<String>,
+    conditions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreVerification {
     pub binary_path: PathBuf,
     pub expected_sha256: String,
@@ -109,8 +135,11 @@ pub struct CoreVerification {
 
 #[cfg(windows)]
 pub(crate) struct VerifiedCoreResources {
+    acceptance_file: GuardedCoreFile,
     manifest_file: GuardedCoreFile,
     executable_file: GuardedCoreFile,
+    acceptance: CoreIntegrationAcceptance,
+    acceptance_size_bytes: u64,
     manifest: CoreManifest,
     manifest_sha256: [u8; 32],
     manifest_size_bytes: u64,
@@ -143,6 +172,27 @@ pub fn bundled_core_binary_path() -> PathBuf {
 
 pub fn bundled_core_manifest_path() -> PathBuf {
     bundled_path(&resource_root(), CORE_MANIFEST_RELATIVE)
+}
+
+pub fn bundled_core_integration_acceptance_path() -> PathBuf {
+    bundled_path(&resource_root(), CORE_INTEGRATION_ACCEPTANCE_RELATIVE)
+}
+
+#[cfg(windows)]
+fn load_guarded_acceptance_from(
+    path: &Path,
+) -> Result<(GuardedCoreFile, CoreIntegrationAcceptance), String> {
+    let mut file = GuardedCoreFile::open(path)
+        .map_err(|_| "Core integration acceptance is unavailable".to_string())?;
+    let bytes = file
+        .read_bounded(MAX_INTEGRATION_ACCEPTANCE_BYTES)
+        .map_err(|_| "Core integration acceptance is unavailable".to_string())?;
+    let acceptance = parse_pinned_integration_acceptance(&bytes)?;
+    let size = u64::try_from(bytes.len())
+        .map_err(|_| "Core integration acceptance is unavailable".to_string())?;
+    file.revalidate(size, EXPECTED_INTEGRATION_ACCEPTANCE_SHA256)
+        .map_err(|_| "Core integration acceptance identity changed".to_string())?;
+    Ok((file, acceptance))
 }
 
 #[cfg(windows)]
@@ -180,6 +230,9 @@ pub fn load_core_manifest() -> Result<CoreManifest, String> {
 
 #[cfg(windows)]
 pub(crate) fn admit_bundled_core_resources() -> Result<VerifiedCoreResources, String> {
+    let (acceptance_file, acceptance) =
+        load_guarded_acceptance_from(&bundled_core_integration_acceptance_path())?;
+    let acceptance_size_bytes = acceptance_file.size_bytes();
     let (manifest_file, manifest, manifest_sha256) =
         load_guarded_manifest_from(&bundled_core_manifest_path())?;
     let manifest_size_bytes = manifest_file.size_bytes();
@@ -189,8 +242,11 @@ pub(crate) fn admit_bundled_core_resources() -> Result<VerifiedCoreResources, St
         .revalidate(manifest.binary_size_bytes, &manifest.binary_sha256)
         .map_err(|_| "Frozen Core executable identity did not match".to_string())?;
     Ok(VerifiedCoreResources {
+        acceptance_file,
         manifest_file,
         executable_file,
+        acceptance,
+        acceptance_size_bytes,
         manifest,
         manifest_sha256,
         manifest_size_bytes,
@@ -219,6 +275,10 @@ impl VerifiedCoreResources {
         self.manifest_file.identity()
     }
 
+    pub(crate) fn acceptance_identity(&self) -> CoreFileIdentity {
+        self.acceptance_file.identity()
+    }
+
     pub(crate) fn verify_running_process_image(&self, raw: RawHandle) -> Result<(), String> {
         let running = running_process_image_identity(raw)
             .map_err(|_| "Running Core image identity is unavailable".to_string())?;
@@ -229,6 +289,19 @@ impl VerifiedCoreResources {
     }
 
     pub(crate) fn revalidate(&mut self) -> Result<(), String> {
+        self.acceptance_file
+            .revalidate(
+                self.acceptance_size_bytes,
+                EXPECTED_INTEGRATION_ACCEPTANCE_SHA256,
+            )
+            .map_err(|_| "Core integration acceptance identity changed".to_string())?;
+        let acceptance_bytes = self
+            .acceptance_file
+            .read_bounded(MAX_INTEGRATION_ACCEPTANCE_BYTES)
+            .map_err(|_| "Core integration acceptance is unavailable".to_string())?;
+        if parse_pinned_integration_acceptance(&acceptance_bytes)? != self.acceptance {
+            return Err("Core integration acceptance identity changed".to_string());
+        }
         self.manifest_file
             .revalidate(self.manifest_size_bytes, EXPECTED_RUNTIME_MANIFEST_SHA256)
             .map_err(|_| "Core runtime manifest identity changed".to_string())?;
@@ -305,6 +378,61 @@ fn parse_pinned_core_manifest(bytes: &[u8]) -> Result<CoreManifest, String> {
         return Err("Core runtime manifest digest is not independently approved".to_string());
     }
     parse_core_manifest_bytes(bytes)
+}
+
+fn parse_pinned_integration_acceptance(bytes: &[u8]) -> Result<CoreIntegrationAcceptance, String> {
+    if hex::encode(Sha256::digest(bytes)) != EXPECTED_INTEGRATION_ACCEPTANCE_SHA256 {
+        return Err("Core integration acceptance is not independently pinned".to_string());
+    }
+    parse_integration_acceptance_bytes(bytes)
+}
+
+fn parse_integration_acceptance_bytes(bytes: &[u8]) -> Result<CoreIntegrationAcceptance, String> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let StrictJson(value) = StrictJson::deserialize(&mut deserializer)
+        .map_err(|_| "Core integration acceptance JSON is invalid".to_string())?;
+    deserializer
+        .end()
+        .map_err(|_| "Core integration acceptance JSON is invalid".to_string())?;
+    let acceptance: CoreIntegrationAcceptance = serde_json::from_value(value)
+        .map_err(|_| "Core integration acceptance schema is invalid".to_string())?;
+    validate_integration_acceptance(&acceptance)?;
+    Ok(acceptance)
+}
+
+fn validate_integration_acceptance(acceptance: &CoreIntegrationAcceptance) -> Result<(), String> {
+    let expected_conditions = [
+        "original_evidence_package_remains_unmodified",
+        "candidate_bytes_must_not_change",
+        "wallet_authority_remains_disabled",
+        "independent_desktop_implementation_acceptance_required_before_activation",
+    ];
+    let expected_limitations = [
+        "authenticated_ci_archive_covers_223e2f745ebb5f7eb0d48c88397684b9037767bc_not_the_exact_candidate",
+        "exact_candidate_runtime_and_deterministic_compatibility_qualification_remain_required",
+    ];
+    if acceptance.schema_version != 1
+        || acceptance.record_type != "vision-desktop-core-integration-acceptance-v1"
+        || acceptance.decision_date != "2026-08-14"
+        || !acceptance.vision_desktop_integration_authorized
+        || acceptance.authorized_scope
+            != "isolated_artifact_admission_and_controlled_compatibility_validation"
+        || acceptance.authorization_basis != "explicit_vision_desktop_owner_authorization"
+        || acceptance.authorizing_principal != "Vision Desktop owner"
+        || acceptance.authorization_reference
+            != "explicit integration authorization following frozen artifact acceptance"
+        || acceptance.source_commit != EXPECTED_SOURCE_COMMIT
+        || acceptance.source_tree != EXPECTED_SOURCE_TREE
+        || acceptance.candidate_sha256 != EXPECTED_CORE_SHA256
+        || acceptance.candidate_size_bytes != EXPECTED_CORE_SIZE_BYTES
+        || acceptance.evidence_manifest_sha256 != ACCEPTED_EVIDENCE_MANIFEST_SHA256
+        || acceptance.runtime_manifest_sha256 != EXPECTED_RUNTIME_MANIFEST_SHA256
+        || acceptance.accepted_evidence_limitations != expected_limitations
+        || acceptance.conditions != expected_conditions
+    {
+        return Err("Core integration acceptance does not authorize this identity".to_string());
+    }
+    Ok(())
 }
 
 fn parse_core_manifest_bytes(bytes: &[u8]) -> Result<CoreManifest, String> {
@@ -481,6 +609,46 @@ mod tests {
         std::fs::read(bundled_core_manifest_path()).unwrap()
     }
 
+    fn acceptance_bytes() -> Vec<u8> {
+        std::fs::read(bundled_core_integration_acceptance_path()).unwrap()
+    }
+
+    #[test]
+    fn separately_pinned_acceptance_authorizes_only_the_exact_frozen_identity() {
+        let bytes = acceptance_bytes();
+        let acceptance = parse_pinned_integration_acceptance(&bytes).unwrap();
+        assert!(acceptance.vision_desktop_integration_authorized);
+        assert_eq!(acceptance.source_commit, EXPECTED_SOURCE_COMMIT);
+        assert_eq!(acceptance.source_tree, EXPECTED_SOURCE_TREE);
+        assert_eq!(acceptance.candidate_sha256, EXPECTED_CORE_SHA256);
+        assert_eq!(
+            hex::encode(Sha256::digest(bytes)),
+            EXPECTED_INTEGRATION_ACCEPTANCE_SHA256
+        );
+    }
+
+    #[test]
+    fn acceptance_rejects_duplicates_unknown_fields_and_valid_but_unapproved_bytes() {
+        let text = String::from_utf8(acceptance_bytes()).unwrap();
+        let duplicate = text.replacen(
+            "{\n",
+            "{\n  \"vision_desktop_integration_authorized\": true,\n",
+            1,
+        );
+        assert!(parse_integration_acceptance_bytes(duplicate.as_bytes()).is_err());
+
+        let mut unknown: Value = serde_json::from_str(&text).unwrap();
+        unknown["reviewer"] = Value::String("unapproved".to_string());
+        assert!(
+            parse_integration_acceptance_bytes(&serde_json::to_vec(&unknown).unwrap()).is_err()
+        );
+
+        let acceptance = parse_integration_acceptance_bytes(text.as_bytes()).unwrap();
+        let compact = serde_json::to_vec(&acceptance).unwrap();
+        assert!(parse_integration_acceptance_bytes(&compact).is_ok());
+        assert!(parse_pinned_integration_acceptance(&compact).is_err());
+    }
+
     #[test]
     fn admitted_manifest_parses_with_exact_identity() {
         let bytes = manifest_bytes();
@@ -567,11 +735,41 @@ mod tests {
             bundled_path(root, CORE_MANIFEST_RELATIVE),
             root.join("bundled/core/windows-x64/manifest.json")
         );
+        assert_eq!(
+            bundled_path(root, CORE_INTEGRATION_ACCEPTANCE_RELATIVE),
+            root.join("bundled/core/windows-x64/integration-acceptance.json")
+        );
     }
 
     #[test]
     fn admitted_manifest_contains_the_exact_private_core_contract() {
         let manifest = load_core_manifest().unwrap();
         validate_wallet_contract(&manifest).unwrap();
+    }
+
+    #[test]
+    fn admitted_resources_block_manifest_replacement_and_reject_wrong_process_images() {
+        use std::fs::OpenOptions;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let mut resources = admit_bundled_core_resources().unwrap();
+        assert!(std::fs::rename(
+            bundled_core_manifest_path(),
+            bundled_core_manifest_path().with_extension("moved")
+        )
+        .is_err());
+        assert!(std::fs::rename(
+            bundled_core_integration_acceptance_path(),
+            bundled_core_integration_acceptance_path().with_extension("moved")
+        )
+        .is_err());
+        assert!(OpenOptions::new()
+            .write(true)
+            .open(bundled_core_manifest_path())
+            .is_err());
+        resources.revalidate().unwrap();
+        assert!(resources
+            .verify_running_process_image(unsafe { GetCurrentProcess() } as RawHandle)
+            .is_err());
     }
 }

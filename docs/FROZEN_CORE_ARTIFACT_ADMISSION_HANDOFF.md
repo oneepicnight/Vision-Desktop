@@ -17,11 +17,20 @@ Approved design baseline: `90a0d593c53ca321a4cd18b9ae909716f17f9eaf`
 - Executable SHA-256: `8082d57c0f4a5cb82af9696fe4d53aeb65fcb280c062afe81abdcfe78e12ed28`
 - Accepted evidence manifest SHA-256: `35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a`
 - Desktop runtime-manifest SHA-256: `cf713d116acca7a848d0537968f81373ee14a965fb3855a6480a59f4971536ec`
+- Separate Desktop-integration acceptance SHA-256: `2576e87f46dd7cd878a5aa39daebc11e027d23bbeeeca54e5db6110cec9e3449`
 
 The accepted package was copied without rebuilding or changing its contents. The complete inventory,
 every file size, and every file hash were verified before staging. The former local RC2 executable
 was preserved outside the repository under the Desktop evidence directory. The admitted executable
 is ignored and is not part of the Git diff.
+
+The original evidence manifest remains unchanged and continues to state that it does not itself
+authorize Desktop integration. The separately pinned `integration-acceptance.json` records the
+explicit owner authorization for only isolated artifact admission and controlled compatibility
+validation. It explicitly acknowledges that the authenticated CI archive covers the earlier
+`223e2f745ebb5f7eb0d48c88397684b9037767bc` base rather than the exact candidate and therefore keeps
+the exact-candidate runtime and deterministic qualification evidence mandatory. Both staging and
+runtime admission require its exact bytes and bindings.
 
 ## Implemented admission boundary
 
@@ -34,11 +43,19 @@ rejects relative, UNC, device, non-fixed-volume, reparse, non-regular, and multi
 denies write, rename, and delete sharing; records volume/file identity; performs bounded handle reads;
 and revalidates identity before and after use.
 
-The supervisor launches only the guarded executable and retains both guards for the process lifetime.
+The supervisor launches only the guarded executable and retains all three guards for the process lifetime.
 It compares the running process image with the admitted executable identity, requires exactly one
 literal `127.0.0.1` listener owned by the exact child PID, and binds Wallet Core authority to the
-process handle, creation identity, supervisor generation, manifest fingerprint, and both admitted
-file identities. Stop and restart invalidate older authority.
+process handle, creation identity, supervisor generation, manifest fingerprint, and all three
+admitted file identities. Stop and restart invalidate older authority.
+
+The supervisor now also retains the acceptance-record guard and a Windows Job Object configured with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Assignment occurs immediately after process creation. Normal
+stop preserves supervisor ownership until job termination and child-exit confirmation both succeed;
+failed termination or wait leaves the owned record installed. Admission cleanup reports failure,
+window teardown requests an explicit stop, and OS handle closure kills the contained process after
+forced Desktop termination. IPv6 listener enumeration rejects `::`, `::1`, competing-owner, and
+dual-stack listeners on the administrative port.
 
 ## Staging and controlled validation
 
@@ -64,6 +81,23 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml `
 ```
 
 The controlled test passed and no Vision Core process remained afterward.
+
+Committed adversarial tests additionally cover directory reparse points, pre-existing write handles,
+before-open path substitution, rename/delete races, post-hash write/replacement denial, wrong size and
+digest revalidation, unavailable and mismatched process images, manifest/acceptance replacement,
+injected job-termination/child-kill/child-wait failure, ordinary job closure, and forced owner-process
+termination.
+
+Corrective validation passed on Windows against the exact staged resources:
+
+- full serialized Rust suite: 361 passed, 0 failed, 5 operator-only ignored;
+- live exact-Core launch, private listener, restart-generation, and cleanup test: passed;
+- strict Clippy and Rust formatting: passed;
+- Tauri authority: 7 passed; WebView isolation: 2 passed;
+- frontend typecheck, state tests, and production build: passed;
+- release-mode Tauri build: passed, with the executable, runtime manifest, and acceptance record
+  copied at the exact pinned sizes and SHA-256 values;
+- Git whitespace validation and post-test process/listener cleanup: passed.
 
 ## Deliberately unchanged blockers
 

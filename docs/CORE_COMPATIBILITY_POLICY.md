@@ -11,6 +11,7 @@ Vision Desktop must treat Vision Core as an external consensus engine.
 - Binary SHA-256: `8082d57c0f4a5cb82af9696fe4d53aeb65fcb280c062afe81abdcfe78e12ed28`
 - Binary size: `4,486,144` bytes
 - Accepted evidence manifest SHA-256: `35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a`
+- Separate Desktop-integration acceptance SHA-256: `2576e87f46dd7cd878a5aa39daebc11e027d23bbeeeca54e5db6110cec9e3449`
 - Consensus version: `3`
 - P2P protocol version: `4`
 
@@ -19,6 +20,10 @@ The complete Desktop runtime-manifest bytes are independently pinned in Rust wit
 local/release input staged only from the accepted evidence package; it is not stored in Git.
 Rebuilding, modifying, re-signing, repackaging, or rerunning qualification against changed bytes
 invalidates the acceptance.
+
+The Core evidence manifest intentionally does not grant downstream Desktop authority. A separate,
+hash-pinned owner-authorization record grants only isolated artifact admission and controlled
+compatibility validation for the exact identities above. It does not authorize wallet exposure.
 
 Admission follows `CORE_ARTIFACT_INTAKE_CHECKLIST.md` and the approved boundary in
 `FROZEN_CORE_ARTIFACT_INTEGRATION_DESIGN.md`. The isolated implementation still requires independent

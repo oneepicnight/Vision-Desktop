@@ -20,9 +20,9 @@ use windows_sys::Win32::{
         NO_ERROR, STILL_ACTIVE,
     },
     NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
+        GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
     },
-    Networking::WinSock::AF_INET,
+    Networking::WinSock::{AF_INET, AF_INET6},
     System::Threading::{GetCurrentProcess, GetExitCodeProcess, GetProcessId, GetProcessTimes},
 };
 
@@ -32,6 +32,7 @@ use crate::{
 };
 #[cfg(windows)]
 use crate::{
+    core_job::CoreProcessJob,
     core_manifest::{admit_bundled_core_resources, VerifiedCoreResources},
     core_resource::CoreFileIdentity,
 };
@@ -43,6 +44,8 @@ pub struct SupervisorState {
 
 pub struct OwnedCoreProcess {
     child: Child,
+    #[cfg(windows)]
+    job: CoreProcessJob,
     #[cfg(windows)]
     resources: VerifiedCoreResources,
     pid: u32,
@@ -74,6 +77,7 @@ pub(crate) struct CoreConnectionAuthority<'a> {
     compatibility_fingerprint: [u8; 32],
     executable_identity: CoreFileIdentity,
     manifest_identity: CoreFileIdentity,
+    acceptance_identity: CoreFileIdentity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -228,11 +232,21 @@ impl SupervisorState {
                     cfg.advertised_port.unwrap_or(cfg.p2p_port).to_string(),
                 );
         }
+        #[cfg(windows)]
+        let job = CoreProcessJob::new_kill_on_close()
+            .map_err(|_| "Core process containment is unavailable".to_string())?;
         let mut child = command
             .spawn()
             .map_err(|e| format!("failed to start Vision Core: {e}"))?;
 
         let pid = child.id();
+        #[cfg(windows)]
+        if job.assign_process(child.as_raw_handle()).is_err() {
+            return match terminate_unassigned_child(&mut child) {
+                Ok(()) => Err("Vision Core process containment failed".to_string()),
+                Err(()) => Err("Vision Core containment cleanup failed".to_string()),
+            };
+        }
         #[cfg(windows)]
         let admission = resources
             .verify_running_process_image(child.as_raw_handle())
@@ -243,11 +257,15 @@ impl SupervisorState {
             eprintln!("Core admission test failure: {error}");
         }
         if admission.is_err() {
-            terminate_unadmitted_child(&mut child);
-            return Err("Vision Core failed private artifact admission".to_string());
+            return match terminate_assigned_child(&job, &mut child) {
+                Ok(()) => Err("Vision Core failed private artifact admission".to_string()),
+                Err(()) => Err("Vision Core admission cleanup failed".to_string()),
+            };
         }
         let owned = OwnedCoreProcess {
             child,
+            #[cfg(windows)]
+            job,
             #[cfg(windows)]
             resources,
             pid,
@@ -270,25 +288,19 @@ impl SupervisorState {
             .inner
             .lock()
             .map_err(|_| "supervisor lock poisoned".to_string())?;
-        let Some(mut owned) = guard.take() else {
+        let Some(owned) = guard.as_mut() else {
             return Ok(Self::stopped_state());
         };
-        if owned.child.try_wait().map_err(|e| e.to_string())?.is_none() {
-            owned.child.kill().map_err(|e| {
-                format!(
-                    "failed to stop owned Vision Core process {}: {e}",
-                    owned.pid
-                )
-            })?;
-            let _ = owned.child.wait();
-        }
+        owned.terminate_and_wait()?;
         for _ in 0..30 {
             if port_closed(owned.api_port) && port_closed(owned.p2p_port) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        Ok(owned.state("stopped".to_string(), None))
+        let state = owned.state("stopped".to_string(), None);
+        *guard = None;
+        Ok(state)
     }
 
     pub fn current_state(&self) -> Result<CoreProcessState, String> {
@@ -379,6 +391,7 @@ impl SupervisorState {
             compatibility_fingerprint: owned.resources.manifest_sha256(),
             executable_identity: owned.resources.executable_identity(),
             manifest_identity: owned.resources.manifest_identity(),
+            acceptance_identity: owned.resources.acceptance_identity(),
         };
         drop(guard);
         authority.validate()?;
@@ -408,6 +421,7 @@ impl CoreConnectionAuthority<'_> {
         hasher.update(&self.compatibility_fingerprint);
         hasher.update(&self.executable_identity.stable_bytes());
         hasher.update(&self.manifest_identity.stable_bytes());
+        hasher.update(&self.acceptance_identity.stable_bytes());
         *hasher.finalize().as_bytes()
     }
 
@@ -451,6 +465,7 @@ impl CoreConnectionAuthority<'_> {
         if current.resources.manifest_sha256() != self.compatibility_fingerprint
             || current.resources.executable_identity() != self.executable_identity
             || current.resources.manifest_identity() != self.manifest_identity
+            || current.resources.acceptance_identity() != self.acceptance_identity
         {
             return Err(CoreAuthorityError::CoreIdentityChanged);
         }
@@ -525,10 +540,50 @@ fn process_is_alive(handle: &OwnedHandle) -> Result<bool, CoreAuthorityError> {
     Ok(code == STILL_ACTIVE as u32)
 }
 
+#[cfg(all(windows, test))]
+thread_local! {
+    static FAIL_NEXT_JOB_TERMINATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_NEXT_CHILD_KILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_NEXT_CHILD_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[cfg(windows)]
-fn terminate_unadmitted_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+fn terminate_job_checked(job: &CoreProcessJob) -> Result<(), ()> {
+    #[cfg(test)]
+    if FAIL_NEXT_JOB_TERMINATION.with(|flag| flag.replace(false)) {
+        return Err(());
+    }
+    job.terminate().map_err(|_| ())
+}
+
+#[cfg(windows)]
+fn kill_child_checked(child: &mut Child) -> Result<(), ()> {
+    #[cfg(test)]
+    if FAIL_NEXT_CHILD_KILL.with(|flag| flag.replace(false)) {
+        return Err(());
+    }
+    child.kill().map_err(|_| ())
+}
+
+#[cfg(windows)]
+fn wait_child_checked(child: &mut Child) -> Result<(), ()> {
+    #[cfg(test)]
+    if FAIL_NEXT_CHILD_WAIT.with(|flag| flag.replace(false)) {
+        return Err(());
+    }
+    child.wait().map(|_| ()).map_err(|_| ())
+}
+
+#[cfg(windows)]
+fn terminate_unassigned_child(child: &mut Child) -> Result<(), ()> {
+    kill_child_checked(child)?;
+    wait_child_checked(child)
+}
+
+#[cfg(windows)]
+fn terminate_assigned_child(job: &CoreProcessJob, child: &mut Child) -> Result<(), ()> {
+    terminate_job_checked(job)?;
+    wait_child_checked(child)
 }
 
 #[cfg(windows)]
@@ -546,13 +601,17 @@ fn wait_for_private_api_listener(
         {
             return Err("Core exited before private API admission".to_string());
         }
-        let rows = tcp_owner_rows()?;
-        if private_listener_ready(&rows, expected_pid, expected_port)? {
+        let ipv4_rows = tcp4_owner_rows()?;
+        let ipv6_rows = tcp6_owner_rows()?;
+        if private_listener_ready(&ipv4_rows, &ipv6_rows, expected_pid, expected_port)? {
             return Ok(());
         }
-        if !rows
+        if !ipv4_rows
             .iter()
             .any(|row| mib_port(row.dwLocalPort) == expected_port)
+            && !ipv6_rows
+                .iter()
+                .any(|row| row.dwState == 2 && mib_port(row.dwLocalPort) == expected_port)
         {
             std::thread::sleep(Duration::from_millis(50));
             continue;
@@ -564,11 +623,18 @@ fn wait_for_private_api_listener(
 
 #[cfg(windows)]
 fn private_listener_ready(
-    rows: &[MIB_TCPROW_OWNER_PID],
+    ipv4_rows: &[MIB_TCPROW_OWNER_PID],
+    ipv6_rows: &[MIB_TCP6ROW_OWNER_PID],
     expected_pid: u32,
     expected_port: u16,
 ) -> Result<bool, String> {
-    let matching = rows
+    if ipv6_rows
+        .iter()
+        .any(|row| row.dwState == 2 && mib_port(row.dwLocalPort) == expected_port)
+    {
+        return Err("Core API listener identity is not private".to_string());
+    }
+    let matching = ipv4_rows
         .iter()
         .filter(|row| mib_port(row.dwLocalPort) == expected_port)
         .collect::<Vec<_>>();
@@ -596,7 +662,7 @@ fn mib_port(value: u32) -> u16 {
 }
 
 #[cfg(windows)]
-fn tcp_owner_rows() -> Result<Vec<MIB_TCPROW_OWNER_PID>, String> {
+fn tcp4_owner_rows() -> Result<Vec<MIB_TCPROW_OWNER_PID>, String> {
     const MAX_TCP_TABLE_BYTES: usize = 4 * 1024 * 1024;
     let mut size = 0_u32;
     let first = unsafe {
@@ -653,7 +719,80 @@ fn tcp_owner_rows() -> Result<Vec<MIB_TCPROW_OWNER_PID>, String> {
     Err("Windows TCP ownership table is unavailable".to_string())
 }
 
+#[cfg(windows)]
+fn tcp6_owner_rows() -> Result<Vec<MIB_TCP6ROW_OWNER_PID>, String> {
+    const MAX_TCP_TABLE_BYTES: usize = 4 * 1024 * 1024;
+    let mut size = 0_u32;
+    let first = unsafe {
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            0,
+            u32::from(AF_INET6),
+            TCP_TABLE_OWNER_PID_ALL,
+            0,
+        )
+    };
+    if first != ERROR_INSUFFICIENT_BUFFER || size == 0 || size as usize > MAX_TCP_TABLE_BYTES {
+        return Err("Windows TCP6 ownership table is unavailable".to_string());
+    }
+
+    for _ in 0..2 {
+        let words = (size as usize).div_ceil(std::mem::size_of::<u64>());
+        let mut storage = vec![0_u64; words];
+        let result = unsafe {
+            GetExtendedTcpTable(
+                storage.as_mut_ptr().cast(),
+                &mut size,
+                0,
+                u32::from(AF_INET6),
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            )
+        };
+        if result == ERROR_INSUFFICIENT_BUFFER {
+            if size as usize > MAX_TCP_TABLE_BYTES {
+                return Err("Windows TCP6 ownership table is unavailable".to_string());
+            }
+            continue;
+        }
+        if result != NO_ERROR {
+            return Err("Windows TCP6 ownership table is unavailable".to_string());
+        }
+
+        let bytes = storage.as_ptr().cast::<u8>();
+        let count = unsafe { *bytes.cast::<u32>() } as usize;
+        let required = count
+            .checked_mul(std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>())
+            .and_then(|value| value.checked_add(std::mem::size_of::<u32>()))
+            .ok_or_else(|| "Windows TCP6 ownership table is invalid".to_string())?;
+        if required > size as usize || required > storage.len() * std::mem::size_of::<u64>() {
+            return Err("Windows TCP6 ownership table is invalid".to_string());
+        }
+        let row_ptr =
+            unsafe { bytes.add(std::mem::size_of::<u32>()) }.cast::<MIB_TCP6ROW_OWNER_PID>();
+        let rows = unsafe { std::slice::from_raw_parts(row_ptr, count) };
+        return Ok(rows.to_vec());
+    }
+    Err("Windows TCP6 ownership table is unavailable".to_string())
+}
+
 impl OwnedCoreProcess {
+    fn terminate_and_wait(&mut self) -> Result<(), String> {
+        if self
+            .child
+            .try_wait()
+            .map_err(|_| "Core process status is unavailable".to_string())?
+            .is_some()
+        {
+            return Ok(());
+        }
+        terminate_job_checked(&self.job)
+            .map_err(|_| "Owned Vision Core termination failed".to_string())?;
+        wait_child_checked(&mut self.child)
+            .map_err(|_| "Owned Vision Core exit confirmation failed".to_string())
+    }
+
     fn state(&self, state: String, exit_code: Option<i32>) -> CoreProcessState {
         CoreProcessState {
             state,
@@ -666,6 +805,15 @@ impl OwnedCoreProcess {
             stdout_log: self.stdout_log.clone(),
             stderr_log: self.stderr_log.clone(),
             unexpected_exit_code: exit_code,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OwnedCoreProcess {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() && self.job.terminate().is_ok() {
+            let _ = self.child.wait();
         }
     }
 }
@@ -735,30 +883,114 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn listener6_row(address: [u8; 16], port: u16, pid: u32) -> MIB_TCP6ROW_OWNER_PID {
+        MIB_TCP6ROW_OWNER_PID {
+            ucLocalAddr: address,
+            dwLocalScopeId: 0,
+            dwLocalPort: u32::from(port.to_be()),
+            ucRemoteAddr: [0; 16],
+            dwRemoteScopeId: 0,
+            dwRemotePort: 0,
+            dwState: 2,
+            dwOwningPid: pid,
+        }
+    }
+
+    #[cfg(windows)]
     #[test]
     fn private_listener_requires_one_exact_loopback_owner() {
         let pid = 42;
         let port = 7070;
-        assert_eq!(private_listener_ready(&[], pid, port), Ok(false));
+        assert_eq!(private_listener_ready(&[], &[], pid, port), Ok(false));
         assert_eq!(
-            private_listener_ready(&[listener_row([127, 0, 0, 1], port, pid)], pid, port),
+            private_listener_ready(&[listener_row([127, 0, 0, 1], port, pid)], &[], pid, port),
             Ok(true)
         );
         assert!(
-            private_listener_ready(&[listener_row([0, 0, 0, 0], port, pid)], pid, port).is_err()
+            private_listener_ready(&[listener_row([0, 0, 0, 0], port, pid)], &[], pid, port)
+                .is_err()
         );
         assert!(
-            private_listener_ready(&[listener_row([127, 0, 0, 1], port, 99)], pid, port).is_err()
+            private_listener_ready(&[listener_row([127, 0, 0, 1], port, 99)], &[], pid, port)
+                .is_err()
         );
         assert!(private_listener_ready(
             &[
                 listener_row([127, 0, 0, 1], port, pid),
                 listener_row([0, 0, 0, 0], port, pid),
             ],
+            &[],
             pid,
             port,
         )
         .is_err());
+
+        let mut ipv6_loopback = [0_u8; 16];
+        ipv6_loopback[15] = 1;
+        for ipv6 in [
+            listener6_row([0; 16], port, pid),
+            listener6_row(ipv6_loopback, port, pid),
+            listener6_row(ipv6_loopback, port, 99),
+        ] {
+            assert!(private_listener_ready(&[], &[ipv6], pid, port).is_err());
+            assert!(private_listener_ready(
+                &[listener_row([127, 0, 0, 1], port, pid)],
+                &[ipv6],
+                pid,
+                port
+            )
+            .is_err());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn admission_cleanup_reports_injected_termination_and_wait_failures() {
+        use std::process::Stdio;
+
+        let mut assigned = Command::new("cmd.exe")
+            .args(["/d", "/s", "/c", "ping -t 127.0.0.1 > nul"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let job = CoreProcessJob::new_kill_on_close().unwrap();
+        job.assign_process(assigned.as_raw_handle()).unwrap();
+        FAIL_NEXT_JOB_TERMINATION.with(|flag| flag.set(true));
+        assert_eq!(terminate_assigned_child(&job, &mut assigned), Err(()));
+        assert!(assigned.try_wait().unwrap().is_none());
+        terminate_assigned_child(&job, &mut assigned).unwrap();
+
+        let mut wait_failure = Command::new("cmd.exe")
+            .args(["/d", "/s", "/c", "ping -t 127.0.0.1 > nul"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let wait_job = CoreProcessJob::new_kill_on_close().unwrap();
+        wait_job
+            .assign_process(wait_failure.as_raw_handle())
+            .unwrap();
+        FAIL_NEXT_CHILD_WAIT.with(|flag| flag.set(true));
+        assert_eq!(
+            terminate_assigned_child(&wait_job, &mut wait_failure),
+            Err(())
+        );
+        wait_child_checked(&mut wait_failure).unwrap();
+
+        let mut unassigned = Command::new("cmd.exe")
+            .args(["/d", "/s", "/c", "ping -t 127.0.0.1 > nul"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        FAIL_NEXT_CHILD_KILL.with(|flag| flag.set(true));
+        assert_eq!(terminate_unassigned_child(&mut unassigned), Err(()));
+        assert!(unassigned.try_wait().unwrap().is_none());
+        terminate_unassigned_child(&mut unassigned).unwrap();
     }
 
     #[cfg(windows)]
@@ -789,6 +1021,13 @@ mod tests {
         first_authority.validate().unwrap();
         let first_identity = first_authority.wallet_identity_fingerprint();
 
+        FAIL_NEXT_JOB_TERMINATION.with(|flag| flag.set(true));
+        assert_eq!(
+            supervisor.stop(),
+            Err("Owned Vision Core termination failed".to_string())
+        );
+        assert!(supervisor.inner.lock().unwrap().is_some());
+        first_authority.validate().unwrap();
         supervisor.stop().unwrap();
         assert_eq!(
             first_authority.validate(),
@@ -807,6 +1046,12 @@ mod tests {
             first_identity,
             second_authority.wallet_identity_fingerprint()
         );
+        FAIL_NEXT_CHILD_WAIT.with(|flag| flag.set(true));
+        assert_eq!(
+            supervisor.stop(),
+            Err("Owned Vision Core exit confirmation failed".to_string())
+        );
+        assert!(supervisor.inner.lock().unwrap().is_some());
         supervisor.stop().unwrap();
     }
 }

@@ -28,9 +28,11 @@ evidence package before launch:
 .\scripts\stage-frozen-core.ps1 -EvidenceRoot <accepted-evidence-directory>
 ```
 
-The staging script verifies the complete accepted inventory and the candidate hash and size. The
-supervisor then performs handle-bound manifest, executable, running-image, process-generation, and
-loopback-listener ownership checks. The executable is ignored and must not be committed.
+The staging script first verifies the separate exact Desktop-integration acceptance record, then the
+original complete evidence inventory and candidate hash and size. The supervisor performs
+handle-bound acceptance, manifest, executable, running-image, process-generation, IPv4/IPv6 listener,
+and loopback-owner checks. A kill-on-close Windows Job Object prevents Core from escaping Desktop
+ownership. The executable is ignored and must not be committed.
 
 ## Backend Tests
 

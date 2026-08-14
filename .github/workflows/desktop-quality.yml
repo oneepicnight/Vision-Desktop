@@ -1,0 +1,93 @@
+name: Vision Desktop hosted quality gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Windows hosted application quality gate
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Record toolchains
+        shell: pwsh
+        run: |
+          node --version
+          npm --version
+          rustc --version
+          cargo --version
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Check frontend types
+        run: npm run typecheck
+
+      - name: Run frontend state tests
+        run: npm run test:state
+
+      - name: Build production frontend
+        run: npm run build
+
+      - name: Create non-runnable Core resource sentinel
+        shell: pwsh
+        run: |
+          $resourceDirectory = Join-Path $env:GITHUB_WORKSPACE "bundled\core\windows-x64"
+          $resourcePath = Join-Path $resourceDirectory "vision-core.exe"
+          New-Item -ItemType Directory -Force -Path $resourceDirectory | Out-Null
+          [System.IO.File]::WriteAllText(
+            $resourcePath,
+            "VISION_DESKTOP_CI_NON_EXECUTABLE_RESOURCE_SENTINEL`n",
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          if ((Get-Item -LiteralPath $resourcePath).Length -eq 0) {
+            throw "CI Core resource sentinel was not created"
+          }
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Run strict Rust linting
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Compile every Rust test target
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets --no-run
+
+      - name: Run hosted-safe Rust suite
+        shell: pwsh
+        run: ./scripts/run-hosted-windows-rust-tests.ps1
+
+      - name: Check repository whitespace
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if ($env:BASE_SHA) {
+            git diff --check "$env:BASE_SHA...HEAD"
+          } else {
+            git diff --check "HEAD^..HEAD"
+          }

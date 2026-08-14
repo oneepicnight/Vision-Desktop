@@ -15,6 +15,18 @@ The bundled manifest identifies:
 
 The existing Desktop compatibility document lists `/balance/:address`, `/nonce/:address`, `/transaction/:txid`, and `POST /transactions`. Real Core launch remains blocked because the frozen binary cannot bind its private HTTP API to loopback only.
 
+## Current integration status
+
+Vision-Core source commit `223e2f745ebb5f7eb0d48c88397684b9037767bc` now contains separately
+reviewed wallet compatibility and loopback-binding work. Vision Desktop has not accepted a release
+artifact for that source. The prior Windows artifact remains ineligible because downstream
+qualification could not prove the complete deterministic lookup lifecycle and no-retry matrix.
+
+Accordingly, the current Desktop manifest remains frozen RC2, `PrivateLoopbackBinding` and
+`SubmissionRejectionSemantics` remain unmet in production policy, all three independent-review
+approval constants remain false, and no wallet command or frontend custody authority is enabled.
+Source acceptance must not be confused with artifact acceptance.
+
 ## Conflicting historical implementations
 
 The legacy browser wallet is not a compatible signing specification:
@@ -137,6 +149,10 @@ The frozen RC2 executable cannot bind its HTTP API to loopback only. An end-to-e
 3. Add a Desktop proxy or sidecar while leaving the underlying Core API externally reachable. This does not remove the original exposure and is not an adequate security boundary by itself.
 
 The recommended private-connectivity policy was approved on 2026-08-01. Vision Desktop will keep real submission disabled until a supported Vision-Core release provides loopback-only API binding and is accepted through an explicit compatibility-manifest integration task. Desktop continues to enforce the existing restriction and does not modify Vision-Core.
+
+The admission procedure for that future release is defined in
+`CORE_ARTIFACT_INTAKE_CHECKLIST.md`. No manifest or binary update may precede final independent
+artifact acceptance.
 
 ## Required approved vectors
 

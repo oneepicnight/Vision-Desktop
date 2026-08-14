@@ -81,6 +81,20 @@ Wallet limitations and security boundary:
 - RC2 confirms 9 decimal places, but the current read-only page continues to show the exact raw-unit value until the reviewed amount formatter is connected to a future custody flow
 - transaction or receipt history is not currently exposed by the Desktop service boundary
 
+## Wallet readiness
+
+The reviewed private wallet foundation is merged into `main`, but it remains deliberately inert.
+No production wallet Tauri command, permission, capability, frontend custody form, signing path, or
+submission path is enabled. The three independent-review approval constants and the production
+duplicate-key transport proof remain fail-closed.
+
+Vision-Core source commit `223e2f745ebb5f7eb0d48c88397684b9037767bc` contains the reviewed
+wallet API and loopback-binding work, but Vision Desktop has not accepted a release artifact for
+that source. The prior Windows artifact is not an integration input because its downstream
+qualification was inconclusive. The bundled manifest therefore remains on frozen RC2 and real Core
+launch remains blocked. See `docs/WALLET_READINESS_STATUS.md` for the current gate sequence and
+`docs/CORE_ARTIFACT_INTAKE_CHECKLIST.md` for the future artifact-admission procedure.
+
 The supported wallet host boundary is one interactive session per Windows account on Windows 11
 build families 26100 (24H2), 26200 (25H2), or 28000 (26H1), limited to the reviewed non-evaluation
 Home, Pro, Enterprise, Education, LTSC, Workstations, and Pro Education variants listed in

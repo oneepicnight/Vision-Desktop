@@ -3,14 +3,17 @@
 - Windows-first.
 - MSI and NSIS bundles are unsigned local engineering builds; public distribution requires a trusted code-signing certificate and release-signing procedure.
 - No automatic updater yet.
-- The Wallet is read-only and does not provide custody, key generation, signing, transaction submission, denomination metadata, or transaction history. Live observation requires a running compatible Core private API.
+- The user-facing Wallet remains read-only. A reviewed private Rust custody, recovery, signing,
+  submission, reconciliation, and receipt-refresh foundation exists, but it is unregistered and
+  unreachable from production Tauri and React authority.
 - The Marketplace is a read-only integration view; no market feed, exchange, land listing, cash order, checkout, settlement, or transaction action is connected.
 - No game launcher yet.
 - No automatic NAT traversal yet.
 - No relay yet.
 - Core API uses loopback HTTP.
 - Manual internet router forwarding is still required for public seed operation.
-- No production custody.
+- No production custody. All wallet approval constants and the production duplicate-key transport
+  proof remain false.
 - Test funds only.
 - Future wallet custody is supported only on the exact Windows 11 Client build/edition matrix in
   `WALLET_RUNTIME_SECURITY.md`, with one interactive session per Windows account. Windows 10,
@@ -22,5 +25,7 @@
 - The NSIS package creates and removes the expected current-user Windows uninstall registration.
 - The branded interactive NSIS install, packaged-app launch, and retained-data uninstall lifecycle passed locally; clean-machine and cross-display-scale presentation remain unqualified.
 - Clean-machine, upgrade/downgrade, signing, and public-release qualification remain incomplete.
-- Real Core launch remains blocked because the frozen RC2 Core cannot bind its HTTP API to loopback only.
+- Real Core launch remains blocked for the bundled frozen RC2 manifest. A loopback-capable Core
+  source revision exists, but its exact Windows artifact has not completed independent Desktop
+  intake and therefore is not bundled or trusted.
 - Public endpoint redaction is conservative and may require review before sharing reports.

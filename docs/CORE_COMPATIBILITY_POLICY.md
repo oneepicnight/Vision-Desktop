@@ -11,6 +11,20 @@ Vision Desktop must treat Vision Core as an external consensus engine.
 - Consensus version: `3`
 - P2P protocol version: `4`
 
+This manifest is intentionally unchanged. It is a development compatibility baseline whose real
+launch is blocked because the frozen binary cannot bind its administrative API to loopback only.
+
+## Pending Wallet-Compatible Core
+
+Vision-Core source commit `223e2f745ebb5f7eb0d48c88397684b9037767bc` contains reviewed
+loopback-binding and wallet API source changes. It is not a supported Desktop artifact yet. The
+previous Windows build from that source was not accepted by the downstream qualification gate, so
+its hash must not be copied into the Desktop manifest and its executable must not replace the
+bundled RC2 binary.
+
+Promotion requires the exact procedure in `CORE_ARTIFACT_INTAKE_CHECKLIST.md` and a separately
+reviewed Desktop integration commit.
+
 ## Rules
 
 - Desktop verifies Core binary hash before launch.

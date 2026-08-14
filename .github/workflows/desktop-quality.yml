@@ -53,6 +53,21 @@ jobs:
       - name: Build production frontend
         run: npm run build
 
+      - name: Create non-runnable Core resource sentinel
+        shell: pwsh
+        run: |
+          $resourceDirectory = Join-Path $env:GITHUB_WORKSPACE "bundled\core\windows-x64"
+          $resourcePath = Join-Path $resourceDirectory "vision-core.exe"
+          New-Item -ItemType Directory -Force -Path $resourceDirectory | Out-Null
+          [System.IO.File]::WriteAllText(
+            $resourcePath,
+            "VISION_DESKTOP_CI_NON_EXECUTABLE_RESOURCE_SENTINEL`n",
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          if ((Get-Item -LiteralPath $resourcePath).Length -eq 0) {
+            throw "CI Core resource sentinel was not created"
+          }
+
       - name: Check Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 

@@ -14,16 +14,21 @@ Vision Desktop must treat Vision Core as an external consensus engine.
 This manifest is intentionally unchanged. It is a development compatibility baseline whose real
 launch is blocked because the frozen binary cannot bind its administrative API to loopback only.
 
-## Pending Wallet-Compatible Core
+## Frozen Wallet-Compatible Core Pending Desktop Integration
 
-Vision-Core source commit `223e2f745ebb5f7eb0d48c88397684b9037767bc` contains reviewed
-loopback-binding and wallet API source changes. It is not a supported Desktop artifact yet. The
-previous Windows build from that source was not accepted by the downstream qualification gate, so
-its hash must not be copied into the Desktop manifest and its executable must not replace the
-bundled RC2 binary.
+An independently accepted Windows artifact is now frozen with candidate SHA-256
+`8082d57c0f4a5cb82af9696fe4d53aeb65fcb280c062afe81abdcfe78e12ed28` and accepted Core
+evidence/release manifest SHA-256
+`35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a`.
 
-Promotion requires the exact procedure in `CORE_ARTIFACT_INTAKE_CHECKLIST.md` and a separately
-reviewed Desktop integration commit.
+It is not a supported Desktop artifact yet. The accepted files are not present in the current
+Desktop checkout, the runtime compatibility manifest is still RC2, and real launch remains blocked.
+The two accepted hashes must not be confused with the Desktop runtime-manifest fingerprint.
+
+Integration requires the exact procedure in `CORE_ARTIFACT_INTAKE_CHECKLIST.md`, the boundary in
+`FROZEN_CORE_ARTIFACT_INTEGRATION_DESIGN.md`, and a separately reviewed Desktop implementation
+commit. Rebuilding, modifying, or rerunning qualification against changed bytes invalidates the
+acceptance.
 
 ## Rules
 

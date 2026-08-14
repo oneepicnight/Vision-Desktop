@@ -1,6 +1,6 @@
 # Wallet Readiness Status
 
-Status date: 2026-08-13
+Status date: 2026-08-14
 
 This document is the current operational summary. Reviewed design documents, implementation
 handoffs, qualification transcripts, and historical audits retain their original commit-specific
@@ -41,22 +41,23 @@ The implementation is a private foundation, not an active wallet release:
 
 ## Core dependency state
 
-Vision-Core `main` contains wallet compatibility source commit
-`223e2f745ebb5f7eb0d48c88397684b9037767bc`. The source work includes loopback-only API support
-and the reviewed wallet route contract.
+The earlier Windows artifact with SHA-256
+`586a04b311da41adcf5e41ffb390f5d99c6f3732c43083c24602f373bc3721c1` remains ineligible and must
+not be reused.
 
-The previously built Windows artifact from that source reported SHA-256
-`586a04b311da41adcf5e41ffb390f5d99c6f3732c43083c24602f373bc3721c1`, but it is not an accepted
-Desktop input. Downstream review found the qualification inconclusive because deterministic source
-coverage did not prove the complete pending/mined/reorganization/observation-loss lookup lifecycle
-and the associated no-retry invariants. A new reviewed Core source commit, fresh locked artifact,
-and fresh independent evidence are required.
+A later independently accepted Windows artifact is frozen with candidate SHA-256
+`8082d57c0f4a5cb82af9696fe4d53aeb65fcb280c062afe81abdcfe78e12ed28` and accepted Core
+evidence/release manifest SHA-256
+`35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a`. No Desktop integration,
+runtime-manifest change, artifact copy, launch-policy change, or activation has occurred. The
+accepted files are not present in the current Desktop checkout and must be verified from their
+immutable evidence package before implementation.
 
 ## Next hard gate
 
-Vision Desktop must wait for a final Core artifact verdict that explicitly authorizes downstream
-Desktop integration. When it arrives, Desktop must execute `CORE_ARTIFACT_INTAKE_CHECKLIST.md`
-without rebuilding or substituting the artifact.
+The next step is independent review of `FROZEN_CORE_ARTIFACT_INTEGRATION_DESIGN.md`. After design
+approval, Desktop must execute `CORE_ARTIFACT_INTAKE_CHECKLIST.md` without rebuilding, signing,
+substituting, or otherwise changing the artifact.
 
 Only after artifact intake and independent acceptance may a separate Desktop integration change:
 

@@ -19,10 +19,10 @@ Supported RC2 routes verified from source:
 
 Important blocker: frozen RC2 Core binds the API to `0.0.0.0:<VISION_HTTP_PORT>` and has no
 loopback-only bind override. Real Core launch remains blocked for the current bundled manifest.
-Vision-Core source commit `223e2f745ebb5f7eb0d48c88397684b9037767bc` contains a reviewed
-loopback-capable wallet API candidate, but no release artifact from that source has completed the
-Desktop intake gate. Desktop must not change its manifest, binary, or production authority on the
-strength of source review alone.
+An independently accepted loopback-capable Windows artifact is frozen by the hashes recorded in
+`FROZEN_CORE_ARTIFACT_INTEGRATION_DESIGN.md`, but it has not completed Desktop intake or runtime
+manifest integration. Desktop must not change its manifest, binary, launch policy, or production
+authority until that separately reviewed integration is complete.
 
 The first desktop milestone uses these routes only after an exact accepted artifact is integrated:
 

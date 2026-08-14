@@ -2,33 +2,27 @@
 
 Vision Desktop must treat Vision Core as an external consensus engine.
 
-## Current Supported Core
+## Current Admitted Core
 
-- Core alpha tag: `vision-core-alpha-rc2`
+- Core release tag: `vision-core-v1.0.4`
 - Consensus tag: `vision-core-consensus-v1.0.3`
-- Commit: `6a065df8206b50874029a27ee2b54dffae5e3cdd`
-- Binary SHA-256: `41F61A18B48D1FB28604910D27D4AADD8368D35CEF27B4E6EB385ADA0BA02C01`
+- Source commit: `890c98a02c7147e166805fe52002d22d1fcd81f9`
+- Source tree: `2ae583bbfc887490b8af1398aead7b916796700c`
+- Binary SHA-256: `8082d57c0f4a5cb82af9696fe4d53aeb65fcb280c062afe81abdcfe78e12ed28`
+- Binary size: `4,486,144` bytes
+- Accepted evidence manifest SHA-256: `35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a`
 - Consensus version: `3`
 - P2P protocol version: `4`
 
-This manifest is intentionally unchanged. It is a development compatibility baseline whose real
-launch is blocked because the frozen binary cannot bind its administrative API to loopback only.
+The complete Desktop runtime-manifest bytes are independently pinned in Rust with SHA-256
+`cf713d116acca7a848d0537968f81373ee14a965fb3855a6480a59f4971536ec`. The executable is an ignored
+local/release input staged only from the accepted evidence package; it is not stored in Git.
+Rebuilding, modifying, re-signing, repackaging, or rerunning qualification against changed bytes
+invalidates the acceptance.
 
-## Frozen Wallet-Compatible Core Pending Desktop Integration
-
-An independently accepted Windows artifact is now frozen with candidate SHA-256
-`8082d57c0f4a5cb82af9696fe4d53aeb65fcb280c062afe81abdcfe78e12ed28` and accepted Core
-evidence/release manifest SHA-256
-`35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a`.
-
-It is not a supported Desktop artifact yet. The accepted files are not present in the current
-Desktop checkout, the runtime compatibility manifest is still RC2, and real launch remains blocked.
-The two accepted hashes must not be confused with the Desktop runtime-manifest fingerprint.
-
-Integration requires the exact procedure in `CORE_ARTIFACT_INTAKE_CHECKLIST.md`, the boundary in
-`FROZEN_CORE_ARTIFACT_INTEGRATION_DESIGN.md`, and a separately reviewed Desktop implementation
-commit. Rebuilding, modifying, or rerunning qualification against changed bytes invalidates the
-acceptance.
+Admission follows `CORE_ARTIFACT_INTAKE_CHECKLIST.md` and the approved boundary in
+`FROZEN_CORE_ARTIFACT_INTEGRATION_DESIGN.md`. The isolated implementation still requires independent
+review before any downstream activation decision.
 
 ## Rules
 
@@ -42,6 +36,8 @@ acceptance.
 
 ## Long-Term Artifact Strategy
 
-For local development, the RC2 binary may exist in `bundled/core/windows-x64` for testing. Before a public repository push or release, the project should decide whether Core binaries are stored with Git LFS, attached to releases, or downloaded by a signed build step.
+For controlled local development, the exact admitted executable may exist in
+`bundled/core/windows-x64` after verified staging. It remains ignored and must not be force-added to
+Git.
 
 Preferred long-term strategy: store only manifests in Git and download signed Core artifacts during release packaging. This keeps repository history small and makes binary provenance explicit.

@@ -2,10 +2,10 @@
 
 Security rules implemented from the first milestone:
 
-- Core API must bind to loopback only. The currently bundled frozen RC2 cannot satisfy this, so
-  real Core launch remains blocked by the Desktop supervisor. A newer Core source revision is not
-  trusted until its exact Windows artifact passes the Desktop intake checklist and is independently
-  accepted.
+- Core API must bind to literal IPv4 loopback only. The supervisor admits only the exact frozen
+  Vision Core v1.0.4 artifact and manifest, retains non-reparse handles without write/rename/delete
+  sharing, compares the running image's file identity, and requires one exact loopback listener
+  owned by the supervised PID and generation. Any mismatch fails closed.
 - Desktop frontend cannot execute arbitrary shell commands.
 - Tauri command list is explicit and narrow.
 - Backend commands validate inputs.

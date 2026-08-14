@@ -72,13 +72,13 @@ The initial Wallet page is read-only. It displays only confirmed non-secret data
 - live address, balance, and nonce only when the existing read-only address lookup path returns them
 - explicit address source labels
 - Core, recovery, mock-mode, and freshness context
-- exact raw-unit balance strings decoded from the typed RC2 account response
+- exact raw-unit balance strings decoded from the typed wallet-compatible Core account response
 
 Wallet limitations and security boundary:
 
 - a configured reward address does not prove Desktop custody or ownership
 - no private keys, seed phrases, mnemonics, keystores, signing, imports, exports, or transaction submission are implemented
-- RC2 confirms 9 decimal places, but the current read-only page continues to show the exact raw-unit value until the reviewed amount formatter is connected to a future custody flow
+- the wallet-compatible Core contract confirms 9 decimal places, but the current read-only page continues to show the exact raw-unit value until the reviewed amount formatter is connected to a future custody flow
 - transaction or receipt history is not currently exposed by the Desktop service boundary
 
 ## Wallet readiness
@@ -88,12 +88,14 @@ No production wallet Tauri command, permission, capability, frontend custody for
 submission path is enabled. The three independent-review approval constants and the production
 duplicate-key transport proof remain fail-closed.
 
-Vision-Core source commit `223e2f745ebb5f7eb0d48c88397684b9037767bc` contains the reviewed
-wallet API and loopback-binding work, but Vision Desktop has not accepted a release artifact for
-that source. The prior Windows artifact is not an integration input because its downstream
-qualification was inconclusive. The bundled manifest therefore remains on frozen RC2 and real Core
-launch remains blocked. See `docs/WALLET_READINESS_STATUS.md` for the current gate sequence and
-`docs/CORE_ARTIFACT_INTAKE_CHECKLIST.md` for the future artifact-admission procedure.
+Vision-Core commit `890c98a02c7147e166805fe52002d22d1fcd81f9` produced the independently
+accepted Windows artifact used by the isolated Desktop admission implementation. The runtime
+manifest pins its exact source tree, executable hash and size, evidence-manifest hash, loopback
+policy, peer-binding contract, routes, and fee/submission semantics. Real Core launch is permitted
+only after handle-bound manifest and executable admission, exact running-image verification, and
+same-generation loopback-listener ownership verification. This implementation still requires its
+own independent review and does not activate wallet custody or transaction authority. See
+`docs/FROZEN_CORE_ARTIFACT_ADMISSION_HANDOFF.md` and `docs/CORE_ARTIFACT_INTAKE_CHECKLIST.md`.
 
 The supported wallet host boundary is one interactive session per Windows account on Windows 11
 build families 26100 (24H2), 26200 (25H2), or 28000 (26H1), limited to the reviewed non-evaluation
@@ -103,7 +105,7 @@ unknown, and future Windows editions/build families fail closed. The per-user `G
 lease still spans Windows sessions as defense in depth and denies a second runtime, but that
 mechanism does not expand the supported platform boundary.
 
-The approved target is an embedded, non-custodial wallet whose secret-bearing operations remain inside the Rust backend. An internal encrypted-vault foundation now uses password hardening, authenticated encryption, a Windows current-user DPAPI-protected local factor, operating-system randomness, redacted errors, encrypted-only create-new storage, restrictive verified filesystem permissions, five-minute idle locking, escalating unlock backoff, and a restrictive per-user global Windows process lease that excludes a second wallet runtime across console and RDP sessions, but it is not exposed through Tauri commands. A separate internal portable recovery artifact encrypts the same opaque seed with a different password and without DPAPI or machine binding. Private Rust lifecycle adapters now connect status, create, restore, unlock, and lock to those foundations at one fixed local vault path. Creation first displays and verifies the generated recovery credential in a Rust-owned native Windows ceremony, then stores and re-verifies the explicitly selected new recovery file before it stores the local vault; cancellation or revocation before acknowledgement writes neither file. Restore reads the original backup without changing it; both complete locked; unlock retains the seed only in the Rust session; lock is idempotent and revokes other wallet authority. Native destination/source pickers validate local Windows paths and retain them behind short-lived tokens. None of these adapters, pickers, passwords, credentials, or tokens is available to React or registered as a Tauri command. The exact supported RC2 source now backs fixed seed-to-address, 9-decimal amount, nonce/fee, canonical transaction serialization, transaction-identifier, Ed25519 signature, structured submission-response, and receipt-observation contracts. The corresponding amount converter, cash-transfer builder, signer, fail-closed response parser, and confirmation/reorganization observer remain internal Rust primitives with no Tauri or frontend access. An internal authenticated local activity journal stores only public metadata for transactions accepted from this Desktop installation; a separate authenticated head and recoverable two-phase update now reject journal-only rollback to an older valid prefix. It is not complete account history and never controls balances, nonces, signing, or success. RC2 does not define deterministic finality: Desktop reports `Mined - N confirmations`, may show `High confidence` at 50, and never claims irreversibility. The current release still has frontend custody, creation, recovery, unlock, user-facing signing, and sends disabled while private-loopback, reviewed-command, and independent-review gates remain. `docs/WALLET_SECURITY_ARCHITECTURE.md`, `docs/WALLET_LIFECYCLE_ADAPTERS.md`, and `docs/WALLET_CORE_CONTRACT_GAPS.md` define the fail-closed gates that must pass before real keys or funds are handled.
+The approved target is an embedded, non-custodial wallet whose secret-bearing operations remain inside the Rust backend. An internal encrypted-vault foundation now uses password hardening, authenticated encryption, a Windows current-user DPAPI-protected local factor, operating-system randomness, redacted errors, encrypted-only create-new storage, restrictive verified filesystem permissions, five-minute idle locking, escalating unlock backoff, and a restrictive per-user global Windows process lease that excludes a second wallet runtime across console and RDP sessions, but it is not exposed through Tauri commands. A separate internal portable recovery artifact encrypts the same opaque seed with a different password and without DPAPI or machine binding. Private Rust lifecycle adapters now connect status, create, restore, unlock, and lock to those foundations at one fixed local vault path. Creation first displays and verifies the generated recovery credential in a Rust-owned native Windows ceremony, then stores and re-verifies the explicitly selected new recovery file before it stores the local vault; cancellation or revocation before acknowledgement writes neither file. Restore reads the original backup without changing it; both complete locked; unlock retains the seed only in the Rust session; lock is idempotent and revokes other wallet authority. Native destination/source pickers validate local Windows paths and retain them behind short-lived tokens. None of these adapters, pickers, passwords, credentials, or tokens is available to React or registered as a Tauri command. The admitted v1.0.4 compatibility contract backs fixed seed-to-address, 9-decimal amount, nonce/fee, canonical transaction serialization, transaction-identifier, Ed25519 signature, structured submission-response, and receipt-observation contracts. The corresponding amount converter, cash-transfer builder, signer, fail-closed response parser, and confirmation/reorganization observer remain internal Rust primitives with no Tauri or frontend access. An internal authenticated local activity journal stores only public metadata for transactions accepted from this Desktop installation; a separate authenticated head and recoverable two-phase update now reject journal-only rollback to an older valid prefix. It is not complete account history and never controls balances, nonces, signing, or success. The contract does not define deterministic finality: Desktop reports `Mined - N confirmations`, may show `High confidence` at 50, and never claims irreversibility. The current release still has frontend custody, creation, recovery, unlock, user-facing signing, and sends disabled while reviewed-command and independent-review gates remain. `docs/WALLET_SECURITY_ARCHITECTURE.md`, `docs/WALLET_LIFECYCLE_ADAPTERS.md`, and `docs/WALLET_CORE_CONTRACT_GAPS.md` define the fail-closed gates that must pass before real keys or funds are handled.
 
 The planned wallet Tauri boundary is documented in `docs/WALLET_TAURI_COMMAND_THREAT_MODEL.md`. The current 19 non-wallet application commands now participate in Tauri ACL resolution and are granted individually to the explicitly labelled Windows `main` window; `docs/TAURI_COMMAND_ACCESS_CONTROL.md` records the active boundary and drift tests. Production WebView connectivity is limited to Tauri IPC, with local development connectivity isolated in `devCsp`; `docs/WEBVIEW_NETWORK_SECURITY.md` records the network boundary. Windows rejects tested duplicate Vision Desktop launches before managed state or future wallet-capable plugins initialize; duplicate launch data is discarded and the primary main window is restored and focused best-effort. A private, command-inaccessible Rust wallet runtime now adds an independent Windows kernel lock, main-window operation exclusion, locked session ownership, bounded zeroizing secret input, generation-bound native recovery selection, short-lived path authorization, and private status/create/restore/unlock/lock orchestration. A hidden Rust-only native listener clears that authority on Windows session lock, suspend/standby, logoff/shutdown, and teardown; unlock and resume do not restore it. Lifecycle and signing activation are now separate fail-closed scopes: lifecycle qualification can never issue a signing-capable proof, and both production approvals remain false. `docs/WALLET_RUNTIME_SECURITY.md`, `docs/WALLET_LIFECYCLE_ADAPTERS.md`, and `docs/WALLET_ACTIVATION_SCOPES.md` record these boundaries. The pinned native dialog plugin is initialized after single-instance enforcement for private Rust use, but no wallet command, dialog permission, password form, or frontend wallet service has been activated. Both official plugins remain exact-version Windows-only dependencies and neither is permissioned to React. `docs/WALLET_DEPENDENCY_PROVENANCE.md` records provenance and exposure limits. Local vault passwords require at least 16 bytes, matching the portable-recovery minimum.
 
@@ -173,14 +175,18 @@ Known Diagnostics limitations:
 - support-package IPC returns only the package SHA-256 and fixed assessment; native destination paths and filesystem errors never cross into the WebView
 - the page does not add write controls for mining or Core runtime behavior
 
-Bundled Core baseline for local development:
+Admitted Core baseline for controlled local development:
 
-- Core alpha tag: `vision-core-alpha-rc2`
+- Core release tag: `vision-core-v1.0.4`
 - Consensus tag: `vision-core-consensus-v1.0.3`
-- Source commit: `6a065df8206b50874029a27ee2b54dffae5e3cdd`
+- Source commit: `890c98a02c7147e166805fe52002d22d1fcd81f9`
+- Source tree: `2ae583bbfc887490b8af1398aead7b916796700c`
 - Consensus version: `3`
 - P2P protocol version: `4`
-- Windows x64 binary SHA-256: `41F61A18B48D1FB28604910D27D4AADD8368D35CEF27B4E6EB385ADA0BA02C01`
+- Windows x64 binary SHA-256: `8082d57c0f4a5cb82af9696fe4d53aeb65fcb280c062afe81abdcfe78e12ed28`
+- Accepted evidence manifest SHA-256: `35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a`
+
+The executable remains an ignored local/release input and is never committed to this repository.
 
 ## Development
 

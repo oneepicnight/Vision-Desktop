@@ -2,6 +2,8 @@ pub mod api;
 pub mod commands;
 pub mod config;
 pub mod core_manifest;
+#[cfg(windows)]
+mod core_resource;
 pub mod network;
 pub mod paths;
 pub mod reports;

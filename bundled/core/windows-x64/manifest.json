@@ -1,9 +1,46 @@
 {
-  "core_tag": "vision-core-alpha-rc2",
+  "schema_version": 1,
+  "core_tag": "vision-core-v1.0.4",
+  "release_version": "1.0.4",
   "consensus_tag": "vision-core-consensus-v1.0.3",
-  "source_commit": "6a065df8206b50874029a27ee2b54dffae5e3cdd",
-  "binary_sha256": "41F61A18B48D1FB28604910D27D4AADD8368D35CEF27B4E6EB385ADA0BA02C01",
+  "source_commit": "890c98a02c7147e166805fe52002d22d1fcd81f9",
+  "source_tree": "2ae583bbfc887490b8af1398aead7b916796700c",
+  "binary_sha256": "8082d57c0f4a5cb82af9696fe4d53aeb65fcb280c062afe81abdcfe78e12ed28",
+  "binary_size_bytes": 4486144,
+  "platform": "windows-x86_64-msvc",
   "consensus_version": 3,
   "p2p_protocol_version": 4,
-  "platform": "windows-x64"
+  "accepted_evidence_manifest_sha256": "35f3233003a0b0c39d9331e0d3771b6d472aef3e556a516557f2b62d0aacb64a",
+  "api": {
+    "bind_host": "127.0.0.1",
+    "bind_policy": "compiled_literal_ipv4_loopback_v1",
+    "http_port_environment": "VISION_HTTP_PORT",
+    "peer_binding": "windows_tcp_owner_pid_v1",
+    "status_version": "3"
+  },
+  "wallet_core_api": {
+    "contract": "vision-wallet-read-v1",
+    "identifier_format": "lowercase_hex_64",
+    "routes": {
+      "balance": "/balance/{address}",
+      "nonce": "/nonce/{address}",
+      "status": "/status",
+      "transaction_lookup": "/transaction/{transaction_id}",
+      "submission": "/transactions"
+    },
+    "fee_policy": {
+      "tip_raw": 0,
+      "charged_base_raw": 1,
+      "fee_limit_raw": 201
+    },
+    "submission_semantics": {
+      "definitive_non_mutating_rejections": [],
+      "ambiguous_duplicate_codes": [
+        "duplicate_canonical_tx_id",
+        "duplicate_sender_nonce"
+      ],
+      "automatic_retry": false,
+      "replacement_transactions": false
+    }
+  }
 }

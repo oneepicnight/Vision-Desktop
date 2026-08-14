@@ -41,7 +41,8 @@ The account address is encoded as a URL path segment by the Desktop backend. Req
 ## Remaining limitations
 
 - Live Wallet observation depends on a running compatible Core private API.
-- Real Core launch remains blocked by the separately documented frozen-RC2 loopback-bind limitation.
+- Live Wallet observation requires the exact admitted Core artifact and a currently valid supervised
+  process-generation authority; any admission or peer-identity failure leaves observation unavailable.
 - Balance denomination and precision metadata are not exposed.
 - Transaction and receipt history are not exposed through the current Desktop service boundary.
 - The embedded Rust-managed custody model and private lifecycle primitives are implemented but

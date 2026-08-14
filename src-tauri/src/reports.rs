@@ -117,8 +117,25 @@ fn json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(value).map_err(|_| SECURITY_CLASSIFICATION_ERROR.to_string())
 }
 
-fn manifest_json_bytes(manifest: &CoreManifest) -> Result<Vec<u8>, String> {
-    serde_json::to_vec_pretty(manifest).map_err(|_| SECURITY_CLASSIFICATION_ERROR.to_string())
+fn manifest_summary_bytes(manifest: &CoreManifest) -> Result<Vec<u8>, String> {
+    json_bytes(&serde_json::json!({
+        "schema_version": manifest.schema_version,
+        "core_tag": manifest.core_tag,
+        "release_version": manifest.release_version,
+        "consensus_tag": manifest.consensus_tag,
+        "source_commit": manifest.source_commit,
+        "source_tree": manifest.source_tree,
+        "binary_sha256": manifest.binary_sha256,
+        "binary_size_bytes": manifest.binary_size_bytes,
+        "platform": manifest.platform,
+        "consensus_version": manifest.consensus_version,
+        "p2p_protocol_version": manifest.p2p_protocol_version,
+        "accepted_evidence_manifest_sha256": manifest.accepted_evidence_manifest_sha256,
+        "api_bind_host": manifest.api.bind_host,
+        "api_bind_policy": manifest.api.bind_policy,
+        "api_peer_binding": manifest.api.peer_binding,
+        "api_status_version": manifest.api.status_version,
+    }))
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
@@ -150,7 +167,7 @@ fn build_support_files(
     let mut files = vec![
         SupportFile {
             name: "package-version.json",
-            bytes: manifest_json_bytes(manifest)?,
+            bytes: manifest_summary_bytes(manifest)?,
         },
         SupportFile {
             name: "binary-hash.txt",
@@ -285,6 +302,7 @@ fn write_support_package_at(
     zip_file
         .sync_all()
         .map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
+    drop(zip_file);
     let zip_sha256 =
         sha256_file(&zip_path).map_err(|_| SUPPORT_PACKAGE_GENERATION_ERROR.to_string())?;
     Ok(StoredSupportPackage {
@@ -333,15 +351,7 @@ mod tests {
     ];
 
     fn manifest() -> CoreManifest {
-        CoreManifest {
-            core_tag: "vision-core-alpha-rc2".to_string(),
-            consensus_tag: "vision-consensus-rc2".to_string(),
-            source_commit: "0123456789abcdef".to_string(),
-            binary_sha256: "A".repeat(64),
-            consensus_version: 3,
-            p2p_protocol_version: 4,
-            platform: "windows-x64".to_string(),
-        }
+        load_core_manifest().expect("admitted test manifest")
     }
 
     fn canary_config() -> NodeConfig {

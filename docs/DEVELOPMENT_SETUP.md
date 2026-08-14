@@ -20,7 +20,17 @@ npm install
 npm run tauri:dev
 ```
 
-Mock mode is enabled from the UI and does not require Vision Core. Real Core mode uses the bundled RC2 binary and loopback API polling.
+Mock mode is enabled from the UI and does not require Vision Core. Real Core mode requires the
+exact admitted Vision Core v1.0.4 Windows artifact. Stage it from the independently accepted
+evidence package before launch:
+
+```powershell
+.\scripts\stage-frozen-core.ps1 -EvidenceRoot <accepted-evidence-directory>
+```
+
+The staging script verifies the complete accepted inventory and the candidate hash and size. The
+supervisor then performs handle-bound manifest, executable, running-image, process-generation, and
+loopback-listener ownership checks. The executable is ignored and must not be committed.
 
 ## Backend Tests
 

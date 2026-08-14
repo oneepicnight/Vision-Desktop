@@ -10,21 +10,30 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{Pid, ProcessesToUpdate, System};
 #[cfg(windows)]
 use windows_sys::Win32::{
-    Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, FILETIME, HANDLE, STILL_ACTIVE},
+    Foundation::{
+        DuplicateHandle, DUPLICATE_SAME_ACCESS, ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE,
+        NO_ERROR, STILL_ACTIVE,
+    },
+    NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
+    },
+    Networking::WinSock::AF_INET,
     System::Threading::{GetCurrentProcess, GetExitCodeProcess, GetProcessId, GetProcessTimes},
 };
 
 use crate::{
     config::{allocate_api_port, load_or_create_default_config, validate_node_config, NodeConfig},
-    core_manifest::{
-        bundled_core_binary_path, load_wallet_core_compatibility, verify_bundled_core_binary,
-    },
     paths::{default_paths, ensure_dir},
+};
+#[cfg(windows)]
+use crate::{
+    core_manifest::{admit_bundled_core_resources, VerifiedCoreResources},
+    core_resource::CoreFileIdentity,
 };
 
 pub struct SupervisorState {
@@ -34,6 +43,8 @@ pub struct SupervisorState {
 
 pub struct OwnedCoreProcess {
     child: Child,
+    #[cfg(windows)]
+    resources: VerifiedCoreResources,
     pid: u32,
     generation: u64,
     started_at_unix: u64,
@@ -48,7 +59,6 @@ pub struct OwnedCoreProcess {
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CoreAuthorityError {
-    UnsupportedCompatibility,
     CoreUnavailable,
     CoreIdentityChanged,
 }
@@ -62,6 +72,8 @@ pub(crate) struct CoreConnectionAuthority<'a> {
     generation: u64,
     api_port: u16,
     compatibility_fingerprint: [u8; 32],
+    executable_identity: CoreFileIdentity,
+    manifest_identity: CoreFileIdentity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,7 +145,7 @@ impl SupervisorState {
             .map_err(|_| "Core process generation exhausted".to_string())
     }
 
-    pub fn start(&self, _request: StartCoreRequest) -> Result<CoreProcessState, String> {
+    pub fn start(&self, request: StartCoreRequest) -> Result<CoreProcessState, String> {
         let mut guard = self
             .inner
             .lock()
@@ -150,22 +162,22 @@ impl SupervisorState {
             *guard = None;
         }
 
-        let verification = verify_bundled_core_binary()?;
-        if !verification.matches {
-            return Err(format!(
-                "Core binary hash mismatch: {}",
-                verification.actual_sha256
-            ));
-        }
+        #[cfg(not(windows))]
+        return Err("Frozen Core artifact admission requires Windows".to_string());
 
-        return Err("Core launch blocked: frozen RC2 Core binds HTTP API to 0.0.0.0 via VISION_HTTP_PORT and has no loopback-only VISION_HTTP_ADDR setting. Desktop will not launch Core until Core can keep the administrative API private without changing consensus behavior.".to_string());
+        #[cfg(windows)]
+        let mut resources = admit_bundled_core_resources()?;
+        #[cfg(windows)]
+        resources.revalidate()?;
 
-        #[allow(unreachable_code)]
-        let mut cfg = _request.config.unwrap_or(load_or_create_default_config()?);
+        let mut cfg = request.config.unwrap_or(load_or_create_default_config()?);
         if cfg.api_port == 0 {
             cfg.api_port = allocate_api_port()?;
         }
         validate_node_config(&cfg)?;
+        if !port_closed(cfg.api_port) {
+            return Err("Core API port is already occupied".to_string());
+        }
         ensure_dir(&cfg.data_dir)?;
         ensure_dir(&cfg.log_dir)?;
 
@@ -182,23 +194,24 @@ impl SupervisorState {
             .open(&stderr_log)
             .map_err(|e| format!("failed to open stderr log: {e}"))?;
 
-        let binary = bundled_core_binary_path();
         let seed_peers = cfg.seed_peers.join(";");
-        let advertised_port = cfg.advertised_port.unwrap_or(cfg.p2p_port);
         let generation = self.issue_generation()?;
-        let child = Command::new(binary)
+        #[cfg(windows)]
+        let binary = resources.executable_path();
+        #[cfg(not(windows))]
+        let binary = std::path::Path::new("");
+        let mut command = Command::new(binary);
+        command
             .env("VISION_DATA_DIR", &cfg.data_dir)
-            .env("VISION_HTTP_PORT", cfg.api_port.to_string())
+            .env(
+                &resources.manifest().api.http_port_environment,
+                cfg.api_port.to_string(),
+            )
             .env("VISION_P2P_PORT", cfg.p2p_port.to_string())
             .env("VISION_MINING", cfg.mining_enabled.to_string())
             .env("VISION_MINING_THREADS", "1")
             .env("VISION_MINER_ADDRESS", &cfg.miner_reward_address)
             .env("VISION_SEED_PEERS", seed_peers)
-            .env(
-                "VISION_P2P_ADVERTISED_HOST",
-                cfg.advertised_host.clone().unwrap_or_default(),
-            )
-            .env("VISION_P2P_ADVERTISED_PORT", advertised_port.to_string())
             .env(
                 "VISION_ALLOW_PRIVATE_PEERS",
                 (!matches!(cfg.mode, crate::config::NodeMode::InternetNetwork)).to_string(),
@@ -206,13 +219,37 @@ impl SupervisorState {
             .env("VISION_ALPHA_AIRDROP_ENABLED", "false")
             .env("RUST_LOG", "info")
             .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
+            .stderr(Stdio::from(stderr));
+        if let Some(advertised_host) = &cfg.advertised_host {
+            command
+                .env("VISION_P2P_ADVERTISED_HOST", advertised_host)
+                .env(
+                    "VISION_P2P_ADVERTISED_PORT",
+                    cfg.advertised_port.unwrap_or(cfg.p2p_port).to_string(),
+                );
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| format!("failed to start Vision Core: {e}"))?;
 
         let pid = child.id();
+        #[cfg(windows)]
+        let admission = resources
+            .verify_running_process_image(child.as_raw_handle())
+            .and_then(|_| wait_for_private_api_listener(&mut child, pid, cfg.api_port))
+            .and_then(|_| resources.revalidate());
+        #[cfg(test)]
+        if let Err(error) = &admission {
+            eprintln!("Core admission test failure: {error}");
+        }
+        if admission.is_err() {
+            terminate_unadmitted_child(&mut child);
+            return Err("Vision Core failed private artifact admission".to_string());
+        }
         let owned = OwnedCoreProcess {
             child,
+            #[cfg(windows)]
+            resources,
             pid,
             generation,
             started_at_unix: now_unix(),
@@ -304,14 +341,6 @@ impl SupervisorState {
     pub(crate) fn wallet_core_connection_authority(
         &self,
     ) -> Result<CoreConnectionAuthority<'_>, CoreAuthorityError> {
-        let compatibility = load_wallet_core_compatibility()
-            .map_err(|_| CoreAuthorityError::UnsupportedCompatibility)?;
-        let verification = verify_bundled_core_binary()
-            .map_err(|_| CoreAuthorityError::UnsupportedCompatibility)?;
-        if !verification.matches {
-            return Err(CoreAuthorityError::UnsupportedCompatibility);
-        }
-
         let mut guard = self
             .inner
             .lock()
@@ -325,6 +354,14 @@ impl SupervisorState {
         {
             return Err(CoreAuthorityError::CoreUnavailable);
         }
+        owned
+            .resources
+            .revalidate()
+            .map_err(|_| CoreAuthorityError::CoreIdentityChanged)?;
+        owned
+            .resources
+            .verify_running_process_image(owned.child.as_raw_handle())
+            .map_err(|_| CoreAuthorityError::CoreIdentityChanged)?;
 
         let held_process = duplicate_process_handle(owned.child.as_raw_handle())?;
         let process_created_at = process_creation_identity(&held_process)?;
@@ -339,7 +376,9 @@ impl SupervisorState {
             process_created_at,
             generation: owned.generation,
             api_port: owned.api_port,
-            compatibility_fingerprint: compatibility.manifest_sha256(),
+            compatibility_fingerprint: owned.resources.manifest_sha256(),
+            executable_identity: owned.resources.executable_identity(),
+            manifest_identity: owned.resources.manifest_identity(),
         };
         drop(guard);
         authority.validate()?;
@@ -367,6 +406,8 @@ impl CoreConnectionAuthority<'_> {
         hasher.update(&self.api_port.to_le_bytes());
         hasher.update(&[127, 0, 0, 1]);
         hasher.update(&self.compatibility_fingerprint);
+        hasher.update(&self.executable_identity.stable_bytes());
+        hasher.update(&self.manifest_identity.stable_bytes());
         *hasher.finalize().as_bytes()
     }
 
@@ -374,16 +415,6 @@ impl CoreConnectionAuthority<'_> {
         if !process_is_alive(&self.held_process)?
             || get_process_id_checked(&self.held_process)? != self.pid
             || process_creation_identity(&self.held_process)? != self.process_created_at
-        {
-            return Err(CoreAuthorityError::CoreIdentityChanged);
-        }
-
-        let compatibility = load_wallet_core_compatibility()
-            .map_err(|_| CoreAuthorityError::CoreIdentityChanged)?;
-        let verification =
-            verify_bundled_core_binary().map_err(|_| CoreAuthorityError::CoreIdentityChanged)?;
-        if !verification.matches
-            || compatibility.manifest_sha256() != self.compatibility_fingerprint
         {
             return Err(CoreAuthorityError::CoreIdentityChanged);
         }
@@ -406,6 +437,20 @@ impl CoreConnectionAuthority<'_> {
                 .is_some()
             || process_creation_identity_from_raw(current.child.as_raw_handle())?
                 != self.process_created_at
+        {
+            return Err(CoreAuthorityError::CoreIdentityChanged);
+        }
+        current
+            .resources
+            .revalidate()
+            .map_err(|_| CoreAuthorityError::CoreIdentityChanged)?;
+        current
+            .resources
+            .verify_running_process_image(current.child.as_raw_handle())
+            .map_err(|_| CoreAuthorityError::CoreIdentityChanged)?;
+        if current.resources.manifest_sha256() != self.compatibility_fingerprint
+            || current.resources.executable_identity() != self.executable_identity
+            || current.resources.manifest_identity() != self.manifest_identity
         {
             return Err(CoreAuthorityError::CoreIdentityChanged);
         }
@@ -480,6 +525,134 @@ fn process_is_alive(handle: &OwnedHandle) -> Result<bool, CoreAuthorityError> {
     Ok(code == STILL_ACTIVE as u32)
 }
 
+#[cfg(windows)]
+fn terminate_unadmitted_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(windows)]
+fn wait_for_private_api_listener(
+    child: &mut Child,
+    expected_pid: u32,
+    expected_port: u16,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if child
+            .try_wait()
+            .map_err(|_| "Core process status is unavailable".to_string())?
+            .is_some()
+        {
+            return Err("Core exited before private API admission".to_string());
+        }
+        let rows = tcp_owner_rows()?;
+        if private_listener_ready(&rows, expected_pid, expected_port)? {
+            return Ok(());
+        }
+        if !rows
+            .iter()
+            .any(|row| mib_port(row.dwLocalPort) == expected_port)
+        {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        return Err("Core API listener identity is not private".to_string());
+    }
+    Err("Core private API listener did not become ready".to_string())
+}
+
+#[cfg(windows)]
+fn private_listener_ready(
+    rows: &[MIB_TCPROW_OWNER_PID],
+    expected_pid: u32,
+    expected_port: u16,
+) -> Result<bool, String> {
+    let matching = rows
+        .iter()
+        .filter(|row| mib_port(row.dwLocalPort) == expected_port)
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return Ok(false);
+    }
+    let loopback = u32::from_ne_bytes([127, 0, 0, 1]);
+    if matching.len() == 1 {
+        let row = matching[0];
+        if row.dwState == 2
+            && row.dwLocalAddr == loopback
+            && row.dwOwningPid == expected_pid
+            && row.dwRemoteAddr == 0
+            && row.dwRemotePort == 0
+        {
+            return Ok(true);
+        }
+    }
+    Err("Core API listener identity is not private".to_string())
+}
+
+#[cfg(windows)]
+fn mib_port(value: u32) -> u16 {
+    u16::from_be(value as u16)
+}
+
+#[cfg(windows)]
+fn tcp_owner_rows() -> Result<Vec<MIB_TCPROW_OWNER_PID>, String> {
+    const MAX_TCP_TABLE_BYTES: usize = 4 * 1024 * 1024;
+    let mut size = 0_u32;
+    let first = unsafe {
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            0,
+            u32::from(AF_INET),
+            TCP_TABLE_OWNER_PID_ALL,
+            0,
+        )
+    };
+    if first != ERROR_INSUFFICIENT_BUFFER || size == 0 || size as usize > MAX_TCP_TABLE_BYTES {
+        return Err("Windows TCP ownership table is unavailable".to_string());
+    }
+
+    for _ in 0..2 {
+        let words = (size as usize).div_ceil(std::mem::size_of::<u64>());
+        let mut storage = vec![0_u64; words];
+        let result = unsafe {
+            GetExtendedTcpTable(
+                storage.as_mut_ptr().cast(),
+                &mut size,
+                0,
+                u32::from(AF_INET),
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            )
+        };
+        if result == ERROR_INSUFFICIENT_BUFFER {
+            if size as usize > MAX_TCP_TABLE_BYTES {
+                return Err("Windows TCP ownership table is unavailable".to_string());
+            }
+            continue;
+        }
+        if result != NO_ERROR {
+            return Err("Windows TCP ownership table is unavailable".to_string());
+        }
+
+        let bytes = storage.as_ptr().cast::<u8>();
+        let count = unsafe { *bytes.cast::<u32>() } as usize;
+        let required = count
+            .checked_mul(std::mem::size_of::<MIB_TCPROW_OWNER_PID>())
+            .and_then(|value| value.checked_add(std::mem::size_of::<u32>()))
+            .ok_or_else(|| "Windows TCP ownership table is invalid".to_string())?;
+        if required > size as usize || required > storage.len() * std::mem::size_of::<u64>() {
+            return Err("Windows TCP ownership table is invalid".to_string());
+        }
+        let row_ptr =
+            unsafe { bytes.add(std::mem::size_of::<u32>()) }.cast::<MIB_TCPROW_OWNER_PID>();
+        let rows = unsafe { std::slice::from_raw_parts(row_ptr, count) };
+        return Ok(rows.to_vec());
+    }
+    Err("Windows TCP ownership table is unavailable".to_string())
+}
+
 impl OwnedCoreProcess {
     fn state(&self, state: String, exit_code: Option<i32>) -> CoreProcessState {
         CoreProcessState {
@@ -507,6 +680,25 @@ pub fn tail_file(path: &PathBuf, max_bytes: usize) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    fn isolated_config(root: &std::path::Path) -> NodeConfig {
+        let api_port = allocate_api_port().unwrap();
+        let mut p2p_port = allocate_api_port().unwrap();
+        while p2p_port == api_port {
+            p2p_port = allocate_api_port().unwrap();
+        }
+        NodeConfig {
+            node_name: "Frozen Core admission qualification".to_string(),
+            api_port,
+            p2p_port,
+            data_dir: root.join("data"),
+            log_dir: root.join("logs"),
+            seed_peers: Vec::new(),
+            mining_enabled: false,
+            ..NodeConfig::default()
+        }
+    }
+
     #[test]
     fn stopped_state_has_no_pid() {
         let state = SupervisorState::stopped_state();
@@ -528,5 +720,93 @@ mod tests {
         let file = dir.path().join("log.txt");
         std::fs::write(&file, "0123456789").unwrap();
         assert_eq!(tail_file(&file, 4).unwrap(), "6789");
+    }
+
+    #[cfg(windows)]
+    fn listener_row(address: [u8; 4], port: u16, pid: u32) -> MIB_TCPROW_OWNER_PID {
+        MIB_TCPROW_OWNER_PID {
+            dwState: 2,
+            dwLocalAddr: u32::from_ne_bytes(address),
+            dwLocalPort: u32::from(port.to_be()),
+            dwRemoteAddr: 0,
+            dwRemotePort: 0,
+            dwOwningPid: pid,
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_listener_requires_one_exact_loopback_owner() {
+        let pid = 42;
+        let port = 7070;
+        assert_eq!(private_listener_ready(&[], pid, port), Ok(false));
+        assert_eq!(
+            private_listener_ready(&[listener_row([127, 0, 0, 1], port, pid)], pid, port),
+            Ok(true)
+        );
+        assert!(
+            private_listener_ready(&[listener_row([0, 0, 0, 0], port, pid)], pid, port).is_err()
+        );
+        assert!(
+            private_listener_ready(&[listener_row([127, 0, 0, 1], port, 99)], pid, port).is_err()
+        );
+        assert!(private_listener_ready(
+            &[
+                listener_row([127, 0, 0, 1], port, pid),
+                listener_row([0, 0, 0, 0], port, pid),
+            ],
+            pid,
+            port,
+        )
+        .is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "operator-only: launches the exact staged frozen Core with isolated data"]
+    fn frozen_core_launch_binds_private_api_and_invalidates_prior_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let supervisor = SupervisorState::default();
+        let first_root = directory.path().join("first");
+        let first_result = supervisor.start(StartCoreRequest {
+            config: Some(isolated_config(&first_root)),
+        });
+        if first_result.is_err() {
+            eprintln!(
+                "Core stdout: {}",
+                std::fs::read_to_string(first_root.join("logs/vision-core.stdout.log"))
+                    .unwrap_or_default()
+            );
+            eprintln!(
+                "Core stderr: {}",
+                std::fs::read_to_string(first_root.join("logs/vision-core.stderr.log"))
+                    .unwrap_or_default()
+            );
+        }
+        let first = first_result.unwrap();
+        assert_eq!(first.state, "running");
+        let first_authority = supervisor.wallet_core_connection_authority().unwrap();
+        first_authority.validate().unwrap();
+        let first_identity = first_authority.wallet_identity_fingerprint();
+
+        supervisor.stop().unwrap();
+        assert_eq!(
+            first_authority.validate(),
+            Err(CoreAuthorityError::CoreIdentityChanged)
+        );
+
+        let second = supervisor
+            .start(StartCoreRequest {
+                config: Some(isolated_config(&directory.path().join("second"))),
+            })
+            .unwrap();
+        assert_eq!(second.state, "running");
+        let second_authority = supervisor.wallet_core_connection_authority().unwrap();
+        second_authority.validate().unwrap();
+        assert_ne!(
+            first_identity,
+            second_authority.wallet_identity_fingerprint()
+        );
+        supervisor.stop().unwrap();
     }
 }

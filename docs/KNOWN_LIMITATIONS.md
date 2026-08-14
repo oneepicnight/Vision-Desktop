@@ -25,7 +25,10 @@
 - The NSIS package creates and removes the expected current-user Windows uninstall registration.
 - The branded interactive NSIS install, packaged-app launch, and retained-data uninstall lifecycle passed locally; clean-machine and cross-display-scale presentation remain unqualified.
 - Clean-machine, upgrade/downgrade, signing, and public-release qualification remain incomplete.
-- Real Core launch remains blocked for the bundled frozen RC2 manifest. A loopback-capable Core
-  source revision exists, but its exact Windows artifact has not completed independent Desktop
-  intake and therefore is not bundled or trusted.
+- Real Core launch supports only the exact admitted Vision Core v1.0.4 Windows artifact. Missing,
+  changed, rebuilt, repackaged, multi-linked, reparse-reachable, wrong-process, wrong-generation,
+  wildcard-bound, or wrong-owner inputs fail closed.
+- The admitted Core implementation and controlled launch test still require independent review;
+  an enabled wallet build, clean-device qualification, signing, distribution, and publication
+  remain separate blocked gates.
 - Public endpoint redaction is conservative and may require review before sharing reports.

@@ -1,11 +1,11 @@
 ﻿# Desktop To Core API
 
-Vision Desktop is designed to communicate with Vision Core through a private loopback HTTP API.
-The currently bundled frozen RC2 binary cannot satisfy that bind requirement, so the production
-supervisor refuses to launch it in real mode. Route support documented below describes the frozen
-RC2 source contract; it does not mean that the bundled binary is safe to launch.
+Vision Desktop communicates with the exact admitted Vision Core v1.0.4 artifact through a private
+loopback HTTP API. The supervisor permits real launch only after strict whole-manifest and executable
+admission, and it verifies the running image plus exact loopback listener ownership before releasing
+Core authority.
 
-Supported RC2 routes verified from source:
+Supported routes verified by the accepted artifact evidence and pinned runtime contract:
 
 - `GET /status`
 - `GET /peers`
@@ -15,16 +15,15 @@ Supported RC2 routes verified from source:
 - `GET /mining/info`
 - `POST /transactions`
 
-`/health`, `/height`, and `/block/last` are not registered in the RC2 API router and must not be assumed available.
+`/health`, `/height`, and `/block/last` are not part of the admitted contract and must not be assumed
+available.
 
-Important blocker: frozen RC2 Core binds the API to `0.0.0.0:<VISION_HTTP_PORT>` and has no
-loopback-only bind override. Real Core launch remains blocked for the current bundled manifest.
-An independently accepted loopback-capable Windows artifact is frozen by the hashes recorded in
-`FROZEN_CORE_ARTIFACT_INTEGRATION_DESIGN.md`, but it has not completed Desktop intake or runtime
-manifest integration. Desktop must not change its manifest, binary, launch policy, or production
-authority until that separately reviewed integration is complete.
+The admitted contract requires literal `127.0.0.1`, the configured `VISION_HTTP_PORT`, and Windows
+TCP owner-PID proof for the exact supervised generation. Wildcard, non-loopback, missing, duplicate,
+or wrong-owner listeners fail closed. The isolated artifact-admission implementation remains subject
+to independent Desktop review and does not itself authorize wallet exposure.
 
-The first desktop milestone uses these routes only after an exact accepted artifact is integrated:
+The node-management surface uses:
 
 - `/status`
 - `/peers`

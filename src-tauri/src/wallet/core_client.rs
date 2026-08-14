@@ -191,9 +191,6 @@ impl ReadAuthority for CoreConnectionAuthority<'_> {
 
 fn map_authority_error(error: CoreAuthorityError) -> WalletCoreClientError {
     match error {
-        CoreAuthorityError::UnsupportedCompatibility => {
-            WalletCoreClientError::CompatibilityUnavailable
-        }
         CoreAuthorityError::CoreUnavailable => WalletCoreClientError::CoreUnavailable,
         CoreAuthorityError::CoreIdentityChanged => WalletCoreClientError::CoreIdentityChanged,
     }
@@ -792,10 +789,10 @@ mod tests {
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n{body}",
                 body.len()
             );
-            stream.write_all(response.as_bytes()).unwrap();
             if let Some(generation) = after_write {
                 generation.store(8, Ordering::SeqCst);
             }
+            stream.write_all(response.as_bytes()).unwrap();
             thread::sleep(Duration::from_millis(100));
             request
         });
@@ -911,12 +908,12 @@ mod tests {
     }
 
     #[test]
-    fn current_manifest_cannot_construct_production_client() {
+    fn admitted_manifest_still_requires_a_live_supervised_core() {
         let supervisor = SupervisorState::default();
         let result = WalletCoreReadClient::from_supervisor(&supervisor);
         assert!(matches!(
             result,
-            Err(WalletCoreClientError::CompatibilityUnavailable)
+            Err(WalletCoreClientError::CoreUnavailable)
         ));
     }
 

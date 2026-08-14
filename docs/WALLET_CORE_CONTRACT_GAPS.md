@@ -4,28 +4,26 @@
 
 Vision Desktop must not create permanent addresses or sign transactions from historical examples that disagree with the supported Core implementation. This document records the compatibility evidence inspected before wallet custody work begins.
 
-## Bundled Desktop baseline
+## Admitted Desktop compatibility baseline
 
-The bundled manifest identifies:
+The runtime manifest identifies:
 
-- Core tag `vision-core-alpha-rc2`;
-- source commit `6a065df8206b50874029a27ee2b54dffae5e3cdd`;
+- Core release tag `vision-core-v1.0.4`;
+- source commit `890c98a02c7147e166805fe52002d22d1fcd81f9`;
+- source tree `2ae583bbfc887490b8af1398aead7b916796700c`;
 - consensus version `3`;
 - P2P protocol version `4`.
 
-The existing Desktop compatibility document lists `/balance/:address`, `/nonce/:address`, `/transaction/:txid`, and `POST /transactions`. Real Core launch remains blocked because the frozen binary cannot bind its private HTTP API to loopback only.
+The admitted contract includes `/balance/:address`, `/nonce/:address`, `/status`,
+`/transaction/:txid`, and `POST /transactions`. Real Core launch remains conditional on exact
+artifact admission, running-image identity, and private listener ownership.
 
 ## Current integration status
 
-Vision-Core source commit `223e2f745ebb5f7eb0d48c88397684b9037767bc` now contains separately
-reviewed wallet compatibility and loopback-binding work. Vision Desktop has not accepted a release
-artifact for that source. The prior Windows artifact remains ineligible because downstream
-qualification could not prove the complete deterministic lookup lifecycle and no-retry matrix.
-
-Accordingly, the current Desktop manifest remains frozen RC2, `PrivateLoopbackBinding` and
-`SubmissionRejectionSemantics` remain unmet in production policy, all three independent-review
-approval constants remain false, and no wallet command or frontend custody authority is enabled.
-Source acceptance must not be confused with artifact acceptance.
+The exact Windows artifact and its evidence package have been independently accepted and are pinned
+by the Desktop runtime manifest and admission implementation. Artifact admission does not activate
+wallet custody: all three independent-review approval constants remain false, the duplicate-key
+proof remains false, and no wallet command or frontend custody authority is enabled.
 
 ## Conflicting historical implementations
 
@@ -142,21 +140,21 @@ The recommended first-release source was approved on 2026-08-01. The internal ve
 
 ## Product decision: private Core connectivity
 
-The frozen RC2 executable cannot bind its HTTP API to loopback only. An end-to-end wallet must not expose signing-related account activity through an unnecessarily reachable Core API. The safe choices are:
+The admitted Vision Core v1.0.4 artifact provides the required literal-loopback API contract. Vision
+Desktop independently verifies the exact executable, running image, supervised generation, and
+listener owner before Core authority can be used. Wildcard or externally reachable API binding is
+never an accepted fallback, and Desktop does not add a proxy or sidecar around an unsafe listener.
 
-1. **Recommended:** keep real wallet submission disabled until a supported Vision-Core release provides loopback-only API binding, then update the Desktop compatibility manifest through an explicit integration task.
-2. Use the current externally reachable API. This is not recommended and must not be enabled by relaxing the existing Desktop safety restriction.
-3. Add a Desktop proxy or sidecar while leaving the underlying Core API externally reachable. This does not remove the original exposure and is not an adequate security boundary by itself.
-
-The recommended private-connectivity policy was approved on 2026-08-01. Vision Desktop will keep real submission disabled until a supported Vision-Core release provides loopback-only API binding and is accepted through an explicit compatibility-manifest integration task. Desktop continues to enforce the existing restriction and does not modify Vision-Core.
-
-The admission procedure for that future release is defined in
-`CORE_ARTIFACT_INTAKE_CHECKLIST.md`. No manifest or binary update may precede final independent
-artifact acceptance.
+The admission procedure is defined in `CORE_ARTIFACT_INTAKE_CHECKLIST.md`. Artifact admission closes
+the private-connectivity prerequisite only; it does not enable wallet commands, signing, submission,
+or frontend custody authority.
 
 ## Required approved vectors
 
-The `ReceiptAndHistory` compatibility gate is satisfied by the approved local-activity limitation, exact receipt observer, conservative confirmation language, and executable storage/transition tests. User-facing signing and submission remain disabled until the supported release and Desktop integration provide loopback-only private API operation.
+The `ReceiptAndHistory` compatibility gate is satisfied by the approved local-activity limitation,
+exact receipt observer, conservative confirmation language, and executable storage/transition tests.
+User-facing signing and submission remain disabled pending their separate exposure, activation, and
+qualification gates.
 
 The current recovery contract is the versioned encrypted portable artifact, not a recovery phrase. The approved Rust-only onboarding order requires a separately password-protected backup to be saved, read back, decrypted, and verified against the generated Vision address before the current-user-protected local vault may be stored. No frontend command or mnemonic behavior is implied. Any future mnemonic feature requires a separately approved phrase, normalization, checksum, and phrase-to-seed contract before it can be implemented.
 

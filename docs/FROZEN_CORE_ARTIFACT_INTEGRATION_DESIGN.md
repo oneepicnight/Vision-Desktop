@@ -65,8 +65,12 @@ is never rewritten by Desktop packaging.
 
 ### 2. Desktop runtime compatibility identity
 
-Desktop retains a small, reviewed JSON runtime manifest under source control. Its schema must use
-`deny_unknown_fields` for wallet compatibility data and must identify, at minimum:
+Desktop retains a small, reviewed JSON runtime manifest under source control. The complete document,
+not merely its wallet subsection, is one security object. It must contain a required top-level
+integer `schema_version` with one exact accepted value. A whole-document parser must reject unknown
+fields and duplicate member names at the root and recursively in every nested object before typed
+construction. Applying `deny_unknown_fields` only to a nested compatibility structure is
+insufficient. The manifest must identify, at minimum:
 
 - the exact accepted Core source commit and release identity from the evidence package;
 - the exact frozen executable SHA-256 and Windows x86-64 platform;
@@ -84,8 +88,20 @@ Desktop retains a small, reviewed JSON runtime manifest under source control. It
   executable.
 
 The runtime manifest must not include a URL, DNS host, arbitrary path, proxy, credential, retry
-policy, mutable channel, or wildcard compatibility range. Its complete byte representation is
-hashed and retained in every Core connection authority.
+policy, mutable channel, or wildcard compatibility range. Its exact reviewed bytes have a SHA-256
+pinned outside the mutable manifest in an ordinary reviewed Rust constant. The expected value must
+not come from the manifest itself, an environment variable, runtime configuration, an adjacent
+file, or an update channel. Before launch and before authority construction, Desktop hashes the
+complete raw document and requires equality with that independently reviewed constant. The pinned
+expected digest, verified actual digest, schema version, and manifest file identity are retained in
+the owned Core generation and every connection authority.
+
+The manifest is opened through the same non-reparse, share-restricted, handle-bound file policy as
+the executable. Parsing and hashing use bytes read from that held handle, not a path reopened after
+validation. Authority validation rewinds and rehashes the held manifest handle, compares it again
+with the external constant, and confirms the same volume/file identity. Any inability to repeat the
+comparison invalidates the generation. A different manifest that is syntactically and semantically
+valid but whose complete bytes were not independently pinned must fail closed.
 
 If the accepted evidence package does not prove one of these fields, implementation stops. It must
 not fill the gap from documentation memory, the current Core `main` branch, or a nearby build.
@@ -103,19 +119,43 @@ Tauri packaging may consume only the verified staging copy at
 truth. A missing file, changed file, inaccessible evidence manifest, or hash mismatch fails before
 the application build.
 
+At runtime, verification is handle-bound rather than path-bound. Desktop opens and retains every
+ancestor directory needed to resolve the packaged executable under the trusted resource root. It
+rejects an ancestor or final component that is a reparse point and rejects UNC, device, verbatim,
+remote, removable, or path-escaping forms. It opens the final executable with a Windows handle that
+permits reading but does not share write, delete, or rename authority. A pre-existing conflicting
+writer makes admission fail. The handle must identify a normal file on the expected fixed volume,
+with one link only; a hard-linked candidate is rejected even when the content hash matches.
+
+File size, SHA-256, volume identity, and 128-bit file identifier are obtained through that same held
+handle. The handle and guarded directory chain remain alive across process creation and for the
+complete owned Core process generation, preventing path replacement after verification.
+
 ### 4. Live Core process identity
 
-After runtime hash verification, the supervisor launches only the packaged path. It records a
-monotonic generation, PID, held process handle, creation identity, literal loopback port, and runtime
-manifest fingerprint. Connection authority remains valid only while all values continue to match.
+After handle-bound runtime verification, the supervisor launches only the guarded packaged path
+while the verified executable handle and guarded directory chain remain held. After process
+creation, Desktop obtains the running process image path from the held process handle, opens that
+resolved image using the same non-reparse and share-restricted policy, and compares its volume and
+file identifier with the verified executable handle. Path-string equality, PID equality, and a
+later path hash are not substitutes for file-identity equality. If Windows cannot prove that the
+running image resolves to the verified file identity, the process is terminated as the exact owned
+child and the generation fails closed before any API use.
+
+The supervisor records the verified executable handle and identity, guarded directory chain,
+manifest handle and identity, pinned manifest digest, monotonic generation, PID, held process
+handle, process creation identity, and literal loopback port. Connection authority remains valid
+only while all values continue to match. The executable and manifest handles remain non-cloneable,
+non-serializable, and private to the supervisor/authority boundary.
 
 ## Permitted implementation scope after design approval
 
 The first implementation commit may change only the narrow Core admission boundary:
 
 - `bundled/core/windows-x64/manifest.json`;
-- `src-tauri/src/core_manifest.rs` and its exact-schema/hash tests;
-- the existing supervisor launch gate and focused process-generation tests;
+- `src-tauri/src/core_manifest.rs`, a narrowly scoped handle-bound resource-verification module if
+  separation is required, and their exact-schema/hash/file-identity tests;
+- the existing supervisor launch gate and focused executable/process/generation tests;
 - packaging-time artifact retrieval or verification metadata and scripts;
 - Core compatibility, API, security, readiness, and release documentation.
 
@@ -136,7 +176,11 @@ must come from the accepted Core manifest and source evidence. Desktop must not 
 
 Before reporting the process usable, Desktop must prove:
 
-- the binary and runtime manifest were verified before process creation;
+- the binary and runtime manifest were verified through held non-reparse handles before process
+  creation;
+- the exact running process image file identity equals the verified executable handle identity;
+- the executable and manifest cannot be written, renamed, deleted, or substituted while the owned
+  generation exists;
 - the requested API port was allocated for loopback use and was not already occupied;
 - no wildcard, IPv6 wildcard, LAN, public, DNS-derived, or hostname listener exists for the API;
 - the held process is still alive and retains the recorded creation identity;
@@ -150,8 +194,10 @@ identity. Both are required on the same supervised generation.
 The supervisor must fail closed and revoke the generation when:
 
 - Core exits, crashes, stops, or restarts;
-- the held handle, PID, creation identity, executable identity, port, or manifest fingerprint
-  differs;
+- the held handle, PID, creation identity, executable volume/file identity, running image identity,
+  port, manifest volume/file identity, pinned manifest digest, or schema version differs;
+- an executable or manifest path contains or becomes a reparse point, has multiple hard links, or
+  cannot remain held against write, rename, and delete replacement;
 - a competing or stale listener answers;
 - the process stops owning the full connected TCP tuple;
 - the status contract or compatibility version changes; or
@@ -212,17 +258,23 @@ wallet.
    from that verified package.
 4. Copy the frozen executable to a new immutable staging directory and verify size and hash before
    and after the copy.
-5. Add the exact Desktop runtime compatibility manifest and strict parser tests.
-6. Replace the RC2-only launch refusal with an exact admitted-artifact policy; retain a fail-closed
+5. Define and independently review the complete Desktop runtime-manifest bytes, exact
+   `schema_version`, and full-document SHA-256 constant. Add recursive duplicate-key and
+   unknown-field rejection.
+6. Add handle-bound executable and manifest verification. Keep their guarded directory chains and
+   share-restricted handles alive across process creation and the owned generation, and bind the
+   process image file identity to the verified executable identity.
+7. Replace the RC2-only launch refusal with an exact admitted-artifact policy; retain a fail-closed
    refusal for every other manifest or binary.
-7. Add controlled launch, listener ownership, peer tuple, generation, restart, stale-listener, and
+8. Add controlled launch, listener ownership, peer tuple, generation, restart, stale-listener, and
    compatibility regressions.
-8. Run the isolated Desktop compatibility check without production Core data or wallet custody
+9. Run the isolated Desktop compatibility check without production Core data or wallet custody
    state.
-9. Commit only the reviewed source, manifest, scripts, tests, and documentation. Do not force-add the
+10. Commit only the reviewed source, manifest, scripts, tests, and documentation. Do not force-add the
    executable.
-10. Submit the exact commit, tree, Desktop runtime-manifest hash, accepted Core hashes, staging-copy
-    hash, and evidence inventory for independent review.
+11. Submit the exact commit, tree, pinned and actual Desktop runtime-manifest hash, accepted Core
+    hashes, executable and manifest file identities, staging-copy hash, and evidence inventory for
+    independent review.
 
 Independent acceptance of that commit authorizes only preparation of the later unpublished atomic
 wallet candidate described by `WALLET_ATOMIC_EXPOSURE_DESIGN.md`. It does not authorize that
@@ -245,8 +297,14 @@ git diff --check
 
 It must also run focused tests for:
 
-- runtime-manifest exact parsing and unknown-field rejection;
+- runtime-manifest exact parsing and whole-document unknown-field rejection;
+- wrong or missing top-level schema version, unknown root and nested fields, duplicate root and
+  nested fields, valid-but-unapproved complete manifest bytes, pinned-digest mismatch, manifest
+  replacement, and failure to revalidate the held manifest;
 - accepted binary, wrong binary, missing binary, changed manifest, and wrong platform;
+- executable ancestor and final-component reparse points, hard links, pre-existing write handles,
+  path swaps before and during process creation, rename/delete replacement attempts, post-hash
+  replacement, process-image/file-identity mismatch, and inability to query the live image identity;
 - literal-loopback launch and absence of wildcard listeners;
 - exact PID, creation identity, held handle, connected tuple, and generation;
 - stopped, crashed, restarted, stale, wrong-PID, occupied-port, and substituted-listener cases;
@@ -285,8 +343,13 @@ it could strand custody. It must be part of the complete atomic exposure rollbac
 Stop the integration without changing the runtime manifest or launch policy if:
 
 - either frozen hash differs, is missing, or cannot be recomputed;
+- the complete Desktop runtime-manifest hash is not independently pinned outside the manifest, its
+  schema version differs, or whole-document unknown/duplicate-field rejection is unavailable;
 - the source commit, tree, artifact size, platform, inventory, or verdict is absent or inconsistent;
 - the artifact or accepted manifest was rebuilt, re-signed, repacked into changed bytes, or edited;
+- the executable or manifest cannot be opened and retained without reparse traversal or write,
+  rename, and delete sharing, has multiple hard links, or its volume/file identity cannot be proven;
+- the running process image identity cannot be matched to the verified executable handle;
 - the Desktop runtime contract requires an unreviewed Core behavior or field;
 - loopback-only binding or same-connection peer ownership cannot be proven;
 - a test accesses production data or an unrelated Core process;

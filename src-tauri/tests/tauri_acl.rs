@@ -495,6 +495,7 @@ fn atomic_wallet_surface_preserves_private_custody_authority() {
     assert!(cargo_manifest.contains("tauri = { version = \"=2.11.5\", features = [\"test\"] }"));
     assert!(build_source.contains("CARGO_FEATURE_WALLET_LAYER_A_QUALIFICATION"));
     assert!(build_source.contains("embed_resource::compile_for_everything("));
+    assert!(build_source.contains("WindowsAttributes::new_without_app_manifest()"));
     assert!(!build_source.contains("/MANIFESTINPUT:"));
     assert!(!build_source.contains("/MANIFEST:EMBED"));
     assert!(cargo_manifest.contains("wallet-layer-b-qualification = []"));

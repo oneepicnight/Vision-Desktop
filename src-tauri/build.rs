@@ -1,4 +1,4 @@
-﻿fn main() {
+fn main() {
     const APPLICATION_COMMANDS: &[&str] = &[
         "verify_core_binary",
         "get_core_manifest",
@@ -56,6 +56,14 @@
         app_manifest
     };
     let attributes = tauri_build::Attributes::new().app_manifest(app_manifest);
+    #[cfg(target_os = "windows")]
+    let attributes = if layer_a {
+        // The Layer A resource above supplies the same Common Controls v6 manifest to every
+        // qualification target. Keep Tauri's icon/version resource but omit its second manifest.
+        attributes.windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest())
+    } else {
+        attributes
+    };
 
     tauri_build::try_build(attributes).expect("failed to build Vision Desktop Tauri context");
 }

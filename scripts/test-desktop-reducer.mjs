@@ -52,7 +52,8 @@ try {
   await import(pathToFileURL(path.join(outRoot, "src/features/diagnostics/diagnosticsStatus.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/mining/miningStatus.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/marketplace/marketplaceStatus.test.js")));
-  await import(pathToFileURL(path.join(outRoot, "src/features/wallet/walletPresentation.test.js")));
+  const walletPresentationTests = await import(pathToFileURL(path.join(outRoot, "src/features/wallet/walletPresentation.test.js")));
+  await walletPresentationTests.runWalletPresentationAsyncTests();
   console.log("Desktop state transition tests passed");
 } finally {
   await rm(outRoot, { recursive: true, force: true });

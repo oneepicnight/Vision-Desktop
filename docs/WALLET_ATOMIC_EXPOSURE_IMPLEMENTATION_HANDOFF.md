@@ -72,6 +72,14 @@ Every native failure clears the complete public wallet presentation. A monotonic
 captured by each request; blur, visibility, teardown, explicit clearing, or a native failure advances
 that epoch so a stale asynchronous completion cannot repopulate unlocked or spending state.
 
+Native selection, custody, unlock, and final-confirmation windows use a single-operation modal focus
+lease. Only blur/focus transitions while the exact awaited native operation owns that lease preserve
+its continuation. Focus must return to the visible WebView within a bounded interval before the
+result is accepted. Hidden visibility, page teardown, explicit clearing, a missing focus return, a
+stale epoch, or any blur outside an active lease still invalidates immediately. Create and restore
+share one tested selection-to-lifecycle workflow so native selection cannot invalidate its own
+continuation and cannot be replayed into a later operation.
+
 The frontend contains no password, recovery-credential, seed, private-key, signature, signed-byte,
 filesystem-path, path capability, clipboard, browser-storage, direct network, or direct Tauri-core
 custody path.

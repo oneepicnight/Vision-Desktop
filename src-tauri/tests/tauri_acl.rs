@@ -751,6 +751,14 @@ fn atomic_wallet_surface_preserves_private_custody_authority() {
     }
     assert!(wallet_panel_source.contains("presentationEpochRef.current.invalidate()"));
     assert!(wallet_panel_source.contains("presentationEpochRef.current.isCurrent(epoch)"));
+    assert!(wallet_panel_source.contains("presentationEpochRef.current.observeWindowBlur()"));
+    assert!(wallet_panel_source.contains("presentationEpochRef.current.observeWindowFocus()"));
+    assert_eq!(
+        wallet_panel_source
+            .match_indices("runWalletNativeSelectionWorkflow(")
+            .count(),
+        2
+    );
     assert_eq!(
         wallet_panel_source.match_indices("catch (reason)").count(),
         wallet_panel_source

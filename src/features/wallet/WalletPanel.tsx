@@ -38,6 +38,8 @@ import {
   WalletPresentationEpoch,
   observationLabel,
   pendingReconciliationMessage,
+  runWalletNativeModal,
+  runWalletNativeSelectionWorkflow,
   spendingControlsEnabled,
   submissionOutcomeMessage,
   validTransferDraft,
@@ -101,6 +103,24 @@ export function WalletPanel() {
     setNotice("Wallet presentation cleared. Refresh status to continue.");
   }, []);
 
+  const awaitWalletWindowFocus = React.useCallback(async () => {
+    if (document.visibilityState !== "visible") return false;
+    if (document.hasFocus()) return true;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (focused: boolean) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener("focus", onFocus);
+        window.clearTimeout(timeout);
+        resolve(focused && document.visibilityState === "visible" && document.hasFocus());
+      };
+      const onFocus = () => finish(true);
+      const timeout = window.setTimeout(() => finish(false), 1_000);
+      window.addEventListener("focus", onFocus, { once: true });
+    });
+  }, []);
+
   const failNativeOperation = React.useCallback((reason: unknown, epoch: number) => {
     if (!presentationEpochRef.current.isCurrent(epoch)) return;
     clearPublicPresentation();
@@ -132,20 +152,24 @@ export function WalletPanel() {
   React.useEffect(() => {
     void loadStatus();
     const clear = () => clearPublicPresentation();
+    const onBlur = () => {
+      if (!presentationEpochRef.current.observeWindowBlur()) clear();
+    };
     const onVisibility = () => {
       if (document.visibilityState === "hidden") clear();
       else void loadStatus();
     };
     const onFocus = () => {
+      if (presentationEpochRef.current.observeWindowFocus()) return;
       clear();
       if (busyRef.current == null) void loadStatus();
     };
-    window.addEventListener("blur", clear);
+    window.addEventListener("blur", onBlur);
     window.addEventListener("focus", onFocus);
     window.addEventListener("pagehide", clear);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      window.removeEventListener("blur", clear);
+      window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("pagehide", clear);
       document.removeEventListener("visibilitychange", onVisibility);
@@ -160,13 +184,18 @@ export function WalletPanel() {
     setError(null);
     setPreview(null);
     try {
-      await walletSelectRecoveryDestination();
-      if (!presentationEpochRef.current.isCurrent(epoch)) return;
-      const next = await walletCreate({
-        wallet_id: walletId,
-        label: walletLabel,
-      });
-      if (!presentationEpochRef.current.isCurrent(epoch)) return;
+      const created = await runWalletNativeSelectionWorkflow(
+        presentationEpochRef.current,
+        epoch,
+        walletSelectRecoveryDestination,
+        () => walletCreate({ wallet_id: walletId, label: walletLabel }),
+        awaitWalletWindowFocus,
+      );
+      if (!created.completed) {
+        clearPublicPresentation();
+        return;
+      }
+      const next = created.value;
       setStatus(next);
       setActivity(null);
       setWalletId("");
@@ -186,13 +215,18 @@ export function WalletPanel() {
     setError(null);
     setPreview(null);
     try {
-      await walletSelectRecoverySource();
-      if (!presentationEpochRef.current.isCurrent(epoch)) return;
-      const next = await walletRestore({
-        wallet_id: walletId,
-        label: walletLabel,
-      });
-      if (!presentationEpochRef.current.isCurrent(epoch)) return;
+      const restored = await runWalletNativeSelectionWorkflow(
+        presentationEpochRef.current,
+        epoch,
+        walletSelectRecoverySource,
+        () => walletRestore({ wallet_id: walletId, label: walletLabel }),
+        awaitWalletWindowFocus,
+      );
+      if (!restored.completed) {
+        clearPublicPresentation();
+        return;
+      }
+      const next = restored.value;
       setStatus(next);
       setActivity(null);
       setWalletId("");
@@ -211,8 +245,17 @@ export function WalletPanel() {
     setOperation("unlock");
     setError(null);
     try {
-      const next = await walletUnlock();
-      if (!presentationEpochRef.current.isCurrent(epoch)) return;
+      const unlocked = await runWalletNativeModal(
+        presentationEpochRef.current,
+        epoch,
+        walletUnlock,
+        awaitWalletWindowFocus,
+      );
+      if (!unlocked.completed) {
+        clearPublicPresentation();
+        return;
+      }
+      const next = unlocked.value;
       const nextActivity = await walletListActivity();
       if (!presentationEpochRef.current.isCurrent(epoch)) return;
       setStatus(next);
@@ -296,8 +339,17 @@ export function WalletPanel() {
     // reconciled view first so a failed follow-up discovery can never re-enable spending.
     setActivity(null);
     try {
-      const next = await walletConfirmAndSubmitTransfer(handle);
-      if (!presentationEpochRef.current.isCurrent(epoch)) return;
+      const submitted = await runWalletNativeModal(
+        presentationEpochRef.current,
+        epoch,
+        () => walletConfirmAndSubmitTransfer(handle),
+        awaitWalletWindowFocus,
+      );
+      if (!submitted.completed) {
+        clearPublicPresentation();
+        return;
+      }
+      const next = submitted.value;
       const nextActivity = await walletListActivity();
       if (!presentationEpochRef.current.isCurrent(epoch)) return;
       setOutcome(next);

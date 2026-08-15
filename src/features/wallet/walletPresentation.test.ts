@@ -1,6 +1,8 @@
 import {
   WalletPresentationEpoch,
   pendingReconciliationMessage,
+  runWalletNativeModal,
+  runWalletNativeSelectionWorkflow,
   spendingControlsEnabled,
   validTransferDraft,
   validWalletIdentity,
@@ -41,6 +43,94 @@ presentationEpoch.invalidate();
 assert(!presentationEpoch.isCurrent(firstRequest), "lifecycle clearing rejects stale completion");
 const secondRequest = presentationEpoch.capture();
 assert(presentationEpoch.isCurrent(secondRequest), "new work uses the advanced epoch");
+
+async function nativeSelectionThenLifecycleContinues(operationName: "create" | "restore") {
+  const tracker = new WalletPresentationEpoch();
+  const epoch = tracker.capture();
+  let lifecycleInvocations = 0;
+  const lifecycle = await runWalletNativeSelectionWorkflow(
+    tracker,
+    epoch,
+    async () => {
+      assert(tracker.observeWindowBlur(), "the operation-owned native dialog may take focus");
+      assert(tracker.isCurrent(epoch), "expected modal blur does not stale its continuation");
+      assert(tracker.observeWindowFocus(), "focus restoration is paired with the active modal");
+      return { selected: true as const };
+    },
+    async () => {
+      lifecycleInvocations += 1;
+      assert(tracker.observeWindowBlur(), "the native custody ceremony may take focus");
+      assert(tracker.observeWindowFocus(), "custody ceremony focus is restored");
+      return { locked: true as const };
+    },
+    async () => true,
+  );
+  assert(lifecycle.completed, `${operationName} continues after native selection`);
+  assert(lifecycleInvocations === 1, `${operationName} is invoked exactly once`);
+}
+
+async function unrelatedFocusLossStillFailsClosed() {
+  const tracker = new WalletPresentationEpoch();
+  const epoch = tracker.capture();
+  assert(!tracker.observeWindowBlur(), "blur without an owned native modal is not exempt");
+  tracker.invalidate();
+  let invoked = false;
+  const result = await runWalletNativeModal(
+    tracker,
+    epoch,
+    async () => {
+      invoked = true;
+    },
+    async () => true,
+  );
+  assert(!result.completed, "stale continuation remains rejected");
+  assert(!invoked, "stale work cannot invoke a later lifecycle command");
+}
+
+async function hiddenPageInvalidatesAnActiveNativeModal() {
+  const tracker = new WalletPresentationEpoch();
+  const epoch = tracker.capture();
+  const result = await runWalletNativeModal(
+    tracker,
+    epoch,
+    async () => {
+      assert(tracker.observeWindowBlur(), "active modal owns its initial focus transition");
+      tracker.invalidate();
+      return true;
+    },
+    async () => false,
+  );
+  assert(!result.completed, "visibility or teardown invalidation wins over modal completion");
+}
+
+async function missingFocusReturnBlocksLifecycleContinuation() {
+  const tracker = new WalletPresentationEpoch();
+  const epoch = tracker.capture();
+  let lifecycleInvocations = 0;
+  const result = await runWalletNativeSelectionWorkflow(
+    tracker,
+    epoch,
+    async () => {
+      assert(tracker.observeWindowBlur(), "selection owns the native focus transition");
+      return { selected: true as const };
+    },
+    async () => {
+      lifecycleInvocations += 1;
+    },
+    async () => false,
+  );
+  assert(!result.completed, "missing focus restoration fails closed");
+  assert(lifecycleInvocations === 0, "create or restore is not invoked without restored focus");
+  assert(!tracker.isCurrent(epoch), "failed focus restoration invalidates the captured epoch");
+}
+
+export async function runWalletPresentationAsyncTests() {
+  await nativeSelectionThenLifecycleContinues("create");
+  await nativeSelectionThenLifecycleContinues("restore");
+  await unrelatedFocusLossStillFailsClosed();
+  await hiddenPageInvalidatesAnActiveNativeModal();
+  await missingFocusReturnBlocksLifecycleContinuation();
+}
 
 assert(
   pendingReconciliationMessage({ state: "accepted_recording_pending", transaction_id: "1".repeat(64) })?.includes("Do not resubmit"),

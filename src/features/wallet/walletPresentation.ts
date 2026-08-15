@@ -56,8 +56,17 @@ const KNOWN_ERROR_MESSAGES = {
 
 export type WalletKnownErrorCode = keyof typeof KNOWN_ERROR_MESSAGES;
 
+export type WalletNativeModalResult<T> =
+  | { completed: true; value: T }
+  | { completed: false };
+
 export class WalletPresentationEpoch {
   private current = 0;
+  private activeNativeModal: {
+    lease: object;
+    epoch: number;
+    focusAway: boolean;
+  } | null = null;
 
   capture() {
     return this.current;
@@ -65,11 +74,93 @@ export class WalletPresentationEpoch {
 
   invalidate() {
     this.current += 1;
+    this.activeNativeModal = null;
   }
 
   isCurrent(captured: number) {
     return captured === this.current;
   }
+
+  beginNativeModal(captured: number) {
+    if (!this.isCurrent(captured) || this.activeNativeModal != null) return null;
+    const lease = Object.freeze({});
+    this.activeNativeModal = { lease, epoch: captured, focusAway: false };
+    return lease;
+  }
+
+  observeWindowBlur() {
+    const active = this.activeNativeModal;
+    if (active == null || !this.isCurrent(active.epoch)) return false;
+    active.focusAway = true;
+    return true;
+  }
+
+  observeWindowFocus() {
+    const active = this.activeNativeModal;
+    if (active == null || !this.isCurrent(active.epoch)) return false;
+    active.focusAway = false;
+    return true;
+  }
+
+  completeNativeModal(lease: object, focusRestored: boolean) {
+    const active = this.activeNativeModal;
+    const valid =
+      active != null &&
+      active.lease === lease &&
+      this.isCurrent(active.epoch) &&
+      !active.focusAway &&
+      focusRestored;
+    if (active?.lease === lease) this.activeNativeModal = null;
+    if (!valid) this.invalidate();
+    return valid;
+  }
+
+  abandonNativeModal(lease: object) {
+    if (this.activeNativeModal?.lease === lease) this.activeNativeModal = null;
+  }
+}
+
+export async function runWalletNativeModal<T>(
+  presentation: WalletPresentationEpoch,
+  captured: number,
+  operation: () => Promise<T>,
+  awaitFocusRestoration: () => Promise<boolean>,
+): Promise<WalletNativeModalResult<T>> {
+  const lease = presentation.beginNativeModal(captured);
+  if (lease == null) return { completed: false };
+  try {
+    const value = await operation();
+    const focusRestored = await awaitFocusRestoration();
+    if (focusRestored) presentation.observeWindowFocus();
+    return presentation.completeNativeModal(lease, focusRestored)
+      ? { completed: true, value }
+      : { completed: false };
+  } catch (error) {
+    presentation.abandonNativeModal(lease);
+    throw error;
+  }
+}
+
+export async function runWalletNativeSelectionWorkflow<T>(
+  presentation: WalletPresentationEpoch,
+  captured: number,
+  selection: () => Promise<unknown>,
+  lifecycle: () => Promise<T>,
+  awaitFocusRestoration: () => Promise<boolean>,
+): Promise<WalletNativeModalResult<T>> {
+  const selected = await runWalletNativeModal(
+    presentation,
+    captured,
+    selection,
+    awaitFocusRestoration,
+  );
+  if (!selected.completed) return { completed: false };
+  return runWalletNativeModal(
+    presentation,
+    captured,
+    lifecycle,
+    awaitFocusRestoration,
+  );
 }
 
 export function walletErrorCode(error: unknown): WalletKnownErrorCode | "wallet_unavailable" {

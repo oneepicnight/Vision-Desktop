@@ -81,6 +81,17 @@ impl<'de> Deserialize<'de> for WalletLabel {
 pub(in crate::wallet) struct RecoverySelectionHandle(String);
 
 impl RecoverySelectionHandle {
+    fn from_native(value: &str) -> Result<Self, PublicRequestError> {
+        if value.len() != RECOVERY_SELECTION_HANDLE_BYTES
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(PublicRequestError::InvalidRequest);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
     pub(in crate::wallet) fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -203,10 +214,30 @@ impl WalletTransferPreviewRequest {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::wallet) struct WalletCreateRequest {
+pub(in crate::wallet) struct WalletCreateMetadata {
     pub(in crate::wallet) wallet_id: WalletId,
     pub(in crate::wallet) label: WalletLabel,
-    pub(in crate::wallet) recovery_destination_handle: RecoverySelectionHandle,
+}
+
+impl WalletCreateMetadata {
+    pub(in crate::wallet) fn attach_native_selection(
+        self,
+        recovery_destination_handle: &str,
+    ) -> Result<WalletCreateRequest, PublicRequestError> {
+        Ok(WalletCreateRequest {
+            wallet_id: self.wallet_id,
+            label: self.label,
+            recovery_destination_handle: RecoverySelectionHandle::from_native(
+                recovery_destination_handle,
+            )?,
+        })
+    }
+}
+
+pub(in crate::wallet) struct WalletCreateRequest {
+    wallet_id: WalletId,
+    label: WalletLabel,
+    recovery_destination_handle: RecoverySelectionHandle,
 }
 
 impl WalletCreateRequest {
@@ -217,10 +248,28 @@ impl WalletCreateRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::wallet) struct WalletRestoreRequest {
+pub(in crate::wallet) struct WalletRestoreMetadata {
     pub(in crate::wallet) wallet_id: WalletId,
     pub(in crate::wallet) label: WalletLabel,
-    pub(in crate::wallet) recovery_source_handle: RecoverySelectionHandle,
+}
+
+impl WalletRestoreMetadata {
+    pub(in crate::wallet) fn attach_native_selection(
+        self,
+        recovery_source_handle: &str,
+    ) -> Result<WalletRestoreRequest, PublicRequestError> {
+        Ok(WalletRestoreRequest {
+            wallet_id: self.wallet_id,
+            label: self.label,
+            recovery_source_handle: RecoverySelectionHandle::from_native(recovery_source_handle)?,
+        })
+    }
+}
+
+pub(in crate::wallet) struct WalletRestoreRequest {
+    wallet_id: WalletId,
+    label: WalletLabel,
+    recovery_source_handle: RecoverySelectionHandle,
 }
 
 impl WalletRestoreRequest {
@@ -280,18 +329,17 @@ mod tests {
 
     const HANDLE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    fn parse_create(value: &str) -> Result<WalletCreateRequest, PublicRequestError> {
+    fn parse_create(value: &str) -> Result<WalletCreateMetadata, PublicRequestError> {
         serde_json::from_str(value).map_err(|_| PublicRequestError::InvalidRequest)
     }
 
     #[test]
     fn accepts_only_canonical_public_create_metadata() {
-        let request = parse_create(&format!(
-            r#"{{"wallet_id":"operator_1","label":"Operator Wallet","recovery_destination_handle":"{HANDLE}"}}"#
-        ))
-        .unwrap();
+        let request =
+            parse_create(r#"{"wallet_id":"operator_1","label":"Operator Wallet"}"#).unwrap();
         assert_eq!(request.wallet_id.as_str(), "operator_1");
         assert_eq!(request.label.as_str(), "Operator Wallet");
+        let request = request.attach_native_selection(HANDLE).unwrap();
         assert_eq!(request.recovery_destination_handle.as_str(), HANDLE);
         assert_eq!(PublicRequestError::InvalidRequest.code(), "invalid_request");
     }
@@ -299,15 +347,10 @@ mod tests {
     #[test]
     fn rejects_unknown_duplicate_and_secret_fields_with_one_fixed_error() {
         for request in [
-            format!(
-                r#"{{"wallet_id":"a","label":"A","recovery_destination_handle":"{HANDLE}","extra":true}}"#
-            ),
-            format!(
-                r#"{{"wallet_id":"a","wallet_id":"b","label":"A","recovery_destination_handle":"{HANDLE}"}}"#
-            ),
-            format!(
-                r#"{{"wallet_id":"a","label":"A","recovery_destination_handle":"{HANDLE}","password":"forbidden"}}"#
-            ),
+            r#"{"wallet_id":"a","label":"A","extra":true}"#.to_string(),
+            r#"{"wallet_id":"a","wallet_id":"b","label":"A"}"#.to_string(),
+            r#"{"wallet_id":"a","label":"A","password":"forbidden"}"#.to_string(),
+            format!(r#"{{"wallet_id":"a","label":"A","recovery_destination_handle":"{HANDLE}"}}"#),
         ] {
             assert_eq!(
                 parse_create(request.as_str()).err().unwrap(),
@@ -325,24 +368,32 @@ mod tests {
             ("good", "Good", HANDLE.to_ascii_uppercase()),
             ("good", "Good", "a".repeat(63)),
         ] {
-            let request = format!(
-                r#"{{"wallet_id":{wallet_id:?},"label":{label:?},"recovery_destination_handle":{handle:?}}}"#
-            );
-            assert_eq!(
-                parse_create(request.as_str()).err().unwrap(),
-                PublicRequestError::InvalidRequest
-            );
+            let request = format!(r#"{{"wallet_id":{wallet_id:?},"label":{label:?}}}"#);
+            if wallet_id == "good" && label == "Good" {
+                assert_eq!(
+                    parse_create(request.as_str())
+                        .unwrap()
+                        .attach_native_selection(handle.as_str())
+                        .err()
+                        .unwrap(),
+                    PublicRequestError::InvalidRequest
+                );
+            } else {
+                assert_eq!(
+                    parse_create(request.as_str()).err().unwrap(),
+                    PublicRequestError::InvalidRequest
+                );
+            }
         }
     }
 
     #[test]
     fn restore_schema_contains_no_window_or_secret_field() {
-        let request: WalletRestoreRequest = serde_json::from_str(&format!(
-            r#"{{"wallet_id":"restored","label":"Restored","recovery_source_handle":"{HANDLE}"}}"#
-        ))
-        .unwrap();
-        assert_eq!(request.wallet_id.as_str(), "restored");
-        assert_eq!(request.label.as_str(), "Restored");
+        let metadata: WalletRestoreMetadata =
+            serde_json::from_str(r#"{"wallet_id":"restored","label":"Restored"}"#).unwrap();
+        assert_eq!(metadata.wallet_id.as_str(), "restored");
+        assert_eq!(metadata.label.as_str(), "Restored");
+        let request = metadata.attach_native_selection(HANDLE).unwrap();
         assert_eq!(request.recovery_source_handle.as_str(), HANDLE);
     }
 
@@ -396,5 +447,7 @@ mod tests {
         let request_source = include_str!("public_request.rs");
         let production = request_source.split("#[cfg(test)]").next().unwrap();
         assert!(!production.contains("derive(Debug, Deserialize)"));
+        assert!(!production.contains("pub(in crate::wallet) recovery_destination_handle"));
+        assert!(!production.contains("pub(in crate::wallet) recovery_source_handle"));
     }
 }

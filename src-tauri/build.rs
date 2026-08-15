@@ -38,15 +38,15 @@
 
     #[cfg(target_os = "windows")]
     if layer_a {
-        let test_manifest =
-            std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
-                .join("windows-test-common-controls.manifest");
-        println!("cargo:rerun-if-changed={}", test_manifest.display());
-        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
-        println!(
-            "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
-            test_manifest.display()
-        );
+        // Generated-wrapper tests link Tauri's dialog path into a Rust test executable. Compile
+        // exactly one Common Controls v6 resource specifically for test targets; injecting linker
+        // manifest switches alongside Tauri's resource produces a duplicate resource (CVT1100).
+        embed_resource::compile_for_everything(
+            "windows-test-common-controls.rc",
+            embed_resource::NONE,
+        )
+        .manifest_required()
+        .expect("failed to compile the Layer A Windows test manifest");
     }
 
     let app_manifest = tauri_build::AppManifest::new().commands(APPLICATION_COMMANDS);

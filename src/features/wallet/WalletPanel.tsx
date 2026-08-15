@@ -35,6 +35,7 @@ import type {
   WalletTransferPreview,
 } from "../../types/wallet";
 import {
+  WalletPresentationEpoch,
   observationLabel,
   pendingReconciliationMessage,
   spendingControlsEnabled,
@@ -79,6 +80,7 @@ export function WalletPanel() {
   const [notice, setNotice] = React.useState("Secure wallet status has not been loaded.");
   const [error, setError] = React.useState<string | null>(null);
   const busyRef = React.useRef<WalletOperation | null>(null);
+  const presentationEpochRef = React.useRef(new WalletPresentationEpoch());
 
   const setOperation = React.useCallback((operation: WalletOperation | null) => {
     busyRef.current = operation;
@@ -86,6 +88,7 @@ export function WalletPanel() {
   }, []);
 
   const clearPublicPresentation = React.useCallback(() => {
+    presentationEpochRef.current.invalidate();
     setStatus(null);
     setActivity(null);
     setPreview(null);
@@ -98,34 +101,33 @@ export function WalletPanel() {
     setNotice("Wallet presentation cleared. Refresh status to continue.");
   }, []);
 
-  const loadActivity = React.useCallback(async () => {
-    const next = await walletListActivity();
-    setActivity(next);
-    return next;
-  }, []);
+  const failNativeOperation = React.useCallback((reason: unknown, epoch: number) => {
+    if (!presentationEpochRef.current.isCurrent(epoch)) return;
+    clearPublicPresentation();
+    setError(walletErrorMessage(reason));
+  }, [clearPublicPresentation]);
 
   const loadStatus = React.useCallback(async () => {
     if (busyRef.current != null) return;
+    const epoch = presentationEpochRef.current.capture();
     setOperation("status");
     setError(null);
     try {
       const next = await walletGetStatus();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
+      const nextActivity = next.locked || !next.vault_exists ? null : await walletListActivity();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
       setStatus(next);
+      setActivity(nextActivity);
       setPreview(null);
       setOutcome(null);
-      if (next.locked || !next.vault_exists) {
-        setActivity(null);
-      } else {
-        await loadActivity();
-      }
       setNotice(next.vault_exists ? (next.locked ? "Wallet is locked." : "Wallet is unlocked.") : "No local wallet exists yet.");
     } catch (reason) {
-      clearPublicPresentation();
-      setError(walletErrorMessage(reason));
+      failNativeOperation(reason, epoch);
     } finally {
       setOperation(null);
     }
-  }, [clearPublicPresentation, loadActivity, setOperation]);
+  }, [failNativeOperation, setOperation]);
 
   React.useEffect(() => {
     void loadStatus();
@@ -153,23 +155,25 @@ export function WalletPanel() {
 
   const runCreate = async () => {
     if (busy != null || status == null || status.vault_exists || !validWalletIdentity(walletId, walletLabel)) return;
+    const epoch = presentationEpochRef.current.capture();
     setOperation("create");
     setError(null);
     setPreview(null);
     try {
-      const selection = await walletSelectRecoveryDestination();
+      await walletSelectRecoveryDestination();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
       const next = await walletCreate({
         wallet_id: walletId,
         label: walletLabel,
-        recovery_destination_handle: selection.recovery_selection_handle,
       });
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
       setStatus(next);
       setActivity(null);
       setWalletId("");
       setWalletLabel("");
       setNotice("Wallet created and portable recovery verified. The new wallet remains locked.");
     } catch (reason) {
-      setError(walletErrorMessage(reason));
+      failNativeOperation(reason, epoch);
     } finally {
       setOperation(null);
     }
@@ -177,23 +181,25 @@ export function WalletPanel() {
 
   const runRestore = async () => {
     if (busy != null || status == null || status.vault_exists || !validWalletIdentity(walletId, walletLabel)) return;
+    const epoch = presentationEpochRef.current.capture();
     setOperation("restore");
     setError(null);
     setPreview(null);
     try {
-      const selection = await walletSelectRecoverySource();
+      await walletSelectRecoverySource();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
       const next = await walletRestore({
         wallet_id: walletId,
         label: walletLabel,
-        recovery_source_handle: selection.recovery_selection_handle,
       });
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
       setStatus(next);
       setActivity(null);
       setWalletId("");
       setWalletLabel("");
       setNotice("Wallet restored from the selected recovery artifact and remains locked.");
     } catch (reason) {
-      setError(walletErrorMessage(reason));
+      failNativeOperation(reason, epoch);
     } finally {
       setOperation(null);
     }
@@ -201,18 +207,21 @@ export function WalletPanel() {
 
   const runUnlock = async () => {
     if (busy != null || status?.vault_exists !== true || !status.locked) return;
+    const epoch = presentationEpochRef.current.capture();
     setOperation("unlock");
     setError(null);
     try {
       const next = await walletUnlock();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
+      const nextActivity = await walletListActivity();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
       setStatus(next);
+      setActivity(nextActivity);
       setPreview(null);
       setOutcome(null);
-      await loadActivity();
       setNotice("Wallet unlocked. Authenticated activity and reconciliation state were loaded.");
     } catch (reason) {
-      setActivity(null);
-      setError(walletErrorMessage(reason));
+      failNativeOperation(reason, epoch);
     } finally {
       setOperation(null);
     }
@@ -220,17 +229,21 @@ export function WalletPanel() {
 
   const runLock = async () => {
     if (busy != null || status?.locked !== false) return;
+    const epoch = presentationEpochRef.current.capture();
     setOperation("lock");
     setError(null);
     try {
       await walletLock();
-      clearPublicPresentation();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
       const next = await walletGetStatus();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
       setStatus(next);
+      setActivity(null);
+      setPreview(null);
+      setOutcome(null);
       setNotice("Wallet locked and public transaction presentation cleared.");
     } catch (reason) {
-      clearPublicPresentation();
-      setError(walletErrorMessage(reason));
+      failNativeOperation(reason, epoch);
     } finally {
       setOperation(null);
     }
@@ -238,15 +251,17 @@ export function WalletPanel() {
 
   const runPrepare = async () => {
     if (!spendingControlsEnabled(status, activity, busy != null) || !validTransferDraft(recipient, amount)) return;
+    const epoch = presentationEpochRef.current.capture();
     setOperation("preview");
     setError(null);
     setOutcome(null);
     try {
       const next = await walletPrepareTransferPreview(recipient, amount);
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
       setPreview(next);
       setNotice("Transfer preview prepared from fresh authenticated Core data. Review every field.");
     } catch (reason) {
-      setError(walletErrorMessage(reason));
+      failNativeOperation(reason, epoch);
     } finally {
       setOperation(null);
     }
@@ -254,15 +269,17 @@ export function WalletPanel() {
 
   const runCancel = async () => {
     if (busy != null || preview == null) return;
+    const epoch = presentationEpochRef.current.capture();
     const handle = preview.preview_handle;
     setOperation("cancel");
     setError(null);
     setPreview(null);
     try {
       await walletCancelTransferPreview(handle);
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
       setNotice("Transfer preview cancelled and its handle consumed.");
     } catch (reason) {
-      setError(walletErrorMessage(reason));
+      failNativeOperation(reason, epoch);
     } finally {
       setOperation(null);
     }
@@ -270,6 +287,7 @@ export function WalletPanel() {
 
   const runSubmit = async () => {
     if (!spendingControlsEnabled(status, activity, busy != null) || preview == null) return;
+    const epoch = presentationEpochRef.current.capture();
     const handle = preview.preview_handle;
     setOperation("submit");
     setError(null);
@@ -279,13 +297,16 @@ export function WalletPanel() {
     setActivity(null);
     try {
       const next = await walletConfirmAndSubmitTransfer(handle);
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
+      const nextActivity = await walletListActivity();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
       setOutcome(next);
+      setActivity(nextActivity);
       setNotice(submissionOutcomeMessage(next));
-      await loadActivity();
       setRecipient("");
       setAmount("");
     } catch (reason) {
-      setError(walletErrorMessage(reason));
+      failNativeOperation(reason, epoch);
     } finally {
       setOperation(null);
     }
@@ -293,14 +314,16 @@ export function WalletPanel() {
 
   const runRefreshActivity = async () => {
     if (busy != null || status?.locked !== false) return;
+    const epoch = presentationEpochRef.current.capture();
     setOperation("activity");
     setError(null);
     try {
-      await loadActivity();
+      const nextActivity = await walletListActivity();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
+      setActivity(nextActivity);
       setNotice("Authenticated activity and reconciliation state refreshed.");
     } catch (reason) {
-      setActivity(null);
-      setError(walletErrorMessage(reason));
+      failNativeOperation(reason, epoch);
     } finally {
       setOperation(null);
     }
@@ -308,14 +331,18 @@ export function WalletPanel() {
 
   const runRefreshRecord = async (transactionId: string) => {
     if (busy != null || status?.locked !== false) return;
+    const epoch = presentationEpochRef.current.capture();
     setOperation("refresh");
     setError(null);
     try {
       await walletRefreshTransactionObservation(transactionId);
-      await loadActivity();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
+      const nextActivity = await walletListActivity();
+      if (!presentationEpochRef.current.isCurrent(epoch)) return;
+      setActivity(nextActivity);
       setNotice("Transaction observation refreshed through the authenticated read-only path.");
     } catch (reason) {
-      setError(walletErrorMessage(reason));
+      failNativeOperation(reason, epoch);
     } finally {
       setOperation(null);
     }

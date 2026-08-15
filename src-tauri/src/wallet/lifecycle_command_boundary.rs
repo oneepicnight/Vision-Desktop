@@ -15,7 +15,7 @@
 
 use super::{
     lifecycle::{WalletLifecycleAdapters, WalletLifecycleError},
-    public_request::{WalletCreateRequest, WalletRestoreRequest},
+    public_request::{WalletCreateMetadata, WalletRestoreMetadata},
     recovery_selection::{select_recovery_destination, select_recovery_source},
     runtime::{RecoveryPathToken, WalletRuntimeError, WalletRuntimeState},
 };
@@ -23,7 +23,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use tauri::{
     ipc::{CommandArg, CommandItem, InvokeBody, InvokeError, Response},
@@ -74,6 +74,7 @@ pub(in crate::wallet) struct WalletLifecycleCommandBoundary {
     adapters: Arc<WalletLifecycleAdapters>,
     expected_main_hwnd: isize,
     transport_policy: WholeEnvelopeTransportPolicy,
+    native_recovery_selection: Mutex<Option<RecoveryPathToken>>,
     #[cfg(test)]
     panic_checkpoint: Option<BoundaryPanicCheckpoint>,
 }
@@ -99,9 +100,9 @@ struct BoundaryFailClosedGuard<'a> {
 enum WalletLifecycleEnvelope {
     GetStatus,
     SelectRecoveryDestination,
-    Create(WalletCreateRequest),
+    Create(WalletCreateMetadata),
     SelectRecoverySource,
-    Restore(WalletRestoreRequest),
+    Restore(WalletRestoreMetadata),
     Unlock,
     Lock,
 }
@@ -117,8 +118,8 @@ enum BoundaryError {
 }
 
 #[derive(Serialize)]
-struct RecoverySelectionResponse<'a> {
-    recovery_selection_handle: &'a str,
+struct RecoverySelectionResponse {
+    selected: bool,
 }
 
 #[cfg_attr(test, derive(Clone, Copy, PartialEq, Eq))]
@@ -310,6 +311,7 @@ impl WalletLifecycleCommandBoundary {
             adapters,
             expected_main_hwnd,
             transport_policy: WholeEnvelopeTransportPolicy::production(),
+            native_recovery_selection: Mutex::new(None),
             #[cfg(test)]
             panic_checkpoint: None,
         }
@@ -376,10 +378,12 @@ impl WalletLifecycleCommandBoundary {
             }
             Ok(Err(error)) => {
                 let prepared = fixed_invoke_error(error.code());
+                self.clear_native_recovery_selection_or_terminate();
                 guard.invalidate_or_terminate();
                 Err(prepared)
             }
             Err(_) => {
+                self.clear_native_recovery_selection_or_terminate();
                 guard.invalidate_or_terminate();
                 Err(build_panic_error_or_terminate())
             }
@@ -407,18 +411,30 @@ impl WalletLifecycleCommandBoundary {
                 let response = match envelope {
                     WalletLifecycleEnvelope::GetStatus => self
                         .serialize_response(&self.adapters.status().map_err(BoundaryError::from)?),
-                    WalletLifecycleEnvelope::Create(request) => self.serialize_response(
-                        &self
-                            .adapters
-                            .create_native(window.owner_label(), request)
-                            .map_err(BoundaryError::from)?,
-                    ),
-                    WalletLifecycleEnvelope::Restore(request) => self.serialize_response(
-                        &self
-                            .adapters
-                            .restore_native(window.owner_label(), request)
-                            .map_err(BoundaryError::from)?,
-                    ),
+                    WalletLifecycleEnvelope::Create(metadata) => {
+                        let token = self.take_native_recovery_selection()?;
+                        let request = metadata
+                            .attach_native_selection(token.as_str())
+                            .map_err(|_| BoundaryError::InvalidRequest)?;
+                        self.serialize_response(
+                            &self
+                                .adapters
+                                .create_native(window.owner_label(), request)
+                                .map_err(BoundaryError::from)?,
+                        )
+                    }
+                    WalletLifecycleEnvelope::Restore(metadata) => {
+                        let token = self.take_native_recovery_selection()?;
+                        let request = metadata
+                            .attach_native_selection(token.as_str())
+                            .map_err(|_| BoundaryError::InvalidRequest)?;
+                        self.serialize_response(
+                            &self
+                                .adapters
+                                .restore_native(window.owner_label(), request)
+                                .map_err(BoundaryError::from)?,
+                        )
+                    }
                     WalletLifecycleEnvelope::Unlock => self.serialize_response(
                         &self
                             .adapters
@@ -429,6 +445,7 @@ impl WalletLifecycleCommandBoundary {
                         let response = self.serialize_response(
                             &self.adapters.lock().map_err(BoundaryError::from)?,
                         )?;
+                        self.clear_native_recovery_selection()?;
                         let renewed_exposure =
                             WalletExposureAuthority::issue(&self.runtime, &self.transport_policy)?;
                         let renewed_window = window.renew_after_lock(
@@ -459,10 +476,12 @@ impl WalletLifecycleCommandBoundary {
                 Ok(response)
             }
             Ok(Err(error)) => {
+                self.clear_native_recovery_selection_or_terminate();
                 guard.invalidate_or_terminate();
                 Err(error)
             }
             Err(_) => {
+                self.clear_native_recovery_selection_or_terminate();
                 guard.invalidate_or_terminate();
                 Err(build_panic_error_or_terminate())
             }
@@ -481,11 +500,11 @@ impl WalletLifecycleCommandBoundary {
                 exposure.validate(&self.runtime)?;
                 window.validate(self.expected_main_hwnd, &self.runtime)?;
                 let token = result.map_err(BoundaryError::Runtime)?;
-                let response = self.serialize_response(&RecoverySelectionResponse {
-                    recovery_selection_handle: token.as_str(),
-                })?;
+                let response =
+                    self.serialize_response(&RecoverySelectionResponse { selected: true })?;
                 window.validate(self.expected_main_hwnd, &self.runtime)?;
                 exposure.validate(&self.runtime)?;
+                self.store_native_recovery_selection(token)?;
                 Ok(response)
             })();
             result.map_err(|error: BoundaryError| fixed_invoke_error(error.code()))
@@ -496,10 +515,12 @@ impl WalletLifecycleCommandBoundary {
                 Ok(response)
             }
             Ok(Err(error)) => {
+                self.clear_native_recovery_selection_or_terminate();
                 guard.invalidate_or_terminate();
                 Err(error)
             }
             Err(_) => {
+                self.clear_native_recovery_selection_or_terminate();
                 guard.invalidate_or_terminate();
                 Err(build_panic_error_or_terminate())
             }
@@ -517,6 +538,7 @@ impl WalletLifecycleCommandBoundary {
             adapters,
             expected_main_hwnd,
             transport_policy: WholeEnvelopeTransportPolicy::approved_for_test(),
+            native_recovery_selection: Mutex::new(None),
             panic_checkpoint: None,
         }
     }
@@ -539,6 +561,41 @@ impl WalletLifecycleCommandBoundary {
     fn serialize_response<T: Serialize>(&self, value: &T) -> Result<Response, BoundaryError> {
         self.panic_at(BoundaryPanicCheckpoint::BeforeResponseSerialization);
         serialize_response(value)
+    }
+
+    fn store_native_recovery_selection(
+        &self,
+        token: RecoveryPathToken,
+    ) -> Result<(), BoundaryError> {
+        let mut selected = self
+            .native_recovery_selection
+            .lock()
+            .map_err(|_| BoundaryError::Runtime(WalletRuntimeError::RuntimeUnavailable))?;
+        *selected = Some(token);
+        Ok(())
+    }
+
+    fn take_native_recovery_selection(&self) -> Result<RecoveryPathToken, BoundaryError> {
+        self.native_recovery_selection
+            .lock()
+            .map_err(|_| BoundaryError::Runtime(WalletRuntimeError::RuntimeUnavailable))?
+            .take()
+            .ok_or(BoundaryError::InvalidRequest)
+    }
+
+    fn clear_native_recovery_selection(&self) -> Result<(), BoundaryError> {
+        self.native_recovery_selection
+            .lock()
+            .map_err(|_| BoundaryError::Runtime(WalletRuntimeError::RuntimeUnavailable))?
+            .take();
+        Ok(())
+    }
+
+    fn clear_native_recovery_selection_or_terminate(&self) {
+        match catch_unwind(AssertUnwindSafe(|| self.clear_native_recovery_selection())) {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) | Err(_) => std::process::abort(),
+        }
     }
 }
 
@@ -780,12 +837,10 @@ mod tests {
 
     #[test]
     fn create_and_restore_require_one_exact_nested_request() {
-        let handle = "ab".repeat(32);
         let create = json_body(serde_json::json!({
             "request": {
                 "wallet_id": "wallet-1",
                 "label": "Primary",
-                "recovery_destination_handle": handle,
             }
         }));
         assert!(matches!(
@@ -793,12 +848,10 @@ mod tests {
             Ok(WalletLifecycleEnvelope::Create(_))
         ));
 
-        let source_handle = "cd".repeat(32);
         let restore = json_body(serde_json::json!({
             "request": {
                 "wallet_id": "wallet-2",
                 "label": "Restored",
-                "recovery_source_handle": source_handle,
             }
         }));
         assert!(matches!(
@@ -812,7 +865,6 @@ mod tests {
             json_body(serde_json::json!({ "request": {
                 "wallet_id": "wallet-1",
                 "label": "Primary",
-                "recovery_destination_handle": "ab".repeat(32),
                 "password": "secret-canary",
             }})),
         ] {
@@ -826,7 +878,6 @@ mod tests {
             "request": {
                 "wallet_id": "w".repeat(65),
                 "label": "Primary",
-                "recovery_destination_handle": "ab".repeat(32),
             }
         }));
         assert!(matches!(
@@ -1020,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_selection_returns_only_the_opaque_handle() {
+    fn completed_selection_returns_only_a_public_marker_and_retains_capability_natively() {
         use super::super::runtime::RecoveryPathPurpose;
 
         let directory = TempDir::new().unwrap();
@@ -1041,16 +1092,15 @@ mod tests {
             .finish_recovery_selection(Ok(token), exposure, window)
             .unwrap();
         let value = response_json(response);
-        let handle = value["recovery_selection_handle"].as_str().unwrap();
+        assert_eq!(value, serde_json::json!({ "selected": true }));
         assert_eq!(value.as_object().map(Map::len), Some(1));
-        assert_eq!(handle.len(), 64);
-        assert!(handle
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        let retained = boundary.take_native_recovery_selection().unwrap();
+        assert_eq!(retained.as_str().len(), 64);
         assert!(!value.to_string().contains("backup.json"));
         assert!(!value
             .to_string()
             .contains(directory.path().to_string_lossy().as_ref()));
+        assert!(!value.to_string().contains(retained.as_str()));
     }
 
     #[test]
@@ -1150,6 +1200,7 @@ mod tests {
             assert_eq!(value, serde_json::json!({ "code": expected_boundary_code }));
             assert_eq!(value.as_object().map(Map::len), Some(1));
             assert!(value.get("recovery_selection_handle").is_none());
+            assert!(boundary.take_native_recovery_selection().is_err());
             assert!(runtime.validate_boundary_epoch(epoch).is_err());
         }
     }

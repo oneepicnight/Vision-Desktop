@@ -43,14 +43,18 @@ capability receives no wallet permission. No dialog or broad plugin permission i
   transaction boundary; it contains no custody, signing, submission, or response-projection logic.
 - The accepted Layer B duplicate-key transport proof and all three independent security-review
   gates are enabled only as part of this complete candidate.
+- The accepted Layer B evidence qualifies the raw Tauri/Wry transport behavior. The reduced
+  create/restore business schema does not reinterpret that evidence; Layer A independently
+  exercises the corrected generated-wrapper shapes, and no Layer B source-level qualification is
+  claimed for fields that no longer cross IPC.
 - The admitted Core connection remains bound to the exact supervised process, creation identity,
   generation, manifest, running image, loopback socket, and owning PID before and after operations.
 - Core stop, restart, page load, window teardown, session lock, suspend, logoff, shutdown, panic,
   or runtime invalidation revokes wallet authority.
 - Passwords, recovery credentials, seeds, private keys, signatures, and signed envelopes remain
   native Rust values and never enter React, the general Desktop reducer, logs, or support packages.
-- Recovery paths stay in Rust; React receives only a bounded, generation-bound, single-use opaque
-  selection handle.
+- Recovery paths and their bounded, generation-bound, single-use capabilities stay in Rust. React
+  receives only `{ "selected": true }` after a native selection succeeds.
 - Final transfer approval remains the physically qualified native Windows confirmation ceremony.
 - Submission permits exactly one write attempt. Unknown results and accepted-recording-pending
   results remain durably authenticated, survive restart, block new spending, and never trigger an
@@ -64,8 +68,13 @@ It displays only allowlisted fixed error copy and clears public wallet presentat
 navigation/unmount, hidden visibility, window blur, and teardown. The shared Desktop state and
 event/reducer pipeline no longer retain the legacy configured-address wallet projection.
 
+Every native failure clears the complete public wallet presentation. A monotonic frontend epoch is
+captured by each request; blur, visibility, teardown, explicit clearing, or a native failure advances
+that epoch so a stale asynchronous completion cannot repopulate unlocked or spending state.
+
 The frontend contains no password, recovery-credential, seed, private-key, signature, signed-byte,
-filesystem-path, clipboard, browser-storage, direct network, or direct Tauri-core custody path.
+filesystem-path, path capability, clipboard, browser-storage, direct network, or direct Tauri-core
+custody path.
 
 ## Frozen compatibility identities
 

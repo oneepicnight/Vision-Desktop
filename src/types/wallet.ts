@@ -14,7 +14,7 @@ export type WalletLifecycleStatus = {
 };
 
 export type WalletRecoverySelection = {
-  recovery_selection_handle: string;
+  selected: true;
 };
 
 export type WalletLockResult = {
@@ -24,13 +24,11 @@ export type WalletLockResult = {
 export type WalletCreateRequest = {
   wallet_id: string;
   label: string;
-  recovery_destination_handle: string;
 };
 
 export type WalletRestoreRequest = {
   wallet_id: string;
   label: string;
-  recovery_source_handle: string;
 };
 
 export type WalletTransferPreview = {

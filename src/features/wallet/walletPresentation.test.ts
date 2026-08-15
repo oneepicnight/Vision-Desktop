@@ -1,4 +1,5 @@
 import {
+  WalletPresentationEpoch,
   pendingReconciliationMessage,
   spendingControlsEnabled,
   validTransferDraft,
@@ -32,6 +33,14 @@ const clearActivity = { records: [], history_complete: false as const, pending_r
 assert(spendingControlsEnabled(unlocked, clearActivity, false), "unlocked reconciled wallet may spend");
 assert(!spendingControlsEnabled(unlocked, null, false), "unknown reconciliation blocks spending");
 assert(!spendingControlsEnabled(unlocked, { ...clearActivity, pending_reconciliation: { state: "outcome_unknown", transaction_id: "1".repeat(64) } }, false), "pending reconciliation blocks spending");
+
+const presentationEpoch = new WalletPresentationEpoch();
+const firstRequest = presentationEpoch.capture();
+assert(presentationEpoch.isCurrent(firstRequest), "fresh completion may update public state");
+presentationEpoch.invalidate();
+assert(!presentationEpoch.isCurrent(firstRequest), "lifecycle clearing rejects stale completion");
+const secondRequest = presentationEpoch.capture();
+assert(presentationEpoch.isCurrent(secondRequest), "new work uses the advanced epoch");
 
 assert(
   pendingReconciliationMessage({ state: "accepted_recording_pending", transaction_id: "1".repeat(64) })?.includes("Do not resubmit"),

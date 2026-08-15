@@ -174,23 +174,22 @@ data.
 
 Input: none.
 
-Output after the Rust-owned asynchronous dialog completes: exactly
-`{ "recovery_selection_handle": "<64 lowercase hexadecimal characters>" }`.
+Output after the Rust-owned asynchronous dialog completes: exactly `{ "selected": true }`.
 
-The selected path stays in Rust. Cancel returns fixed code `recovery_selection_cancelled` and no
-handle. The handle is non-secret but volatile, purpose-bound, main-window-bound, generation-bound,
-single-use, expires within two minutes, and authorizes only one create-new recovery destination.
+The selected path and its capability both stay in Rust. Cancel returns fixed code
+`recovery_selection_cancelled` and no success marker. The native capability is volatile,
+purpose-bound, main-window-bound, generation-bound, single-use, expires within two minutes, and
+authorizes only one create-new recovery destination. React cannot receive, retain, or replay it.
 
 ### `wallet_create`
 
 Input: exactly one top-level `request` object containing the existing `WalletCreateRequest` only:
 
 - bounded `wallet_id`;
-- bounded `label`; and
-- `recovery_destination_handle`.
+- bounded `label`.
 
 No password, confirmation, generated recovery credential, raw path, secret, seed, or owner value is
-an IPC field. Rust consumes the handle before opening the native password and recovery-credential
+an IPC field. Rust consumes the previously selected native capability before opening the password and recovery-credential
 ceremonies. Success returns the existing secret-free locked lifecycle status with public account
 metadata and verified backup state. It never auto-copies the address or edits node configuration.
 
@@ -198,17 +197,16 @@ metadata and verified backup state. It never auto-copies the address or edits no
 
 Input: none.
 
-Output: the same single-field response as destination selection, but the handle is purpose-bound to
-one bounded read of the selected existing recovery artifact. A source handle cannot authorize a
-destination write or vice versa.
+Output: the same `{ "selected": true }` marker as destination selection. The Rust-retained
+capability is purpose-bound to one bounded read of the selected existing recovery artifact. A
+source selection cannot authorize a destination write or vice versa.
 
 ### `wallet_restore`
 
 Input: exactly one top-level `request` object containing the existing `WalletRestoreRequest` only:
 
 - bounded `wallet_id`;
-- bounded `label`; and
-- `recovery_source_handle`.
+- bounded `label`.
 
 The recovery credential, new local password, and confirmation are captured only by the Rust-owned
 native ceremony. Success returns locked, public lifecycle status. Restore never returns or modifies

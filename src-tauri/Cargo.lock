@@ -4750,6 +4750,7 @@ dependencies = [
  "blake3",
  "chacha20poly1305",
  "ed25519-dalek",
+ "embed-resource",
  "getrandom 0.4.3",
  "hex",
  "once_cell",

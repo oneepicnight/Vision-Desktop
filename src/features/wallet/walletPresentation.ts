@@ -56,6 +56,22 @@ const KNOWN_ERROR_MESSAGES = {
 
 export type WalletKnownErrorCode = keyof typeof KNOWN_ERROR_MESSAGES;
 
+export class WalletPresentationEpoch {
+  private current = 0;
+
+  capture() {
+    return this.current;
+  }
+
+  invalidate() {
+    this.current += 1;
+  }
+
+  isCurrent(captured: number) {
+    return captured === this.current;
+  }
+}
+
 export function walletErrorCode(error: unknown): WalletKnownErrorCode | "wallet_unavailable" {
   let candidate: unknown;
   if (typeof error === "object" && error !== null && "code" in error) {

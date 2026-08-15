@@ -1299,19 +1299,19 @@ mod tests {
     }
 
     fn native_create_request(token: &RecoveryPathToken) -> WalletCreateRequest {
-        serde_json::from_str(&format!(
-            r#"{{"wallet_id":"native-panic-test","label":"Native Panic Test","recovery_destination_handle":"{}"}}"#,
-            token.as_str(),
-        ))
-        .unwrap()
+        let metadata: crate::wallet::public_request::WalletCreateMetadata = serde_json::from_str(
+            r#"{"wallet_id":"native-panic-test","label":"Native Panic Test"}"#,
+        )
+        .unwrap();
+        metadata.attach_native_selection(token.as_str()).unwrap()
     }
 
     fn native_restore_request(token: &RecoveryPathToken) -> WalletRestoreRequest {
-        serde_json::from_str(&format!(
-            r#"{{"wallet_id":"native-restore-test","label":"Native Restore Test","recovery_source_handle":"{}"}}"#,
-            token.as_str(),
-        ))
-        .unwrap()
+        let metadata: crate::wallet::public_request::WalletRestoreMetadata = serde_json::from_str(
+            r#"{"wallet_id":"native-restore-test","label":"Native Restore Test"}"#,
+        )
+        .unwrap();
+        metadata.attach_native_selection(token.as_str()).unwrap()
     }
 
     #[test]

@@ -479,7 +479,7 @@ fn atomic_wallet_surface_preserves_private_custody_authority() {
     assert!(layer_a_qualification_source.contains("mock_builder()"));
     assert!(layer_a_qualification_source.contains("tauri::test::get_ipc_response("));
     assert!(layer_a_qualification_source.contains("MockRuntime"));
-    assert!(layer_a_qualification_source.contains("!policy.duplicate_key_rejection_proven"));
+    assert!(layer_a_qualification_source.contains("policy.duplicate_key_rejection_proven"));
     for forbidden in [
         "WalletRuntimeState",
         "WalletLifecycleAdapters",
@@ -494,6 +494,9 @@ fn atomic_wallet_surface_preserves_private_custody_authority() {
     assert!(cargo_manifest.contains("wallet-layer-a-qualification = []"));
     assert!(cargo_manifest.contains("tauri = { version = \"=2.11.5\", features = [\"test\"] }"));
     assert!(build_source.contains("CARGO_FEATURE_WALLET_LAYER_A_QUALIFICATION"));
+    assert!(build_source.contains("embed_resource::compile_for_everything("));
+    assert!(!build_source.contains("/MANIFESTINPUT:"));
+    assert!(!build_source.contains("/MANIFEST:EMBED"));
     assert!(cargo_manifest.contains("wallet-layer-b-qualification = []"));
     assert!(cargo_manifest.contains("name = \"vision-wallet-transport-qualification\""));
     assert!(cargo_manifest.contains("required-features = [\"wallet-layer-b-qualification\"]"));
@@ -633,7 +636,6 @@ fn atomic_wallet_surface_preserves_private_custody_authority() {
     assert!(layer_b_runner.contains("actual_loaded_webview2_runtime_proven"));
     assert!(!layer_b_script.contains("seed phrase"));
     assert!(!layer_b_script.contains("private key"));
-    assert!(build_source.contains("cargo:rustc-link-arg=/MANIFESTINPUT:"));
     assert!(!secure_filesystem_source.contains("#[tauri::command]"));
     assert!(secure_filesystem_source.contains("FILE_FLAG_OPEN_REPARSE_POINT"));
     assert!(secure_filesystem_source.contains("SetFileInformationByHandle"));
@@ -711,6 +713,8 @@ fn atomic_wallet_surface_preserves_private_custody_authority() {
     assert!(wallet_exposure_source.contains("WalletInvokeRequest<'_>"));
     assert!(!wallet_exposure_source.contains("SecretInput"));
     assert!(!wallet_exposure_source.contains("WalletSeed"));
+    assert!(wallet_command_boundary_source.contains("native_recovery_selection"));
+    assert!(wallet_command_boundary_source.contains("selected: true"));
     let core_api_source = read("../src/services/coreApi.ts");
     let wallet_panel_source = read("../src/features/wallet/WalletPanel.tsx");
     let wallet_types_source = read("../src/types/wallet.ts");
@@ -732,6 +736,10 @@ fn atomic_wallet_surface_preserves_private_custody_authority() {
         "private_key",
         "signed_envelope",
         "signature:",
+        "recovery_selection_handle",
+        "recovery_destination_handle",
+        "recovery_source_handle",
+        "path_token",
         "localStorage",
         "sessionStorage",
         "navigator.clipboard",
@@ -740,6 +748,14 @@ fn atomic_wallet_surface_preserves_private_custody_authority() {
         assert!(!wallet_types_source.contains(forbidden));
         assert!(!core_api_source.contains(forbidden));
     }
+    assert!(wallet_panel_source.contains("presentationEpochRef.current.invalidate()"));
+    assert!(wallet_panel_source.contains("presentationEpochRef.current.isCurrent(epoch)"));
+    assert_eq!(
+        wallet_panel_source.match_indices("catch (reason)").count(),
+        wallet_panel_source
+            .match_indices("failNativeOperation(reason, epoch);")
+            .count()
+    );
     assert!(!desktop_state_source.contains("WalletAccountState"));
     assert!(!desktop_event_source.contains("WalletAccountUpdated"));
     assert!(!read("../package.json").contains("@tauri-apps/plugin-dialog"));

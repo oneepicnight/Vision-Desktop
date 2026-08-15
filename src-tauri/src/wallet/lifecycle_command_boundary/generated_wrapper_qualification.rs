@@ -286,14 +286,12 @@ fn valid_body(command: &str) -> InvokeBody {
             "request": {
                 "wallet_id": "wallet-layer-a",
                 "label": "Layer A",
-                "recovery_destination_handle": "ab".repeat(32),
             }
         })),
         RESTORE => json_body(serde_json::json!({
             "request": {
                 "wallet_id": "wallet-layer-a",
                 "label": "Layer A",
-                "recovery_source_handle": "cd".repeat(32),
             }
         })),
         _ => json_body(serde_json::json!({})),
@@ -323,29 +321,21 @@ fn invalid_bodies(command: &str) -> Vec<InvokeBody> {
                 json_body(serde_json::json!({ "request": "invalid" })),
                 json_body(serde_json::json!({
                     "request": {
-                        "wallet_id": "wallet-layer-a",
-                        "label": "Layer A",
-                    }
-                })),
-                json_body(serde_json::json!({
-                    "request": {
                         "wallet_id": 7,
                         "label": "Layer A",
-                        "recovery_destination_handle": "ab".repeat(32),
                     }
                 })),
                 json_body(serde_json::json!({
                     "request": {
                         "wallet_id": "wallet-layer-a",
                         "label": "x".repeat(4096),
-                        "recovery_destination_handle": "ab".repeat(32),
                     }
                 })),
                 json_body(serde_json::json!({
                     "request": {
                         "wallet_id": "wallet-layer-a",
                         "label": "Layer A",
-                        "recovery_destination_handle": "short",
+                        "recovery_destination_handle": "ab".repeat(32),
                     }
                 })),
             ]);
@@ -353,7 +343,6 @@ fn invalid_bodies(command: &str) -> Vec<InvokeBody> {
                 "request": {
                     "wallet_id": "wallet-layer-a",
                     "label": "Layer A",
-                    "recovery_destination_handle": "ab".repeat(32),
                     "seed": "layer-a-secret-canary",
                 }
             })));
@@ -367,28 +356,20 @@ fn invalid_bodies(command: &str) -> Vec<InvokeBody> {
                 json_body(serde_json::json!({
                     "request": {
                         "wallet_id": "wallet-layer-a",
-                        "label": "Layer A",
-                    }
-                })),
-                json_body(serde_json::json!({
-                    "request": {
-                        "wallet_id": "wallet-layer-a",
                         "Label": "Layer A",
-                        "recovery_source_handle": "cd".repeat(32),
                     }
                 })),
                 json_body(serde_json::json!({
                     "request": {
                         "wallet_id": "x".repeat(4096),
                         "label": "Layer A",
-                        "recovery_source_handle": "cd".repeat(32),
                     }
                 })),
                 json_body(serde_json::json!({
                     "request": {
                         "wallet_id": "wallet-layer-a",
                         "label": "Layer A",
-                        "recovery_source_handle": "short",
+                        "recovery_source_handle": "cd".repeat(32),
                     }
                 })),
             ]);
@@ -396,7 +377,6 @@ fn invalid_bodies(command: &str) -> Vec<InvokeBody> {
                 "request": {
                     "wallet_id": "wallet-layer-a",
                     "label": "Layer A",
-                    "recovery_source_handle": "cd".repeat(32),
                     "password": "layer-a-secret-canary",
                 }
             })));
@@ -452,8 +432,8 @@ fn actual_generated_wrappers_reject_complete_body_matrix_with_fixed_error() {
 #[test]
 fn generated_dispatch_rejects_wrong_command_schema_and_unknown_command() {
     for command in COMMANDS {
-        let wrong_body = if command == CREATE {
-            valid_body(RESTORE)
+        let wrong_body = if matches!(command, CREATE | RESTORE) {
+            valid_body(GET_STATUS)
         } else {
             valid_body(CREATE)
         };
@@ -555,12 +535,10 @@ fn wrapper_replay_after_failure_cannot_return_stale_success() {
 }
 
 #[test]
-fn layer_a_cannot_approve_normalized_duplicate_textual_keys() {
-    let duplicate_top_level = serde_json::from_str::<Value>(&format!(
-        r#"{{"request":{{"wallet_id":"first","label":"Layer A","recovery_destination_handle":"{}"}},"request":{{"wallet_id":"second","label":"Layer A","recovery_destination_handle":"{}"}}}}"#,
-        "ab".repeat(32),
-        "cd".repeat(32),
-    ))
+fn layer_a_observes_normalized_duplicates_while_production_uses_accepted_layer_b_proof() {
+    let duplicate_top_level = serde_json::from_str::<Value>(
+        r#"{"request":{"wallet_id":"first","label":"Layer A"},"request":{"wallet_id":"second","label":"Layer A"}}"#,
+    )
     .unwrap();
     let observation = LayerAHarness::trusted().invoke(CREATE, json_body(duplicate_top_level));
     assert_eq!(
@@ -569,5 +547,5 @@ fn layer_a_cannot_approve_normalized_duplicate_textual_keys() {
     );
 
     let policy = WholeEnvelopeTransportPolicy::production();
-    assert!(!policy.duplicate_key_rejection_proven);
+    assert!(policy.duplicate_key_rejection_proven);
 }

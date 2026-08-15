@@ -2,7 +2,6 @@ import type { DesktopState } from "../../state/desktopState";
 import type { ConfigurationState as DesktopConfigurationState } from "../../types/configuration";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/core";
 import type { DiagnosticsState } from "../../types/diagnostics";
-import type { WalletAccountState } from "../../types/wallet";
 import { deriveConfigurationViewModel } from "./configurationStatus";
 
 function assertEqual<T>(actual: T, expected: T, message?: string) {
@@ -110,12 +109,6 @@ const baseDiagnostics: DiagnosticsState = {
   error: null,
 };
 
-const baseWallet: WalletAccountState = {
-  queriedAddress: null,
-  account: null,
-  error: null,
-};
-
 const baseConfiguration: DesktopConfigurationState = {
   snapshot: {
     config: baseConfig,
@@ -153,7 +146,6 @@ const baseState: DesktopState = {
   },
   diagnostics: baseDiagnostics,
   configuration: baseConfiguration,
-  wallet: baseWallet,
   lastUpdatedAt: 5_000,
   activeLifecycleAction: null,
   pendingLifecycleConfirmation: null,

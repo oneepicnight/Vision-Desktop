@@ -8,6 +8,17 @@ import type {
   ExplorerResult,
   ExplorerTransactionResult,
 } from "../types/explorer";
+import type {
+  WalletActivityResponse,
+  WalletCreateRequest,
+  WalletLifecycleStatus,
+  WalletLockResult,
+  WalletReceiptRefreshResponse,
+  WalletRecoverySelection,
+  WalletRestoreRequest,
+  WalletSubmissionOutcome,
+  WalletTransferPreview,
+} from "../types/wallet";
 
 export function getMockDashboardSnapshot() {
   return invoke<DashboardSnapshot>("get_mock_dashboard_snapshot");
@@ -71,6 +82,62 @@ export function getNodeConfigSnapshot() {
 
 export function getDefaultPaths() {
   return invoke<AppPaths>("get_default_paths");
+}
+
+export function walletGetStatus() {
+  return invoke<WalletLifecycleStatus>("wallet_get_status");
+}
+
+export function walletSelectRecoveryDestination() {
+  return invoke<WalletRecoverySelection>("wallet_select_recovery_destination");
+}
+
+export function walletCreate(request: WalletCreateRequest) {
+  return invoke<WalletLifecycleStatus>("wallet_create", { request });
+}
+
+export function walletSelectRecoverySource() {
+  return invoke<WalletRecoverySelection>("wallet_select_recovery_source");
+}
+
+export function walletRestore(request: WalletRestoreRequest) {
+  return invoke<WalletLifecycleStatus>("wallet_restore", { request });
+}
+
+export function walletUnlock() {
+  return invoke<WalletLifecycleStatus>("wallet_unlock");
+}
+
+export function walletLock() {
+  return invoke<WalletLockResult>("wallet_lock");
+}
+
+export function walletPrepareTransferPreview(recipient: string, amount: string) {
+  return invoke<WalletTransferPreview>("wallet_prepare_transfer_preview", {
+    request: { recipient, amount },
+  });
+}
+
+export function walletCancelTransferPreview(previewHandle: string) {
+  return invoke<{ state: "cancelled" }>("wallet_cancel_transfer_preview", {
+    request: { preview_handle: previewHandle },
+  });
+}
+
+export function walletConfirmAndSubmitTransfer(previewHandle: string) {
+  return invoke<WalletSubmissionOutcome>("wallet_confirm_and_submit_transfer", {
+    request: { preview_handle: previewHandle },
+  });
+}
+
+export function walletListActivity() {
+  return invoke<WalletActivityResponse>("wallet_list_activity");
+}
+
+export function walletRefreshTransactionObservation(transactionId: string) {
+  return invoke<WalletReceiptRefreshResponse>("wallet_refresh_transaction_observation", {
+    request: { transaction_id: transactionId },
+  });
 }
 
 export function lookupExplorerAddress(query: string) {

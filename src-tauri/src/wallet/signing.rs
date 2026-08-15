@@ -2,7 +2,7 @@
     not(test),
     allow(
         dead_code,
-        reason = "private signing and submission remain unregistered"
+        reason = "private signing and submission remain behind native confirmation and boundaries"
     )
 )]
 

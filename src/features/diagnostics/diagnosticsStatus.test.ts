@@ -1,7 +1,6 @@
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/core";
 import type { ConfigurationState } from "../../types/configuration";
 import type { DiagnosticsState } from "../../types/diagnostics";
-import type { WalletAccountState } from "../../types/wallet";
 import type { DesktopState } from "../../state/desktopState";
 import { deriveDiagnosticsViewModel } from "./diagnosticsStatus";
 
@@ -130,12 +129,6 @@ const baseDiagnostics: DiagnosticsState = {
   error: null,
 };
 
-const baseWallet: WalletAccountState = {
-  queriedAddress: null,
-  account: null,
-  error: null,
-};
-
 const baseConfiguration: ConfigurationState = {
   snapshot: null,
   appPaths: null,
@@ -161,7 +154,6 @@ const baseState: DesktopState = {
   },
   diagnostics: baseDiagnostics,
   configuration: baseConfiguration,
-  wallet: baseWallet,
   lastUpdatedAt: 5_000,
   activeLifecycleAction: null,
   pendingLifecycleConfirmation: null,

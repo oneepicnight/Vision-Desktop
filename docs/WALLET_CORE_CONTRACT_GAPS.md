@@ -20,10 +20,10 @@ artifact admission, running-image identity, and private listener ownership.
 
 ## Current integration status
 
-The exact Windows artifact and its evidence package have been independently accepted and are pinned
-by the Desktop runtime manifest and admission implementation. Artifact admission does not activate
-wallet custody: all three independent-review approval constants remain false, the duplicate-key
-proof remains false, and no wallet command or frontend custody authority is enabled.
+The exact Windows artifact, admission implementation, and controlled compatibility evidence have
+been independently accepted and are pinned by Desktop. The unpublished atomic Desktop candidate
+binds that contract to its complete twelve-command authority, but publication remains blocked on
+candidate review and unchanged packaged qualification.
 
 ## Conflicting historical implementations
 
@@ -67,7 +67,9 @@ Vision Desktop now enforces the exact payload and transaction-identifier sample 
 
 A separate fixed signing vector was independently generated for seed byte `0x07` repeated 32 times, recipient byte `0x22` repeated 32 times, amount `42`, nonce `1`, tip `2`, and fee limit `201`. Desktop must produce public key `ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c` and signature `9e6e02196b7dd976f71fcb34c2e420a4cf1b70731e96dcffbe7223969ae760a7eee386e0490d8dbe9a0bdb3056bbfdb35b17e98b189b1288d6ce813df9c82008`. Rust tests verify the canonical bytes, transaction identifier, signature bytes, and Ed25519 verification.
 
-This satisfies the Desktop `TransactionSerialization` and `SignatureVector` gates. The implementation is Rust-only, is not registered as a Tauri command, and cannot sign or submit a user transaction.
+This satisfies the Desktop `TransactionSerialization` and `SignatureVector` gates. Signing remains
+inside Rust and is reachable only through the reviewed preview, native confirmation, and atomic
+candidate boundary; neither React nor Core receives the seed or private key.
 
 ## Verified RC2 amount, nonce, and fee contract
 

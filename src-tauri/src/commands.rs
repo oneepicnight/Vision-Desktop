@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tauri::State;
 
 use crate::{
@@ -19,6 +20,7 @@ use crate::{
     supervisor::{
         dir_size, process_resources, tail_file, CoreProcessState, StartCoreRequest, SupervisorState,
     },
+    wallet::WalletRuntimeState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,59 +57,77 @@ pub fn get_core_manifest() -> Result<CoreManifest, String> {
 }
 
 #[tauri::command]
-pub fn start_core(
-    state: State<SupervisorState>,
+pub(crate) fn start_core(
+    state: State<Arc<SupervisorState>>,
+    wallet_runtime: State<Arc<WalletRuntimeState>>,
     request: Option<StartCoreRequest>,
 ) -> Result<CoreProcessState, String> {
+    wallet_runtime
+        .invalidate_all()
+        .map_err(|_| "secure wallet runtime is unavailable".to_string())?;
     state.start(request.unwrap_or(StartCoreRequest { config: None }))
 }
 
 #[tauri::command]
-pub fn stop_core(state: State<SupervisorState>) -> Result<CoreProcessState, String> {
+pub(crate) fn stop_core(
+    state: State<Arc<SupervisorState>>,
+    wallet_runtime: State<Arc<WalletRuntimeState>>,
+) -> Result<CoreProcessState, String> {
+    wallet_runtime
+        .invalidate_all()
+        .map_err(|_| "secure wallet runtime is unavailable".to_string())?;
     state.stop()
 }
 
 #[tauri::command]
-pub fn restart_core(
-    state: State<SupervisorState>,
+pub(crate) fn restart_core(
+    state: State<Arc<SupervisorState>>,
+    wallet_runtime: State<Arc<WalletRuntimeState>>,
     request: Option<StartCoreRequest>,
 ) -> Result<CoreProcessState, String> {
+    wallet_runtime
+        .invalidate_all()
+        .map_err(|_| "secure wallet runtime is unavailable".to_string())?;
     state.restart(request.unwrap_or(StartCoreRequest { config: None }))
 }
 
 #[tauri::command]
-pub fn get_core_process_state(state: State<SupervisorState>) -> Result<CoreProcessState, String> {
+pub fn get_core_process_state(
+    state: State<Arc<SupervisorState>>,
+) -> Result<CoreProcessState, String> {
     state.current_state()
 }
 
 #[tauri::command]
-pub fn get_core_stdout_tail(state: State<SupervisorState>) -> Result<String, String> {
+pub fn get_core_stdout_tail(state: State<Arc<SupervisorState>>) -> Result<String, String> {
     let (_, _, stdout, _) = state.log_paths()?;
     tail_file(&stdout, 32 * 1024)
 }
 
 #[tauri::command]
-pub fn get_core_stderr_tail(state: State<SupervisorState>) -> Result<String, String> {
+pub fn get_core_stderr_tail(state: State<Arc<SupervisorState>>) -> Result<String, String> {
     let (_, _, _, stderr) = state.log_paths()?;
     tail_file(&stderr, 32 * 1024)
 }
 
 #[tauri::command]
-pub fn open_logs_directory(state: State<SupervisorState>) -> Result<(), String> {
+pub fn open_logs_directory(state: State<Arc<SupervisorState>>) -> Result<(), String> {
     let (_, logs, _, _) = state.log_paths()?;
     ensure_dir(&logs)?;
     opener::open(logs).map_err(|e| format!("failed to open logs directory: {e}"))
 }
 
 #[tauri::command]
-pub fn open_data_directory(state: State<SupervisorState>) -> Result<(), String> {
+pub fn open_data_directory(state: State<Arc<SupervisorState>>) -> Result<(), String> {
     let (data, _, _, _) = state.log_paths()?;
     ensure_dir(&data)?;
     opener::open(data).map_err(|e| format!("failed to open data directory: {e}"))
 }
 
 #[tauri::command]
-pub fn get_dashboard_snapshot(state: State<SupervisorState>) -> Result<DashboardSnapshot, String> {
+pub fn get_dashboard_snapshot(
+    state: State<Arc<SupervisorState>>,
+) -> Result<DashboardSnapshot, String> {
     let process = state.current_state()?;
     let data_size = dir_size(&process.data_dir);
     let log_size = dir_size(&process.log_dir);
@@ -142,7 +162,7 @@ pub fn get_mock_dashboard_snapshot() -> DashboardSnapshot {
 
 #[tauri::command]
 pub fn lookup_explorer_address(
-    state: State<SupervisorState>,
+    state: State<Arc<SupervisorState>>,
     request: ExplorerQueryRequest,
 ) -> Result<ExplorerAddressResult, String> {
     let process = state.current_state()?;
@@ -158,7 +178,7 @@ pub fn lookup_explorer_address(
 
 #[tauri::command]
 pub fn lookup_explorer_transaction(
-    state: State<SupervisorState>,
+    state: State<Arc<SupervisorState>>,
     request: ExplorerQueryRequest,
 ) -> Result<ExplorerTransactionResult, String> {
     let process = state.current_state()?;
@@ -184,7 +204,7 @@ pub fn get_node_config_snapshot() -> Result<NodeConfigSnapshot, String> {
 }
 
 fn generate_support_package_command(
-    state: State<SupervisorState>,
+    state: State<Arc<SupervisorState>>,
 ) -> Result<SupportPackageResult, String> {
     state.current_state()?;
     let config = load_or_create_default_config().ok();
@@ -193,7 +213,7 @@ fn generate_support_package_command(
 
 #[tauri::command]
 pub fn generate_support_package(
-    state: State<SupervisorState>,
+    state: State<Arc<SupervisorState>>,
 ) -> Result<SupportPackageResult, String> {
     generate_support_package_command(state)
 }

@@ -3,17 +3,18 @@
 - Windows-first.
 - MSI and NSIS bundles are unsigned local engineering builds; public distribution requires a trusted code-signing certificate and release-signing procedure.
 - No automatic updater yet.
-- The user-facing Wallet remains read-only. A reviewed private Rust custody, recovery, signing,
-  submission, reconciliation, and receipt-refresh foundation exists, but it is unregistered and
-  unreachable from production Tauri and React authority.
+- The complete twelve-command wallet candidate exists only on an unpublished review branch. It is
+  not approved for distribution or real-funds use until exact-source review, packaged
+  qualification, clean-device recovery testing, evidence acceptance, and an explicit publication
+  decision are complete.
 - The Marketplace is a read-only integration view; no market feed, exchange, land listing, cash order, checkout, settlement, or transaction action is connected.
 - No game launcher yet.
 - No automatic NAT traversal yet.
 - No relay yet.
 - Core API uses loopback HTTP.
 - Manual internet router forwarding is still required for public seed operation.
-- No production custody. All wallet approval constants and the production duplicate-key transport
-  proof remain false.
+- Wallet custody remains unreleased. The candidate sets its reviewed activation and transport gates
+  only as part of the all-or-nothing source diff; no partial or lifecycle-only artifact may ship.
 - Test funds only.
 - Future wallet custody is supported only on the exact Windows 11 Client build/edition matrix in
   `WALLET_RUNTIME_SECURITY.md`, with one interactive session per Windows account. Windows 10,
@@ -28,7 +29,7 @@
 - Real Core launch supports only the exact admitted Vision Core v1.0.4 Windows artifact. Missing,
   changed, rebuilt, repackaged, multi-linked, reparse-reachable, wrong-process, wrong-generation,
   wildcard-bound, or wrong-owner inputs fail closed.
-- The admitted Core implementation and controlled launch test still require independent review;
-  an enabled wallet build, clean-device qualification, signing, distribution, and publication
-  remain separate blocked gates.
+- The admitted Core implementation and controlled compatibility evidence are accepted. The exact
+  enabled Desktop candidate, clean-device qualification, distribution, and publication remain
+  separate blocked gates.
 - Public endpoint redaction is conservative and may require review before sharing reports.

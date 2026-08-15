@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wallet-cancel-transfer-preview"
+description = "Enables the wallet_cancel_transfer_preview command without any pre-configured scope."
+commands.allow = ["wallet_cancel_transfer_preview"]
+
+[[permission]]
+identifier = "deny-wallet-cancel-transfer-preview"
+description = "Denies the wallet_cancel_transfer_preview command without any pre-configured scope."
+commands.deny = ["wallet_cancel_transfer_preview"]

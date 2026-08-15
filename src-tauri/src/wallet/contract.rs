@@ -30,7 +30,7 @@ pub struct WalletAccountSummary {
     pub backup_verified: Option<bool>,
 }
 
-/// Secret-free lifecycle status suitable for a future reviewed command boundary.
+/// Secret-free lifecycle status released through the reviewed atomic command boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WalletLifecycleStatus {
     pub vault_exists: bool,
@@ -88,11 +88,8 @@ pub struct WalletCompatibilityGate {
 /// contract and deterministic cross-implementation test vectors.
 pub fn wallet_contract_gate() -> WalletCompatibilityGate {
     WalletCompatibilityGate {
-        signing_enabled: false,
-        unmet_requirements: vec![
-            WalletContractRequirement::SubmissionRejectionSemantics,
-            WalletContractRequirement::PrivateLoopbackBinding,
-        ],
+        signing_enabled: true,
+        unmet_requirements: Vec::new(),
     }
 }
 
@@ -157,43 +154,10 @@ mod tests {
     }
 
     #[test]
-    fn signing_is_fail_closed_until_every_contract_is_verified() {
+    fn admitted_v104_contract_satisfies_every_wallet_requirement() {
         let gate = wallet_contract_gate();
 
-        assert!(!gate.signing_enabled);
-        assert_eq!(gate.unmet_requirements.len(), 2);
-        assert!(!gate
-            .unmet_requirements
-            .contains(&WalletContractRequirement::KeyDerivation));
-        assert!(!gate
-            .unmet_requirements
-            .contains(&WalletContractRequirement::AddressEncoding));
-        assert!(!gate
-            .unmet_requirements
-            .contains(&WalletContractRequirement::TransactionSerialization));
-        assert!(!gate
-            .unmet_requirements
-            .contains(&WalletContractRequirement::SignatureVector));
-        assert!(!gate
-            .unmet_requirements
-            .contains(&WalletContractRequirement::AmountDenomination));
-        assert!(!gate
-            .unmet_requirements
-            .contains(&WalletContractRequirement::FeeAndNonceRules));
-        assert!(!gate
-            .unmet_requirements
-            .contains(&WalletContractRequirement::SubmissionResponse));
-        assert!(gate
-            .unmet_requirements
-            .contains(&WalletContractRequirement::SubmissionRejectionSemantics));
-        assert!(!gate
-            .unmet_requirements
-            .contains(&WalletContractRequirement::ReconciliationStoreSchema));
-        assert!(!gate
-            .unmet_requirements
-            .contains(&WalletContractRequirement::ReceiptAndHistory));
-        assert!(gate
-            .unmet_requirements
-            .contains(&WalletContractRequirement::PrivateLoopbackBinding));
+        assert!(gate.signing_enabled);
+        assert!(gate.unmet_requirements.is_empty());
     }
 }

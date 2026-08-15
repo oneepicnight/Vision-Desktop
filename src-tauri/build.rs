@@ -19,6 +19,18 @@
         "run_network_diagnostics",
         "get_mock_dashboard_snapshot",
         "get_default_paths",
+        "wallet_get_status",
+        "wallet_select_recovery_destination",
+        "wallet_create",
+        "wallet_select_recovery_source",
+        "wallet_restore",
+        "wallet_unlock",
+        "wallet_lock",
+        "wallet_prepare_transfer_preview",
+        "wallet_cancel_transfer_preview",
+        "wallet_confirm_and_submit_transfer",
+        "wallet_list_activity",
+        "wallet_refresh_transaction_observation",
     ];
 
     let layer_a = std::env::var_os("CARGO_FEATURE_WALLET_LAYER_A_QUALIFICATION").is_some();

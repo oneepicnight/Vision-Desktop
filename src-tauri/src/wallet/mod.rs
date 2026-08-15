@@ -13,6 +13,8 @@ mod core_client;
 mod device_protection;
 #[cfg(windows)]
 mod envelope_store;
+#[cfg(windows)]
+pub(crate) mod exposure;
 mod journal;
 mod kdf;
 #[cfg(windows)]

@@ -2,7 +2,6 @@ import type { DesktopState } from "../../state/desktopState";
 import type { ConfigurationState } from "../../types/configuration";
 import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/core";
 import type { DiagnosticsState } from "../../types/diagnostics";
-import type { WalletAccountState } from "../../types/wallet";
 import {
   canRestartCore,
   canStartCore,
@@ -112,12 +111,6 @@ const baseConfiguration: ConfigurationState = {
   error: null,
 };
 
-const baseWallet: WalletAccountState = {
-  queriedAddress: null,
-  account: null,
-  error: null,
-};
-
 const baseState: DesktopState = {
   activeView: "dashboard",
   mockMode: false,
@@ -137,7 +130,6 @@ const baseState: DesktopState = {
   },
   diagnostics: baseDiagnostics,
   configuration: baseConfiguration,
-  wallet: baseWallet,
   lastUpdatedAt: null,
   activeLifecycleAction: null,
   pendingLifecycleConfirmation: null,

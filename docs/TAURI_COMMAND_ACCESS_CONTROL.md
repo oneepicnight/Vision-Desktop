@@ -1,55 +1,47 @@
 # Tauri Command Access Control
 
-## Active boundary
+## Atomic candidate boundary
 
-Vision Desktop registers its 19 current application commands with `tauri_build::AppManifest` and grants their generated allow permissions through one capability: `src-tauri/capabilities/main-desktop.json`.
+The unpublished Windows candidate registers 31 application commands with
+`tauri_build::AppManifest`: 19 existing Desktop commands plus exactly 12 wallet commands. Every
+command has its own generated allow/deny permission. The single `main-desktop` capability:
 
-That capability:
+- applies only to the explicitly labelled `main` window on Windows;
+- has no remote-origin grant;
+- contains no wildcard, shell, filesystem, HTTP, clipboard, dialog, or single-instance permission;
+- grants each application command individually.
 
-- applies only to the explicitly labelled `main` window;
-- applies only to the admitted Windows target;
-- contains no remote-origin grant;
-- contains no wildcard, shell, filesystem, HTTP, clipboard, dialog, single-instance, or wallet permission;
-- grants each current application command individually.
+The Linux mock capability remains limited to its three read-only commands and has no wallet
+permission. Frontend Tauri access remains centralized in `src/services/coreApi.ts`.
 
-The frontend continues to call Tauri only through `src/services/coreApi.ts`. The ACL is an additional runtime boundary, not a replacement for Rust-side input validation or the service boundary.
+## Wallet commands
 
-## Allowed commands
+The atomic inventory is:
 
-The main window may invoke:
+- lifecycle: `wallet_get_status`, `wallet_select_recovery_destination`, `wallet_create`,
+  `wallet_select_recovery_source`, `wallet_restore`, `wallet_unlock`, and `wallet_lock`;
+- transactions: `wallet_prepare_transfer_preview`, `wallet_cancel_transfer_preview`,
+  `wallet_confirm_and_submit_transfer`, `wallet_list_activity`, and
+  `wallet_refresh_transaction_observation`.
 
-- Core verification and lifecycle: `verify_core_binary`, `get_core_manifest`, `start_core`, `stop_core`, `restart_core`, and `get_core_process_state`.
-- Diagnostics and local operator paths: `get_core_stdout_tail`, `get_core_stderr_tail`, `open_logs_directory`, `open_data_directory`, `generate_support_package`, and `run_network_diagnostics`.
-- Read-only data: `get_dashboard_snapshot`, `get_mock_dashboard_snapshot`, `lookup_explorer_address`, `lookup_explorer_transaction`, and `get_default_paths`.
-- Desktop configuration: `save_node_config` and `get_node_config_snapshot`.
+Every wrapper accepts the reviewed whole-invoke `WalletInvokeRequest`, then forwards it to the
+private lifecycle or transaction boundary. Wrappers perform no custody, secret parsing, signing,
+submission, or response projection. The native dialog plugin remains unpermissioned to React.
 
-`generate_support_package_command` remains an internal Rust helper. Its former `#[tauri::command]` annotation was removed because it is not registered or intended to be callable from the WebView.
+## Drift enforcement
 
-## Build and runtime enforcement
+`src-tauri/tests/tauri_acl.rs` fails when command attributes, invoke registration, AppManifest,
+generated permissions, capability grants, or `coreApi.ts` wrappers diverge. It also enforces the
+main-window/Windows restriction, absence of remote or broad plugin grants, twelve-command wallet
+count, reviewed activation constants, accepted duplicate-key policy, and the private native custody
+boundary.
 
-`src-tauri/build.rs` supplies the exact command inventory to `tauri_build::AppManifest`. This causes Tauri to generate one `allow-*` and one `deny-*` application permission for each listed command. `src-tauri/tauri.conf.json` explicitly selects only the `main-desktop` capability and explicitly labels the single application window `main`.
+This is a source candidate, not publication authority. No partial command inventory or
+lifecycle-only wallet artifact may be packaged or distributed.
 
-`src-tauri/tests/tauri_acl.rs` fails when:
+## Plugin and network boundary
 
-- the `#[tauri::command]` functions, invoke handler, AppManifest, and capability diverge;
-- the capability is expanded beyond the `main` Windows window;
-- a remote-origin grant appears;
-- a broad or namespaced plugin permission appears;
-- the single-instance plugin is registered after other startup work or the native dialog plugin is initialized before it;
-- a wallet permission is added.
-
-Adding or removing an application command therefore requires one reviewed change across command registration, the AppManifest, the capability, and this documentation.
-
-## Plugin and wallet surface
-
-`tauri-plugin-single-instance` is initialized on Windows as the first plugin. It has no frontend command permission, discards duplicate-process launch data, and only activates the existing `main` window. The exact-version `tauri-plugin-dialog` follows it and is used only by private Rust recovery-selection adapters. Its JavaScript package and all dialog WebView permissions remain absent. Private Rust lifecycle adapters are managed during setup, but they are not Tauri commands and cannot be reached through ACL. There are no wallet Tauri commands or wallet permissions.
-
-Custody commands remain a later security gate. Native selection, cancellation, stale-callback, path-validation, and lifecycle behavior are implemented and tested privately before any command activation.
-
-The private `WalletRuntimeState` is now managed inside Rust and protected by its own Windows process
-lock, but it is not a Tauri command surface. Automated tests continue to require exactly the same
-19 callable commands, no wallet capability, and no wallet wrapper in `coreApi.ts`.
-
-## WebView network boundary
-
-The production CSP is now restricted to Tauri IPC. General loopback HTTP and the Vite hot-reload WebSocket are confined to `devCsp`, and automated tests prevent direct frontend network access or additional Tauri core imports. `docs/WEBVIEW_NETWORK_SECURITY.md` records this complementary boundary.
+Single-instance enforcement remains the first Windows plugin. The exact native dialog plugin is
+initialized second for Rust-only recovery selection and has no JavaScript package or WebView
+permission. Production `connect-src` remains Tauri IPC only; Vite and loopback development sources
+remain confined to `devCsp`.

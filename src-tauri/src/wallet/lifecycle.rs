@@ -2,14 +2,14 @@
     not(test),
     allow(
         dead_code,
-        reason = "wallet lifecycle adapters remain private and unregistered"
+        reason = "wallet lifecycle adapters remain private behind the command boundary"
     )
 )]
 #![cfg_attr(
     test,
     allow(
         dead_code,
-        reason = "unregistered production lifecycle entry points are exercised after command review"
+        reason = "production lifecycle entry points are exercised through the reviewed boundary"
     )
 )]
 

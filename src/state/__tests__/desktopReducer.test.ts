@@ -3,7 +3,6 @@ import type { DashboardSnapshot, NodeConfig, ProcessState } from "../../types/co
 import type { ConfigurationState } from "../../types/configuration";
 import type { DiagnosticsState } from "../../types/diagnostics";
 import type { ExplorerAddressResult, ExplorerTransactionResult } from "../../types/explorer";
-import type { WalletAccountState } from "../../types/wallet";
 import type { DesktopState } from "../desktopState";
 
 function assertEqual<T>(actual: T, expected: T, message?: string) {
@@ -111,12 +110,6 @@ const baseDiagnostics: DiagnosticsState = {
   error: null,
 };
 
-const baseWallet: WalletAccountState = {
-  queriedAddress: null,
-  account: null,
-  error: null,
-};
-
 const baseConfiguration: ConfigurationState = {
   snapshot: null,
   appPaths: null,
@@ -142,7 +135,6 @@ const baseState: DesktopState = {
   },
   diagnostics: baseDiagnostics,
   configuration: baseConfiguration,
-  wallet: baseWallet,
   lastUpdatedAt: null,
   activeLifecycleAction: null,
   pendingLifecycleConfirmation: null,
@@ -447,17 +439,6 @@ export function runDesktopReducerTransitionTests() {
     const next = applyDesktopEvent(baseState, { type: "ConfigurationUpdated", configuration });
     assertDeepEqual(next.configuration, configuration);
     expectPreserved(baseState, next, ["configuration"]);
-  }
-
-  {
-    const wallet: WalletAccountState = {
-      queriedAddress: "abcd",
-      account: addressResult,
-      error: null,
-    };
-    const next = applyDesktopEvent(baseState, { type: "WalletAccountUpdated", wallet });
-    assertDeepEqual(next.wallet, wallet);
-    expectPreserved(baseState, next, ["wallet"]);
   }
 
   {

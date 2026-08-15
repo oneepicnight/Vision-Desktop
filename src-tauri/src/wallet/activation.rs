@@ -1,8 +1,8 @@
 use super::contract::{wallet_contract_gate, WalletContractRequirement};
 
-const INDEPENDENT_LIFECYCLE_SECURITY_REVIEW_APPROVED: bool = false;
-const INDEPENDENT_SIGNING_SECURITY_REVIEW_APPROVED: bool = false;
-const INDEPENDENT_SUBMISSION_SECURITY_REVIEW_APPROVED: bool = false;
+const INDEPENDENT_LIFECYCLE_SECURITY_REVIEW_APPROVED: bool = true;
+const INDEPENDENT_SIGNING_SECURITY_REVIEW_APPROVED: bool = true;
+const INDEPENDENT_SUBMISSION_SECURITY_REVIEW_APPROVED: bool = true;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::wallet) enum WalletActivationScope {
@@ -264,51 +264,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_policy_keeps_all_authority_scopes_closed() {
+    fn production_policy_satisfies_the_reviewed_atomic_candidate() {
         let policy = WalletActivationPolicy::production();
 
-        assert!(!policy.is_satisfied(WalletActivationScope::Lifecycle));
-        assert!(!policy.is_satisfied(WalletActivationScope::Signing));
-        assert!(!policy.is_satisfied(WalletActivationScope::Submission));
-        assert!(!policy.is_satisfied(WalletActivationScope::Reconciliation));
-        assert_eq!(
-            policy.lifecycle_unmet_requirements,
-            vec![WalletActivationRequirement::IndependentSecurityReview(
-                WalletActivationScope::Lifecycle,
-            )]
-        );
-        assert!(policy
-            .signing_unmet_requirements
-            .contains(&WalletActivationRequirement::CompatibilityApproval));
-        assert!(policy.signing_unmet_requirements.contains(
-            &WalletActivationRequirement::Compatibility(
-                WalletActivationScope::Signing,
-                WalletContractRequirement::PrivateLoopbackBinding,
-            ),
-        ));
-        assert!(
-            policy.signing_unmet_requirements.contains(
-                &WalletActivationRequirement::IndependentSecurityReview(
-                    WalletActivationScope::Signing,
-                ),
-            )
-        );
-        assert!(policy.submission_unmet_requirements.contains(
-            &WalletActivationRequirement::Compatibility(
-                WalletActivationScope::Submission,
-                WalletContractRequirement::SubmissionRejectionSemantics,
-            ),
-        ));
-        assert!(policy.submission_unmet_requirements.contains(
-            &WalletActivationRequirement::IndependentSecurityReview(
-                WalletActivationScope::Submission,
-            ),
-        ));
-        assert!(policy.reconciliation_unmet_requirements.contains(
-            &WalletActivationRequirement::IndependentSecurityReview(
-                WalletActivationScope::Reconciliation,
-            ),
-        ));
+        assert!(policy.all_wallet_scopes_satisfied());
+        assert!(policy.lifecycle_unmet_requirements.is_empty());
+        assert!(policy.signing_unmet_requirements.is_empty());
+        assert!(policy.submission_unmet_requirements.is_empty());
+        assert!(policy.reconciliation_unmet_requirements.is_empty());
     }
 
     #[test]

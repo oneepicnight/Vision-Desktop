@@ -15,7 +15,6 @@ pub mod wallet;
 #[cfg(windows)]
 mod single_instance;
 
-#[cfg(windows)]
 use std::sync::Arc;
 use supervisor::SupervisorState;
 use tauri::Manager;
@@ -40,9 +39,11 @@ pub fn run() {
     #[cfg(windows)]
     let builder = builder.plugin(tauri_plugin_dialog::init());
 
-    builder
-        .manage(SupervisorState::default())
+    let builder = builder
+        .manage(Arc::new(SupervisorState::default()))
         .setup(|app| {
+            let resource_dir = app.path().resource_dir()?;
+            core_manifest::initialize_resource_root(resource_dir).map_err(std::io::Error::other)?;
             #[cfg(windows)]
             {
                 let wallet_runtime =
@@ -76,16 +77,25 @@ pub fn run() {
                             std::io::Error::other("secure wallet secret ceremony is unavailable")
                         })?,
                 );
-                let wallet_adapters = wallet::WalletLifecycleAdapters::initialize(
+                let wallet_adapters = Arc::new(
+                    wallet::WalletLifecycleAdapters::initialize(
+                        Arc::clone(&wallet_runtime),
+                        &wallet_local_data,
+                        recovery_ceremony,
+                        secret_ceremony,
+                    )
+                    .map_err(|_| {
+                        std::io::Error::other("secure wallet lifecycle adapters are unavailable")
+                    })?,
+                );
+                let supervisor = Arc::clone(app.state::<Arc<SupervisorState>>().inner());
+                let wallet_commands = wallet::exposure::WalletCommandState::initialize(
                     Arc::clone(&wallet_runtime),
-                    &wallet_local_data,
-                    recovery_ceremony,
-                    secret_ceremony,
-                )
-                .map_err(|_| {
-                    std::io::Error::other("secure wallet lifecycle adapters are unavailable")
-                })?;
-                if !app.manage(wallet_runtime) {
+                    wallet_adapters,
+                    supervisor,
+                    main_window_handle.0 as isize,
+                );
+                if !app.manage(Arc::clone(&wallet_runtime)) {
                     return Err(std::io::Error::other(
                         "secure wallet runtime state already exists",
                     )
@@ -97,15 +107,13 @@ pub fn run() {
                     )
                     .into());
                 }
-                if !app.manage(wallet_adapters) {
+                if !app.manage(wallet_commands) {
                     return Err(std::io::Error::other(
-                        "secure wallet lifecycle adapters already exist",
+                        "secure wallet command state already exists",
                     )
                     .into());
                 }
             }
-            let resource_dir = app.path().resource_dir()?;
-            core_manifest::initialize_resource_root(resource_dir).map_err(std::io::Error::other)?;
             Ok(())
         })
         .on_page_load(|webview, _payload| {
@@ -127,32 +135,71 @@ pub fn run() {
                 if let Some(runtime) = window.try_state::<Arc<wallet::WalletRuntimeState>>() {
                     let _ = runtime.invalidate_all();
                 }
-                if let Some(supervisor) = window.try_state::<SupervisorState>() {
+                if let Some(supervisor) = window.try_state::<Arc<SupervisorState>>() {
                     let _ = supervisor.stop();
                 }
             }
-        })
-        .invoke_handler(tauri::generate_handler![
-            commands::verify_core_binary,
-            commands::get_core_manifest,
-            commands::start_core,
-            commands::stop_core,
-            commands::restart_core,
-            commands::get_core_process_state,
-            commands::get_core_stdout_tail,
-            commands::get_core_stderr_tail,
-            commands::open_logs_directory,
-            commands::open_data_directory,
-            commands::get_dashboard_snapshot,
-            commands::lookup_explorer_address,
-            commands::lookup_explorer_transaction,
-            commands::save_node_config,
-            commands::get_node_config_snapshot,
-            commands::generate_support_package,
-            commands::run_network_diagnostics,
-            commands::get_mock_dashboard_snapshot,
-            commands::get_default_paths,
-        ])
+        });
+
+    #[cfg(windows)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        commands::verify_core_binary,
+        commands::get_core_manifest,
+        commands::start_core,
+        commands::stop_core,
+        commands::restart_core,
+        commands::get_core_process_state,
+        commands::get_core_stdout_tail,
+        commands::get_core_stderr_tail,
+        commands::open_logs_directory,
+        commands::open_data_directory,
+        commands::get_dashboard_snapshot,
+        commands::lookup_explorer_address,
+        commands::lookup_explorer_transaction,
+        commands::save_node_config,
+        commands::get_node_config_snapshot,
+        commands::generate_support_package,
+        commands::run_network_diagnostics,
+        commands::get_mock_dashboard_snapshot,
+        commands::get_default_paths,
+        wallet::exposure::wallet_get_status,
+        wallet::exposure::wallet_select_recovery_destination,
+        wallet::exposure::wallet_create,
+        wallet::exposure::wallet_select_recovery_source,
+        wallet::exposure::wallet_restore,
+        wallet::exposure::wallet_unlock,
+        wallet::exposure::wallet_lock,
+        wallet::exposure::wallet_prepare_transfer_preview,
+        wallet::exposure::wallet_cancel_transfer_preview,
+        wallet::exposure::wallet_confirm_and_submit_transfer,
+        wallet::exposure::wallet_list_activity,
+        wallet::exposure::wallet_refresh_transaction_observation,
+    ]);
+
+    #[cfg(not(windows))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        commands::verify_core_binary,
+        commands::get_core_manifest,
+        commands::start_core,
+        commands::stop_core,
+        commands::restart_core,
+        commands::get_core_process_state,
+        commands::get_core_stdout_tail,
+        commands::get_core_stderr_tail,
+        commands::open_logs_directory,
+        commands::open_data_directory,
+        commands::get_dashboard_snapshot,
+        commands::lookup_explorer_address,
+        commands::lookup_explorer_transaction,
+        commands::save_node_config,
+        commands::get_node_config_snapshot,
+        commands::generate_support_package,
+        commands::run_network_diagnostics,
+        commands::get_mock_dashboard_snapshot,
+        commands::get_default_paths,
+    ]);
+
+    builder
         .run(tauri::generate_context!())
         .expect("failed to run Vision Desktop");
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wallet-confirm-and-submit-transfer"
+description = "Enables the wallet_confirm_and_submit_transfer command without any pre-configured scope."
+commands.allow = ["wallet_confirm_and_submit_transfer"]
+
+[[permission]]
+identifier = "deny-wallet-confirm-and-submit-transfer"
+description = "Denies the wallet_confirm_and_submit_transfer command without any pre-configured scope."
+commands.deny = ["wallet_confirm_and_submit_transfer"]

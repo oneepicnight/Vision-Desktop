@@ -67,7 +67,8 @@ pub(in crate::wallet) const TRANSACTION_PREVIEW_TTL_MS: u64 = 60 * 1000;
 /// Rust-only wallet authority owned by the application process.
 ///
 /// This type intentionally implements neither `Clone`, Serde traits, nor `Debug`. The Tauri
-/// application manages exactly one instance, but no wallet command can access it yet.
+/// application manages exactly one instance. Reviewed command wrappers can request operations only
+/// through the lifecycle and transaction boundaries; they cannot access this state directly.
 pub(crate) struct WalletRuntimeState {
     inner: Mutex<WalletRuntimeInner>,
     revocation_epoch: AtomicU64,
@@ -3112,39 +3113,35 @@ mod tests {
     }
 
     #[test]
-    fn production_activation_policy_issues_no_sensitive_authority() {
-        let runtime = Arc::new(WalletRuntimeState::for_test_with_production_activation());
+    fn production_activation_policy_issues_only_reviewed_authority() {
+        for kind in [
+            WalletOperationKind::Create,
+            WalletOperationKind::PreparePreview,
+        ] {
+            let runtime = Arc::new(WalletRuntimeState::for_test_with_production_activation());
+            assert!(runtime.begin_operation(MAIN_WINDOW_LABEL, kind).is_ok());
+        }
 
-        assert_eq!(
-            runtime
-                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Create)
-                .err(),
-            Some(WalletRuntimeError::ActivationUnavailable),
-        );
-        assert_eq!(
-            runtime
-                .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::PreparePreview)
-                .err(),
-            Some(WalletRuntimeError::ActivationUnavailable),
-        );
+        let runtime = Arc::new(WalletRuntimeState::for_test_with_production_activation());
         assert_eq!(
             runtime
                 .begin_operation(MAIN_WINDOW_LABEL, WalletOperationKind::Sign)
                 .err(),
-            Some(WalletRuntimeError::ActivationUnavailable),
+            Some(WalletRuntimeError::InvalidRequest),
         );
-        assert_eq!(
+
+        let runtime = Arc::new(WalletRuntimeState::for_test_with_production_activation());
+        assert_ne!(
             runtime
                 .begin_reconciliation_discovery(MAIN_WINDOW_LABEL)
                 .err(),
             Some(WalletRuntimeError::ActivationUnavailable),
         );
-        assert_eq!(
-            runtime
-                .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination,)
-                .err(),
-            Some(WalletRuntimeError::ActivationUnavailable),
-        );
+
+        let runtime = Arc::new(WalletRuntimeState::for_test_with_production_activation());
+        assert!(runtime
+            .begin_recovery_path_selection(MAIN_WINDOW_LABEL, RecoveryPathPurpose::Destination,)
+            .is_ok());
     }
 
     #[test]

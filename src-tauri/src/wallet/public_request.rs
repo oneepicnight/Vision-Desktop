@@ -1,4 +1,4 @@
-//! Public-only schemas for a future reviewed Wallet command boundary.
+//! Public-only schemas consumed by the reviewed atomic Wallet command boundary.
 //!
 //! These types intentionally contain no secret, path, expiry, or caller-selected window label.
 //! Nothing in this module is a Tauri command or is registered with the application.

@@ -1,7 +1,7 @@
 //! Private transaction-shaped companion to the reviewed lifecycle command boundary.
 //!
-//! This module deliberately has no Tauri command attributes, invoke registration, managed state,
-//! permission, capability, frontend caller, or production activation shortcut.
+//! This module deliberately has no direct Tauri command attributes or frontend parsing. The atomic
+//! exposure wrappers forward whole invoke messages here; no activation shortcut exists.
 
 use super::{
     fixed_invoke_error, BoundaryFailClosedGuard, MainWalletWindowAuthority,
@@ -53,7 +53,7 @@ const MAX_PREVIEW_HANDLE_BYTES: usize = 128;
 const TRANSACTION_ID_BYTES: usize = 64;
 const MAX_ACTIVITY_RECORDS: usize = 100;
 
-/// Private, unregistered transaction boundary sharing the lifecycle authority model.
+/// Private transaction boundary sharing the lifecycle authority model.
 ///
 /// It implements neither `Clone`, `Debug`, formatting, nor serialization.
 pub(in crate::wallet) struct WalletTransactionCommandBoundary {

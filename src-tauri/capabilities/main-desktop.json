@@ -23,6 +23,18 @@
     "allow-generate-support-package",
     "allow-run-network-diagnostics",
     "allow-get-mock-dashboard-snapshot",
-    "allow-get-default-paths"
+    "allow-get-default-paths",
+    "allow-wallet-get-status",
+    "allow-wallet-select-recovery-destination",
+    "allow-wallet-create",
+    "allow-wallet-select-recovery-source",
+    "allow-wallet-restore",
+    "allow-wallet-unlock",
+    "allow-wallet-lock",
+    "allow-wallet-prepare-transfer-preview",
+    "allow-wallet-cancel-transfer-preview",
+    "allow-wallet-confirm-and-submit-transfer",
+    "allow-wallet-list-activity",
+    "allow-wallet-refresh-transaction-observation"
   ]
 }

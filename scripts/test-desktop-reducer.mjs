@@ -23,8 +23,8 @@ const files = [
   ["src/features/marketplace/marketplaceStatus.ts", "src/features/marketplace/marketplaceStatus.js"],
   ["src/features/marketplace/marketplaceStatus.test.ts", "src/features/marketplace/marketplaceStatus.test.js"],
   ["src/state/walletConfiguration.ts", "src/state/walletConfiguration.js"],
-  ["src/features/wallet/walletStatus.ts", "src/features/wallet/walletStatus.js"],
-  ["src/features/wallet/walletStatus.test.ts", "src/features/wallet/walletStatus.test.js"],
+  ["src/features/wallet/walletPresentation.ts", "src/features/wallet/walletPresentation.js"],
+  ["src/features/wallet/walletPresentation.test.ts", "src/features/wallet/walletPresentation.test.js"],
 ];
 
 try {
@@ -52,7 +52,7 @@ try {
   await import(pathToFileURL(path.join(outRoot, "src/features/diagnostics/diagnosticsStatus.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/mining/miningStatus.test.js")));
   await import(pathToFileURL(path.join(outRoot, "src/features/marketplace/marketplaceStatus.test.js")));
-  await import(pathToFileURL(path.join(outRoot, "src/features/wallet/walletStatus.test.js")));
+  await import(pathToFileURL(path.join(outRoot, "src/features/wallet/walletPresentation.test.js")));
   console.log("Desktop state transition tests passed");
 } finally {
   await rm(outRoot, { recursive: true, force: true });

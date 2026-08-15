@@ -69,7 +69,7 @@ export function AppShell() {
         ) : state.activeView === "diagnostics" ? (
           <DiagnosticsPanel state={state} actions={actions} />
         ) : state.activeView === "wallet" ? (
-          <WalletPanel state={state} />
+          <WalletPanel />
         ) : state.activeView === "marketplace" ? (
           <MarketplacePanel state={state} />
         ) : state.activeView === "configuration" ? (

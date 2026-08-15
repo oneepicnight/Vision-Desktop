@@ -81,8 +81,6 @@ export function applyDesktopEvent(state: DesktopState, event: DesktopEvent): Des
       return { ...state, diagnostics: event.diagnostics };
     case "ConfigurationUpdated":
       return { ...state, configuration: event.configuration };
-    case "WalletAccountUpdated":
-      return { ...state, wallet: event.wallet };
     case "CoreProcessUpdated":
       return { ...state, process: event.process };
     case "LifecycleConfirmationRequested":

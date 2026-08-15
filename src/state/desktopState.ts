@@ -27,13 +27,10 @@ import type { ConfigurationState } from "../types/configuration";
 import type { DiagnosticsState } from "../types/diagnostics";
 import type {
   DesktopView,
-  ExplorerAddressResult,
   ExplorerLookupMode,
   ExplorerResult,
   ExplorerState,
 } from "../types/explorer";
-import type { WalletAccountState } from "../types/wallet";
-import { resolveWalletConfiguredAddress } from "./walletConfiguration";
 import { applyDesktopEvent } from "./desktopReducer";
 import {
   beginDesktopRequest,
@@ -74,12 +71,6 @@ const initialDiagnosticsState: DiagnosticsState = {
   error: null,
 };
 
-const initialWalletState: WalletAccountState = {
-  queriedAddress: null,
-  account: null,
-  error: null,
-};
-
 const initialConfigurationState: ConfigurationState = {
   snapshot: null,
   appPaths: null,
@@ -99,7 +90,6 @@ const initialDesktopState: DesktopState = {
   explorer: initialExplorerState,
   diagnostics: initialDiagnosticsState,
   configuration: initialConfigurationState,
-  wallet: initialWalletState,
   lastUpdatedAt: null,
   activeLifecycleAction: null,
   pendingLifecycleConfirmation: null,
@@ -118,7 +108,6 @@ export type DesktopState = {
   explorer: ExplorerState;
   diagnostics: DiagnosticsState;
   configuration: ConfigurationState;
-  wallet: WalletAccountState;
   lastUpdatedAt: number | null;
   activeLifecycleAction: LifecycleActionKind | null;
   pendingLifecycleConfirmation: LifecycleActionKind | null;
@@ -149,13 +138,6 @@ export type DesktopStateController = {
   state: DesktopState;
   actions: DesktopActions;
 };
-
-function ensureAddressResult(result: ExplorerResult): ExplorerAddressResult {
-  if (result.kind !== "address") {
-    throw new Error("expected address lookup result");
-  }
-  return result;
-}
 
 function lifecycleStartMessage(action: LifecycleActionKind) {
   if (action === "start") {
@@ -193,9 +175,6 @@ export function useDesktopState(): DesktopStateController {
 
       const token = existingToken ?? beginDesktopRequest(requestTrackerRef.current);
       const mockMode = state.mockMode;
-      let walletConfigurationError: string | null = null;
-      let walletConfiguredAddress = "";
-
       try {
         dispatch({ type: "DashboardRefreshStarted" });
         const snapshot = mockMode
@@ -212,48 +191,6 @@ export function useDesktopState(): DesktopStateController {
             : "Dashboard refreshed",
           receivedAt: Date.now(),
         });
-
-        if (state.activeView === "wallet") {
-          try {
-            const walletConfiguration = await getNodeConfigSnapshot();
-            if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
-              return;
-            }
-            walletConfiguredAddress = resolveWalletConfiguredAddress(
-              walletConfiguration,
-            ).address;
-            dispatch({
-              type: "ConfigurationUpdated",
-              configuration: {
-                snapshot: walletConfiguration,
-                appPaths: state.configuration.appPaths,
-                error: null,
-              },
-            });
-          } catch (configurationErr) {
-            if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
-              return;
-            }
-            walletConfigurationError = String(configurationErr);
-            walletConfiguredAddress = "";
-            dispatch({
-              type: "ConfigurationUpdated",
-              configuration: {
-                snapshot: null,
-                appPaths: state.configuration.appPaths,
-                error: walletConfigurationError,
-              },
-            });
-            dispatch({
-              type: "WalletAccountUpdated",
-              wallet: {
-                queriedAddress: null,
-                account: null,
-                error: "Unable to load the Desktop node configuration",
-              },
-            });
-          }
-        }
 
         if (state.activeView === "configuration") {
           const configurationResults = await Promise.allSettled([
@@ -280,34 +217,6 @@ export function useDesktopState(): DesktopStateController {
               error: configurationErrors.length > 0 ? configurationErrors.join(" | ") : null,
             },
           });
-        }
-
-        if (
-          state.activeView === "wallet" &&
-          mockMode &&
-          walletConfigurationError == null
-        ) {
-          if (walletConfiguredAddress.length === 0) {
-            dispatch({
-              type: "WalletAccountUpdated",
-              wallet: { queriedAddress: null, account: null, error: null },
-            });
-          } else {
-            const mockWalletResult = ensureAddressResult(
-              await searchMockExplorer("address", walletConfiguredAddress),
-            );
-            if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
-              return;
-            }
-            dispatch({
-              type: "WalletAccountUpdated",
-              wallet: {
-                queriedAddress: walletConfiguredAddress,
-                account: mockWalletResult,
-                error: null,
-              },
-            });
-          }
         }
 
         if (!mockMode) {
@@ -356,53 +265,6 @@ export function useDesktopState(): DesktopStateController {
             });
           }
 
-          if (
-            state.activeView === "wallet" &&
-            walletConfigurationError == null
-          ) {
-            if (walletConfiguredAddress.length === 0) {
-              dispatch({
-                type: "WalletAccountUpdated",
-                wallet: { queriedAddress: null, account: null, error: null },
-              });
-            } else if (process.state !== "running" || snapshot.api_error) {
-              dispatch({
-                type: "WalletAccountUpdated",
-                wallet: {
-                  queriedAddress: walletConfiguredAddress,
-                  account: null,
-                  error: null,
-                },
-              });
-            } else {
-              try {
-                const walletAccount = await lookupExplorerAddress(walletConfiguredAddress);
-                if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
-                  return;
-                }
-                dispatch({
-                  type: "WalletAccountUpdated",
-                  wallet: {
-                    queriedAddress: walletConfiguredAddress,
-                    account: walletAccount,
-                    error: null,
-                  },
-                });
-              } catch (walletErr) {
-                if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {
-                  return;
-                }
-                dispatch({
-                  type: "WalletAccountUpdated",
-                  wallet: {
-                    queriedAddress: walletConfiguredAddress,
-                    account: null,
-                    error: String(walletErr),
-                  },
-                });
-              }
-            }
-          }
         }
 
         if (!isDesktopRequestCurrent(requestTrackerRef.current, token)) {

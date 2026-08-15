@@ -6,7 +6,6 @@ import type {
   ExplorerLookupMode,
   ExplorerResult,
 } from "../types/explorer";
-import type { WalletAccountState } from "../types/wallet";
 import type { LifecycleActionKind } from "../features/node-manager/lifecycleControls";
 
 export type DesktopEvent =
@@ -29,7 +28,6 @@ export type DesktopEvent =
     }
   | { type: "DiagnosticsUpdated"; diagnostics: DiagnosticsState }
   | { type: "ConfigurationUpdated"; configuration: ConfigurationState }
-  | { type: "WalletAccountUpdated"; wallet: WalletAccountState }
   | { type: "CoreProcessUpdated"; process: ProcessState }
   | { type: "LifecycleConfirmationRequested"; action: LifecycleActionKind }
   | { type: "LifecycleConfirmationDismissed" }

@@ -2,14 +2,14 @@
     not(test),
     expect(
         dead_code,
-        reason = "native transaction confirmation remains private until its command boundary is approved"
+        reason = "native transaction confirmation remains private behind its command boundary"
     )
 )]
 #![cfg_attr(
     test,
     allow(
         dead_code,
-        reason = "the native modal entry point remains unregistered while its state machine is tested"
+        reason = "the native modal entry point is exercised only through reviewed orchestration"
     )
 )]
 

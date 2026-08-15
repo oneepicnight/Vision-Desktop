@@ -119,11 +119,6 @@ const baseState: DesktopState = {
     appPaths: null,
     error: null,
   },
-  wallet: {
-    queriedAddress: null,
-    account: null,
-    error: null,
-  },
   lastUpdatedAt: 5_000,
   activeLifecycleAction: null,
   pendingLifecycleConfirmation: null,

@@ -2,14 +2,14 @@
     not(test),
     expect(
         dead_code,
-        reason = "transaction previews remain private until their later command boundary is approved"
+        reason = "transaction previews remain private behind the reviewed command boundary"
     )
 )]
 #![cfg_attr(
     test,
     allow(
         dead_code,
-        reason = "production preview wrappers stay unregistered while private helpers are tested"
+        reason = "production preview helpers are exercised through the reviewed boundary"
     )
 )]
 
@@ -119,7 +119,7 @@ pub(in crate::wallet) struct TransferConfirmationFields<'a> {
     pub transaction_id: &'a str,
 }
 
-/// Public-only preview data for a future reviewed command boundary.
+/// Public-only preview data released through the reviewed atomic command boundary.
 ///
 /// It deliberately has no unrestricted Debug implementation while it remains timing-correlated
 /// wallet activity. The opaque handle is not signing authority.

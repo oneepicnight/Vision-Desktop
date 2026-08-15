@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wallet-get-status"
+description = "Enables the wallet_get_status command without any pre-configured scope."
+commands.allow = ["wallet_get_status"]
+
+[[permission]]
+identifier = "deny-wallet-get-status"
+description = "Denies the wallet_get_status command without any pre-configured scope."
+commands.deny = ["wallet_get_status"]

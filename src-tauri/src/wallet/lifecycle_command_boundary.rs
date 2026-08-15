@@ -2,14 +2,14 @@
     not(test),
     expect(
         dead_code,
-        reason = "the reviewed lifecycle command boundary remains private and unregistered"
+        reason = "the reviewed lifecycle boundary is reachable only through atomic wrappers"
     )
 )]
 #![cfg_attr(
     test,
     allow(
         dead_code,
-        reason = "unregistered production entry points are exercised after command review"
+        reason = "production boundary entry points are exercised through focused tests"
     )
 )]
 
@@ -31,6 +31,7 @@ use tauri::{
 };
 
 mod transaction;
+pub(in crate::wallet) use transaction::WalletTransactionCommandBoundary;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const BUNDLED_WINDOWS_ORIGIN: &str = "http://tauri.localhost";
@@ -43,12 +44,12 @@ const RESTORE: &str = "wallet_restore";
 const UNLOCK: &str = "wallet_unlock";
 const LOCK: &str = "wallet_lock";
 
-/// Whole-message command argument for a future reviewed Tauri wrapper.
+/// Whole-message command argument for each reviewed atomic Tauri wrapper.
 ///
 /// Extraction borrows the complete invoke body without parsing it. Parsing happens only after the
 /// private fail-closed boundary is armed. This type deliberately implements neither Serde,
 /// `Clone`, nor `Debug`.
-pub(in crate::wallet) struct WalletInvokeRequest<'a> {
+pub(crate) struct WalletInvokeRequest<'a> {
     declared_command: &'static str,
     invoked_command: &'a str,
     body: &'a InvokeBody,
@@ -64,10 +65,10 @@ impl<'a, R: Runtime> CommandArg<'a, R> for WalletInvokeRequest<'a> {
     }
 }
 
-/// Command-shaped Rust adapter that remains inaccessible outside `crate::wallet`.
+/// Rust lifecycle boundary reached only by the atomic wrappers in `wallet::exposure`.
 ///
-/// There is intentionally no Tauri command attribute, invoke registration, permission,
-/// capability, frontend wrapper, or production exposure constructor in this module.
+/// This module intentionally has no direct Tauri command attribute. The exposure module owns the
+/// attributes and forwards complete invoke messages here without parsing or custody logic.
 pub(in crate::wallet) struct WalletLifecycleCommandBoundary {
     runtime: Arc<WalletRuntimeState>,
     adapters: Arc<WalletLifecycleAdapters>,
@@ -128,11 +129,11 @@ enum BoundaryPanicCheckpoint {
 
 impl WholeEnvelopeTransportPolicy {
     const fn production() -> Self {
-        // Tauri 2.11.5 normalizes JSON into a Value before Request extraction. Until an exact
-        // transport qualification proves duplicate textual keys unreachable or rejectable,
-        // production WalletExposureAuthority issuance is structurally unavailable.
+        // The exact Tauri 2.11.5/Wry/WebView2 transport was qualified across all 562 reviewed
+        // Layer B cases and its sealed evidence was independently accepted. This value changes
+        // only as part of the complete unpublished atomic twelve-command candidate.
         Self {
-            duplicate_key_rejection_proven: false,
+            duplicate_key_rejection_proven: true,
         }
     }
 
@@ -847,27 +848,21 @@ mod tests {
     }
 
     #[test]
-    fn production_transport_policy_structurally_blocks_exposure() {
+    fn production_transport_policy_accepts_the_qualified_duplicate_key_boundary() {
         let runtime = WalletRuntimeState::for_test();
         let policy = WholeEnvelopeTransportPolicy::production();
-        assert!(matches!(
-            WalletExposureAuthority::issue(&runtime, &policy),
-            Err(BoundaryError::ActivationUnavailable)
-        ));
+        assert!(WalletExposureAuthority::issue(&runtime, &policy).is_ok());
     }
 
     #[test]
-    fn production_activation_policy_also_blocks_exposure() {
+    fn production_activation_policy_satisfies_atomic_exposure() {
         let runtime = WalletRuntimeState::for_test_with_production_activation();
         let policy = WholeEnvelopeTransportPolicy::approved_for_test();
-        assert!(matches!(
-            WalletExposureAuthority::issue(&runtime, &policy),
-            Err(BoundaryError::ActivationUnavailable)
-        ));
+        assert!(WalletExposureAuthority::issue(&runtime, &policy).is_ok());
     }
 
     #[test]
-    fn private_production_boundary_returns_only_activation_unavailable() {
+    fn private_production_boundary_releases_only_public_status() {
         let directory = TempDir::new().unwrap();
         let runtime = Arc::new(WalletRuntimeState::for_test());
         let adapters = Arc::new(WalletLifecycleAdapters::for_test(
@@ -877,15 +872,18 @@ mod tests {
         let boundary =
             WalletLifecycleCommandBoundary::new_private(Arc::clone(&runtime), adapters, TEST_HWND);
         let empty = json_body(serde_json::json!({}));
-        let error = match boundary.run_fail_closed(request(GET_STATUS, &empty), |exposure| {
-            main_window_authority(&boundary, exposure)
-        }) {
-            Ok(_) => panic!("production boundary must remain unavailable"),
-            Err(error) => error,
-        };
+        let response = boundary
+            .run_fail_closed(request(GET_STATUS, &empty), |exposure| {
+                main_window_authority(&boundary, exposure)
+            })
+            .unwrap();
         assert_eq!(
-            error_json(error),
-            serde_json::json!({ "code": "wallet_activation_unavailable" })
+            response_json(response),
+            serde_json::json!({
+                "vault_exists": false,
+                "locked": true,
+                "account": null,
+            })
         );
     }
 
